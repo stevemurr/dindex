@@ -121,23 +121,15 @@ impl QueryCoordinator {
                 .filter_map(|c| c.node_id.parse().ok())
                 .collect();
 
-            info!(
-                "Semantic routing returned {} candidate nodes",
-                plan.candidate_nodes.len()
-            );
-
             // If no candidates from semantic routing, fall back to all connected peers
             if peer_ids.is_empty() {
-                info!("No semantic routing candidates, checking connected peers...");
                 match network.get_peers().await {
                     Ok(peers) => {
-                        info!("Found {} connected peers", peers.len());
                         peer_ids = peers.into_iter().map(|p| p.peer_id).collect();
                         if !peer_ids.is_empty() {
-                            info!(
-                                "Will query {} connected peers: {:?}",
-                                peer_ids.len(),
-                                peer_ids
+                            debug!(
+                                "No semantic routing candidates, querying all {} connected peers",
+                                peer_ids.len()
                             );
                         }
                     }
