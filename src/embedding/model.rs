@@ -7,7 +7,7 @@ use reqwest::Client;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Model registry with known models and their URLs
 pub struct ModelRegistry;

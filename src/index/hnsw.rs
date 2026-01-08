@@ -1,7 +1,7 @@
 //! HNSW index implementation using USearch
 
 use crate::config::IndexConfig;
-use crate::types::{ChunkId, Embedding, IndexedChunk};
+use crate::types::{ChunkId, Embedding};
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -20,7 +20,8 @@ pub struct VectorIndex {
     chunk_to_key: RwLock<HashMap<ChunkId, u64>>,
     /// Next available key
     next_key: AtomicU64,
-    /// Index configuration
+    /// Index configuration (reserved for future tuning)
+    #[allow(dead_code)]
     config: IndexConfig,
     /// Number of dimensions
     dimensions: usize,

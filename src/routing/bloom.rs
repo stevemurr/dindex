@@ -2,7 +2,7 @@
 //!
 //! Used to quickly eliminate irrelevant nodes before centroid comparison
 
-use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
+use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 /// Bloom filter implementation
 #[derive(Debug, Clone)]

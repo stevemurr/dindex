@@ -3,7 +3,7 @@
 //! Generates cluster centroids from node content for efficient routing
 
 use crate::types::{Embedding, NodeCentroid};
-use rand::{seq::SliceRandom, Rng, SeedableRng};
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use tracing::{debug, info};
 

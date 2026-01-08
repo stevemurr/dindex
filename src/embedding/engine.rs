@@ -2,11 +2,14 @@
 
 use crate::config::EmbeddingConfig;
 use crate::types::Embedding;
-use anyhow::{Context, Result};
-use ndarray::Array2;
-use std::path::Path;
+use anyhow::Result;
 use tokenizers::Tokenizer;
 use tracing::{debug, info};
+
+#[cfg(feature = "onnx")]
+use anyhow::Context;
+#[cfg(feature = "onnx")]
+use ndarray::Array2;
 
 #[cfg(feature = "onnx")]
 use ort::{
@@ -19,7 +22,8 @@ pub struct EmbeddingEngine {
     #[cfg(feature = "onnx")]
     /// ONNX session for inference
     session: Session,
-    /// Tokenizer for text preprocessing
+    /// Tokenizer for text preprocessing (used in ONNX mode)
+    #[allow(dead_code)]
     tokenizer: Tokenizer,
     /// Model configuration
     config: EmbeddingConfig,

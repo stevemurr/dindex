@@ -10,9 +10,7 @@ use dindex::{
     embedding::ModelManager,
     index::{ChunkStorage, VectorIndex},
     network::NetworkNode,
-    query::QueryCoordinator,
     retrieval::{Bm25Index, HybridIndexer, HybridRetriever},
-    routing::{AdvertisementBuilder, QueryRouter},
     types::{Document, Query},
 };
 use std::path::PathBuf;

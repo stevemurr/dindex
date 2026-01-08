@@ -2,9 +2,9 @@
 
 use crate::config::Config;
 use crate::embedding::EmbeddingEngine;
-use crate::network::{NetworkHandle, QueryRequest, QueryResponse};
+use crate::network::NetworkHandle;
 use crate::retrieval::{
-    reciprocal_rank_fusion, to_ranked_results, FusedResult, HybridRetriever, RrfConfig, SimpleReranker,
+    reciprocal_rank_fusion, HybridRetriever, RrfConfig, SimpleReranker,
 };
 use crate::routing::{CandidateNode, QueryRouter};
 use crate::types::{Embedding, NodeId, Query, SearchResult};
@@ -181,7 +181,7 @@ impl QueryCoordinator {
     }
 
     /// Create a query execution plan
-    fn create_plan(&self, query: &Query, embedding: &Embedding) -> Result<QueryPlan> {
+    fn create_plan(&self, _query: &Query, embedding: &Embedding) -> Result<QueryPlan> {
         // Find candidate nodes via semantic routing
         let lsh_signature = self.router.hash_query(embedding);
         let candidate_nodes = self.router.find_candidates(embedding, Some(&lsh_signature));
@@ -257,7 +257,7 @@ impl QueryCoordinator {
     fn estimate_quality(
         &self,
         responding: &[NodeId],
-        timed_out: &[NodeId],
+        _timed_out: &[NodeId],
         plan: &QueryPlan,
     ) -> f32 {
         let total_expected = plan.candidate_nodes.len() + if plan.query_local { 1 } else { 0 };
