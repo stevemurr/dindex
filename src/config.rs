@@ -21,6 +21,9 @@ pub struct Config {
     /// Scraping configuration
     #[serde(default)]
     pub scraping: ScrapingConfig,
+    /// Import configuration
+    #[serde(default)]
+    pub import: BulkImportConfig,
 }
 
 impl Default for Config {
@@ -33,6 +36,7 @@ impl Default for Config {
             retrieval: RetrievalConfig::default(),
             routing: RoutingConfig::default(),
             scraping: ScrapingConfig::default(),
+            import: BulkImportConfig::default(),
         }
     }
 }
@@ -276,6 +280,39 @@ impl Default for ScrapingConfig {
             url_bloom_size: 10_000_000,
             content_cache_size: 100_000,
             simhash_distance_threshold: 3,
+        }
+    }
+}
+
+/// Bulk import configuration for offline dumps
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkImportConfig {
+    /// Default batch size for indexing
+    pub batch_size: usize,
+    /// Enable checkpointing for resume support
+    pub enable_checkpoints: bool,
+    /// Checkpoint directory
+    pub checkpoint_dir: PathBuf,
+    /// Default namespace filter for Wikipedia (0 = main articles only)
+    pub wikipedia_namespaces: Vec<i32>,
+    /// Minimum content length to import (skip very short articles)
+    pub min_content_length: usize,
+    /// Enable content deduplication
+    pub deduplicate: bool,
+    /// Checkpoint interval (every N documents)
+    pub checkpoint_interval: usize,
+}
+
+impl Default for BulkImportConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 100,
+            enable_checkpoints: true,
+            checkpoint_dir: PathBuf::from(".dindex/checkpoints"),
+            wikipedia_namespaces: vec![0], // Main namespace only
+            min_content_length: 100,
+            deduplicate: true,
+            checkpoint_interval: 1000,
         }
     }
 }

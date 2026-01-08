@@ -8,6 +8,7 @@ use dindex::{
     chunking::TextSplitter,
     config::Config,
     embedding::ModelManager,
+    import::{DumpFormat, ImportCheckpoint, ImportCoordinatorBuilder, WikimediaSource},
     index::{ChunkStorage, VectorIndex},
     network::NetworkNode,
     retrieval::{Bm25Index, HybridIndexer, HybridRetriever},
@@ -144,6 +145,62 @@ enum Commands {
 
     /// Show scraping statistics
     ScrapeStats,
+
+    /// Import content from offline dumps (Wikipedia, ZIM, etc.)
+    Import {
+        /// Path to dump file
+        #[arg(required = true)]
+        path: PathBuf,
+
+        /// Dump format (auto-detected if not specified)
+        #[arg(short, long, value_enum)]
+        format: Option<CliDumpFormat>,
+
+        /// Batch size for indexing
+        #[arg(long, default_value = "100")]
+        batch_size: usize,
+
+        /// Resume from checkpoint
+        #[arg(long)]
+        resume: bool,
+
+        /// Checkpoint file path
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
+
+        /// Skip content deduplication
+        #[arg(long)]
+        no_dedup: bool,
+
+        /// Maximum documents to import
+        #[arg(long)]
+        max_docs: Option<usize>,
+
+        /// Minimum content length (skip shorter documents)
+        #[arg(long, default_value = "100")]
+        min_length: usize,
+
+        /// Quiet mode (no progress output)
+        #[arg(short, long)]
+        quiet: bool,
+    },
+
+    /// Show import checkpoint status
+    ImportStatus {
+        /// Path to checkpoint file
+        checkpoint: PathBuf,
+    },
+}
+
+/// CLI dump format enum (mirrors DumpFormat but with clap support)
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CliDumpFormat {
+    /// Wikimedia XML dump (.xml.bz2)
+    WikimediaXml,
+    /// ZIM file (Kiwix format)
+    Zim,
+    /// WARC web archive
+    Warc,
 }
 
 #[tokio::main]
@@ -213,6 +270,25 @@ async fn main() -> Result<()> {
         }
         Commands::ScrapeStats => {
             show_scrape_stats(config).await
+        }
+        Commands::Import {
+            path,
+            format,
+            batch_size,
+            resume,
+            checkpoint,
+            no_dedup,
+            max_docs,
+            min_length,
+            quiet,
+        } => {
+            import_dump(
+                config, path, format, batch_size, resume, checkpoint, no_dedup, max_docs, min_length, quiet,
+            )
+            .await
+        }
+        Commands::ImportStatus { checkpoint } => {
+            show_import_status(checkpoint).await
         }
     }
 }
@@ -779,3 +855,159 @@ async fn show_scrape_stats(config: Config) -> Result<()> {
 
 // Add walkdir and toml to dependencies
 use walkdir;
+
+async fn import_dump(
+    config: Config,
+    path: PathBuf,
+    format: Option<CliDumpFormat>,
+    batch_size: usize,
+    resume: bool,
+    checkpoint: Option<PathBuf>,
+    no_dedup: bool,
+    max_docs: Option<usize>,
+    min_length: usize,
+    quiet: bool,
+) -> Result<()> {
+    // Check file exists
+    if !path.exists() {
+        anyhow::bail!("Dump file not found: {}", path.display());
+    }
+
+    // Detect or use specified format
+    let detected_format = format
+        .map(|f| match f {
+            CliDumpFormat::WikimediaXml => DumpFormat::WikimediaXml,
+            CliDumpFormat::Zim => DumpFormat::Zim,
+            CliDumpFormat::Warc => DumpFormat::Warc,
+        })
+        .or_else(|| DumpFormat::detect(&path));
+
+    let Some(dump_format) = detected_format else {
+        anyhow::bail!(
+            "Could not detect dump format for: {}. Specify format with --format",
+            path.display()
+        );
+    };
+
+    info!("Importing from: {} (format: {:?})", path.display(), dump_format);
+
+    // Determine checkpoint path
+    let checkpoint_path = checkpoint.or_else(|| {
+        if config.import.enable_checkpoints {
+            let filename = path.file_name()?.to_str()?;
+            Some(config.import.checkpoint_dir.join(format!("{}.checkpoint", filename)))
+        } else {
+            None
+        }
+    });
+
+    // Check for existing checkpoint if resuming
+    let existing_checkpoint = if resume {
+        checkpoint_path.as_ref().and_then(|p| {
+            if p.exists() {
+                ImportCheckpoint::load(p).ok()
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+
+    if let Some(ref cp) = existing_checkpoint {
+        info!(
+            "Resuming from checkpoint: {} documents, {} bytes",
+            cp.documents_processed, cp.byte_position
+        );
+    }
+
+    // Create import coordinator
+    let mut coordinator = ImportCoordinatorBuilder::new(&config.node.data_dir)
+        .with_batch_size(batch_size)
+        .with_dedup(!no_dedup)
+        .with_min_content_length(min_length)
+        .with_max_documents(max_docs)
+        .with_embedding_dims(config.embedding.dimensions)
+        .with_chunking_config(config.chunking.clone())
+        .with_index_config(config.index.clone())
+        .with_quiet(quiet)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create import coordinator: {}", e))?;
+
+    if let Some(ref cp_path) = checkpoint_path {
+        // Ensure checkpoint directory exists
+        if let Some(parent) = cp_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    // Run import based on format
+    let stats = match dump_format {
+        DumpFormat::WikimediaXml => {
+            let mut source = WikimediaSource::open(&path)
+                .map_err(|e| anyhow::anyhow!("Failed to open dump: {}", e))?;
+
+            // Configure namespace filter from config
+            source = source.with_namespaces(Some(config.import.wikipedia_namespaces.clone()));
+
+            if let Some(cp) = existing_checkpoint {
+                coordinator
+                    .resume(source, &cp)
+                    .map_err(|e| anyhow::anyhow!("Import failed: {}", e))?
+            } else {
+                coordinator
+                    .import(source)
+                    .map_err(|e| anyhow::anyhow!("Import failed: {}", e))?
+            }
+        }
+        DumpFormat::Zim => {
+            anyhow::bail!("ZIM format is not yet supported. Coming soon!");
+        }
+        DumpFormat::Warc => {
+            anyhow::bail!("WARC format is not yet supported. Coming soon!");
+        }
+        DumpFormat::PlainText => {
+            anyhow::bail!("Plain text import is not supported via this command. Use 'dindex index' instead.");
+        }
+    };
+
+    // Print summary
+    if !quiet {
+        println!("\nImport Complete!");
+        println!("================");
+        println!("Documents imported: {}", stats.documents_imported);
+        println!("Documents skipped:  {}", stats.documents_skipped);
+        println!("Documents errored:  {}", stats.documents_errored);
+        println!("Chunks created:     {}", stats.chunks_created);
+        println!("Processing rate:    {:.1} docs/sec", stats.docs_per_second);
+        println!("Elapsed time:       {:.1}s", stats.elapsed_seconds);
+        println!("\nIndex saved to: {}", config.node.data_dir.display());
+    }
+
+    Ok(())
+}
+
+async fn show_import_status(checkpoint_path: PathBuf) -> Result<()> {
+    if !checkpoint_path.exists() {
+        anyhow::bail!("Checkpoint file not found: {}", checkpoint_path.display());
+    }
+
+    let checkpoint = ImportCheckpoint::load(&checkpoint_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load checkpoint: {}", e))?;
+
+    println!("\nImport Checkpoint Status");
+    println!("========================");
+    println!("Source file:         {}", checkpoint.source_path.display());
+    println!("Byte position:       {} MB", checkpoint.byte_position / 1_000_000);
+    println!("Documents processed: {}", checkpoint.documents_processed);
+    println!("Documents imported:  {}", checkpoint.documents_imported);
+    println!("Timestamp:           {}", checkpoint.timestamp.format("%Y-%m-%d %H:%M:%S UTC"));
+    println!("\nTo resume import, run:");
+    println!(
+        "  dindex import {} --resume --checkpoint {}",
+        checkpoint.source_path.display(),
+        checkpoint_path.display()
+    );
+
+    Ok(())
+}
