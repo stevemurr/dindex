@@ -194,6 +194,11 @@ impl IndexManager {
         &self.config.node.data_dir
     }
 
+    /// Get the hybrid retriever for external use (e.g., QueryExecutor)
+    pub fn retriever(&self) -> Arc<HybridRetriever> {
+        self.retriever.clone()
+    }
+
     /// Generate a deterministic embedding for content
     /// TODO: Replace with actual embedding engine
     fn generate_embedding(&self, content: &str) -> Vec<f32> {

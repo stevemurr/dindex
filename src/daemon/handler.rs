@@ -6,11 +6,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::query::QueryCoordinator;
 use crate::types::Chunk;
 
 use super::index_manager::IndexManager;
@@ -34,6 +36,9 @@ pub struct RequestHandler {
 
     /// Active indexing streams (stream_id -> stream state)
     active_streams: DashMap<Uuid, IndexStream>,
+
+    /// Optional query coordinator for distributed search
+    query_coordinator: RwLock<Option<Arc<QueryCoordinator>>>,
 }
 
 impl RequestHandler {
@@ -58,7 +63,13 @@ impl RequestHandler {
             start_time: Instant::now(),
             shutdown_tx,
             active_streams: DashMap::new(),
+            query_coordinator: RwLock::new(None),
         }
+    }
+
+    /// Set the query coordinator for distributed search
+    pub fn set_query_coordinator(&self, coordinator: Arc<QueryCoordinator>) {
+        *self.query_coordinator.write() = Some(coordinator);
     }
 
     /// Handle an incoming request and return a response
@@ -105,14 +116,41 @@ impl RequestHandler {
     // ============ Query Handlers ============
 
     async fn handle_search(&self, query: String, top_k: usize) -> Response {
-        match self.index_manager.search(&query, top_k) {
-            Ok((results, query_time_ms)) => Response::SearchResults {
-                results,
-                query_time_ms,
-            },
-            Err(e) => {
-                error!("Search failed: {}", e);
-                Response::error(ErrorCode::SearchFailed, e.to_string())
+        // Check if we have a query coordinator for distributed search
+        let coordinator = self.query_coordinator.read().clone();
+
+        if let Some(coordinator) = coordinator {
+            // Distributed search via QueryCoordinator
+            let query_obj = crate::types::Query::new(query, top_k);
+            match coordinator.execute(&query_obj).await {
+                Ok(aggregated) => {
+                    info!(
+                        "Distributed search: {} results from {} nodes (quality: {:.2})",
+                        aggregated.results.len(),
+                        aggregated.responding_nodes.len(),
+                        aggregated.quality_estimate
+                    );
+                    Response::SearchResults {
+                        results: aggregated.results,
+                        query_time_ms: aggregated.total_time_ms,
+                    }
+                }
+                Err(e) => {
+                    error!("Distributed search failed: {}", e);
+                    Response::error(ErrorCode::SearchFailed, e.to_string())
+                }
+            }
+        } else {
+            // Local-only search
+            match self.index_manager.search(&query, top_k) {
+                Ok((results, query_time_ms)) => Response::SearchResults {
+                    results,
+                    query_time_ms,
+                },
+                Err(e) => {
+                    error!("Search failed: {}", e);
+                    Response::error(ErrorCode::SearchFailed, e.to_string())
+                }
             }
         }
     }

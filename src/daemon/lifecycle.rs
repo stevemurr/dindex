@@ -28,6 +28,7 @@ pub struct Daemon {
     config: Config,
     index_manager: Arc<IndexManager>,
     write_pipeline: Arc<WritePipeline>,
+    handler: Arc<RequestHandler>,
     server: IpcServer,
     shutdown_tx: broadcast::Sender<()>,
     pid_file_path: PathBuf,
@@ -68,7 +69,7 @@ impl Daemon {
 
         // Create IPC server
         let socket_path = IpcServer::default_socket_path();
-        let server = IpcServer::new(socket_path, handler);
+        let server = IpcServer::new(socket_path, handler.clone());
 
         info!("Daemon initialized");
         info!("Data directory: {}", config.node.data_dir.display());
@@ -78,6 +79,7 @@ impl Daemon {
             config,
             index_manager,
             write_pipeline,
+            handler,
             server,
             shutdown_tx,
             pid_file_path,
@@ -95,12 +97,7 @@ impl Daemon {
         let server_handle = {
             let shutdown_rx = self.shutdown_tx.subscribe();
             let socket_path = self.server.socket_path().to_path_buf();
-            let handler = Arc::new(RequestHandler::new(
-                self.index_manager.clone(),
-                self.write_pipeline.clone(),
-                self.config.clone(),
-                self.shutdown_tx.clone(),
-            ));
+            let handler = self.handler.clone();
 
             let server = IpcServer::new(socket_path, handler);
             tokio::spawn(async move {
@@ -154,6 +151,11 @@ impl Daemon {
     /// Get the index manager
     pub fn index_manager(&self) -> Arc<IndexManager> {
         self.index_manager.clone()
+    }
+
+    /// Get the request handler
+    pub fn request_handler(&self) -> Arc<RequestHandler> {
+        self.handler.clone()
     }
 
     /// Acquire single-instance lock via PID file

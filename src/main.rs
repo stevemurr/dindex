@@ -13,8 +13,10 @@ use dindex::{
     embedding::{check_model_exists, init_embedding_engine, model_not_found_error, ModelManager},
     import::{DumpFormat, ImportCheckpoint, ImportCoordinatorBuilder, WikimediaSource},
     index::{ChunkStorage, DocumentRegistry, VectorIndex},
-    network::NetworkNode,
+    network::{NetworkEvent, NetworkNode, QueryResponse},
+    query::{QueryCoordinator, QueryExecutor},
     retrieval::{Bm25Index, HybridIndexer, HybridRetriever},
+    routing::QueryRouter,
     scraping::{
         coordinator::{ScrapingConfig as ScrapingCoordConfig, ScrapingCoordinator},
         extractor::ExtractorConfig,
@@ -425,7 +427,7 @@ async fn start_node(
     mut config: Config,
     listen: Option<String>,
     bootstrap: Vec<String>,
-    foreground: bool,
+    _foreground: bool,
 ) -> Result<()> {
     if let Some(addr) = listen {
         config.node.listen_addr = addr;
@@ -439,10 +441,35 @@ async fn start_node(
     let daemon = Daemon::start(config.clone()).await?;
     info!("Daemon started");
 
+    // Create QueryExecutor for handling incoming peer queries
+    let query_executor = Arc::new(QueryExecutor::new(
+        daemon.index_manager().retriever(),
+        None, // No embedding engine for now - queries should include embeddings
+    ));
+
     // Initialize P2P components
     let (node, handle, mut event_rx) = NetworkNode::new(&config.node).await?;
 
     info!("Node started with peer ID: {}", handle.local_peer_id);
+
+    // Create QueryRouter for semantic routing
+    let query_router = Arc::new(QueryRouter::new(
+        config.embedding.dimensions,
+        &config.routing,
+    ));
+
+    // Create QueryCoordinator for distributed search
+    let query_coordinator = Arc::new(QueryCoordinator::new(
+        Some(daemon.index_manager().retriever()),
+        None, // Embedding engine - queries will include embeddings
+        query_router,
+        Some(handle.clone()),
+        config.clone(),
+    ));
+
+    // Set the coordinator on the request handler for distributed search
+    daemon.request_handler().set_query_coordinator(query_coordinator);
+    info!("Distributed search enabled via QueryCoordinator");
 
     // Run the P2P node in background
     let node_config = config.node.clone();
@@ -452,10 +479,78 @@ async fn start_node(
         }
     });
 
+    // Spawn network event handler for incoming queries
+    let network_handle = handle.clone();
+    let executor = query_executor.clone();
+    let local_peer_id = handle.local_peer_id.to_string();
+    tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                NetworkEvent::QueryReceived { peer_id, request } => {
+                    info!(
+                        "Received query from {}: '{}'",
+                        peer_id,
+                        truncate_query(&request.query.text, 50)
+                    );
+
+                    // Execute the query locally
+                    match executor.execute_request(&request) {
+                        Ok(result) => {
+                            info!(
+                                "Query executed: {} results in {}ms",
+                                result.results.len(),
+                                result.processing_time_ms
+                            );
+
+                            // Send response back
+                            let response = QueryResponse::new(
+                                request.request_id.clone(),
+                                result.results,
+                            )
+                            .with_timing(result.processing_time_ms)
+                            .with_responder(local_peer_id.clone());
+
+                            if let Err(e) = network_handle.send_response(response).await {
+                                tracing::error!("Failed to send query response: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Query execution failed: {}", e);
+                            // Send empty response on error
+                            let response = QueryResponse::new(request.request_id.clone(), vec![])
+                                .with_responder(local_peer_id.clone());
+                            let _ = network_handle.send_response(response).await;
+                        }
+                    }
+                }
+                NetworkEvent::PeerConnected(peer_id) => {
+                    info!("Peer connected: {}", peer_id);
+                }
+                NetworkEvent::PeerDisconnected(peer_id) => {
+                    info!("Peer disconnected: {}", peer_id);
+                }
+                NetworkEvent::AdvertisementReceived(advert) => {
+                    tracing::debug!(
+                        "Received advertisement from node with {} centroids",
+                        advert.centroids.len()
+                    );
+                }
+            }
+        }
+    });
+
     // Run daemon (this blocks until shutdown)
     daemon.run().await?;
 
     Ok(())
+}
+
+fn truncate_query(s: &str, max_len: usize) -> String {
+    if s.len() > max_len {
+        format!("{}...", &s[..max_len - 3])
+    } else {
+        s.to_string()
+    }
 }
 
 async fn index_document(
