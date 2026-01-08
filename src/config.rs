@@ -18,6 +18,9 @@ pub struct Config {
     pub retrieval: RetrievalConfig,
     /// Routing configuration
     pub routing: RoutingConfig,
+    /// Scraping configuration
+    #[serde(default)]
+    pub scraping: ScrapingConfig,
 }
 
 impl Default for Config {
@@ -29,6 +32,7 @@ impl Default for Config {
             chunking: ChunkingConfig::default(),
             retrieval: RetrievalConfig::default(),
             routing: RoutingConfig::default(),
+            scraping: ScrapingConfig::default(),
         }
     }
 }
@@ -205,6 +209,73 @@ impl Default for RoutingConfig {
             lsh_num_hashes: 8,
             bloom_bits_per_item: 10,
             candidate_nodes: 5,
+        }
+    }
+}
+
+/// Web scraping configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScrapingConfig {
+    /// Enable scraping functionality
+    pub enabled: bool,
+    /// Maximum concurrent fetches
+    pub max_concurrent_fetches: usize,
+    /// Maximum crawl depth from seed URLs
+    pub max_depth: u8,
+    /// Stay within seed domains only
+    pub stay_on_domain: bool,
+    /// URL patterns to include (simple substring matching)
+    pub include_patterns: Vec<String>,
+    /// URL patterns to exclude (simple substring matching)
+    pub exclude_patterns: Vec<String>,
+    /// Maximum pages to crawl per domain
+    pub max_pages_per_domain: usize,
+    /// Politeness delay between requests to same domain (milliseconds)
+    pub politeness_delay_ms: u64,
+    /// Default request timeout (seconds)
+    pub request_timeout_secs: u64,
+    /// User agent string
+    pub user_agent: String,
+    /// Enable headless browser for JS-heavy sites
+    pub enable_js_rendering: bool,
+    /// robots.txt cache TTL (seconds)
+    pub robots_cache_ttl_secs: u64,
+    /// URL deduplication bloom filter size
+    pub url_bloom_size: usize,
+    /// Content deduplication cache size
+    pub content_cache_size: usize,
+    /// SimHash maximum Hamming distance for near-duplicate detection
+    pub simhash_distance_threshold: u32,
+}
+
+impl Default for ScrapingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_concurrent_fetches: 10,
+            max_depth: 3,
+            stay_on_domain: false,
+            include_patterns: Vec::new(),
+            exclude_patterns: vec![
+                ".pdf".to_string(),
+                ".jpg".to_string(),
+                ".png".to_string(),
+                ".gif".to_string(),
+                ".zip".to_string(),
+                ".tar".to_string(),
+                "/login".to_string(),
+                "/logout".to_string(),
+                "/admin".to_string(),
+            ],
+            max_pages_per_domain: 1000,
+            politeness_delay_ms: 1000,
+            request_timeout_secs: 30,
+            user_agent: "DecentralizedSearchBot/1.0 (+https://github.com/dindex)".to_string(),
+            enable_js_rendering: false,
+            robots_cache_ttl_secs: 86400, // 24 hours
+            url_bloom_size: 10_000_000,
+            content_cache_size: 100_000,
+            simhash_distance_threshold: 3,
         }
     }
 }
