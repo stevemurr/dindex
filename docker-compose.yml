@@ -1,0 +1,84 @@
+services:
+  dindex:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Enable ONNX support for embedding inference
+        # Uncomment to enable: FEATURES: "onnx"
+        FEATURES: ""
+    image: dindex:latest
+    container_name: dindex
+
+    # Run as P2P node by default
+    command: ["start", "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1"]
+
+    ports:
+      # P2P QUIC port
+      - "4001:4001/udp"
+      # P2P TCP fallback
+      - "4001:4001/tcp"
+
+    volumes:
+      # Persistent data storage
+      - dindex-data:/data
+      # Optional: mount local documents for indexing
+      # - ./documents:/documents:ro
+
+    environment:
+      - RUST_LOG=info
+      - DINDEX_DATA_DIR=/data
+
+    restart: unless-stopped
+
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  # Optional: Initialize and download models
+  dindex-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dindex:latest
+    container_name: dindex-init
+
+    command: ["init", "--data-dir", "/data"]
+
+    volumes:
+      - dindex-data:/data
+
+    environment:
+      - RUST_LOG=info
+      - DINDEX_DATA_DIR=/data
+
+    profiles:
+      - init
+
+  # Optional: Download embedding model
+  dindex-download-model:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dindex:latest
+    container_name: dindex-download-model
+
+    command: ["download", "nomic-embed-text-v1.5"]
+
+    volumes:
+      - dindex-data:/data
+
+    environment:
+      - RUST_LOG=info
+      - DINDEX_DATA_DIR=/data
+
+    profiles:
+      - setup
+
+volumes:
+  dindex-data:
+    driver: local
