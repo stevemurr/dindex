@@ -1,29 +1,22 @@
 //! Embedding engine implementation
+//!
+//! Requires the `onnx` feature (enabled by default) for real embeddings.
 
 use crate::config::EmbeddingConfig;
 use crate::types::Embedding;
-use anyhow::Result;
+use anyhow::{Context, Result};
+use ndarray::Array2;
+use ort::{execution_providers::CPUExecutionProvider, session::Session};
 use tokenizers::Tokenizer;
 use tracing::{debug, info};
 
-#[cfg(feature = "onnx")]
-use anyhow::Context;
-#[cfg(feature = "onnx")]
-use ndarray::Array2;
-
-#[cfg(feature = "onnx")]
-use ort::{
-    execution_providers::CPUExecutionProvider,
-    session::Session,
-};
-
 /// Embedding engine for generating vector embeddings from text
+///
+/// Uses ONNX Runtime for CPU-optimized inference.
 pub struct EmbeddingEngine {
-    #[cfg(feature = "onnx")]
     /// ONNX session for inference
     session: Session,
-    /// Tokenizer for text preprocessing (used in ONNX mode)
-    #[allow(dead_code)]
+    /// Tokenizer for text preprocessing
     tokenizer: Tokenizer,
     /// Model configuration
     config: EmbeddingConfig,
@@ -31,9 +24,14 @@ pub struct EmbeddingEngine {
 
 impl EmbeddingEngine {
     /// Create a new embedding engine
-    #[cfg(feature = "onnx")]
+    ///
+    /// Requires the model and tokenizer files to be downloaded first.
+    /// Use `dindex download <model-name>` to download the required files.
     pub fn new(config: &EmbeddingConfig) -> Result<Self> {
-        info!("Initializing embedding engine with model: {}", config.model_name);
+        info!(
+            "Initializing embedding engine with model: {}",
+            config.model_name
+        );
 
         // Get model and tokenizer paths
         let model_path = config
@@ -68,48 +66,16 @@ impl EmbeddingEngine {
         })
     }
 
-    /// Create a new embedding engine (stub when ONNX is not available)
-    #[cfg(not(feature = "onnx"))]
-    pub fn new(config: &EmbeddingConfig) -> Result<Self> {
-        info!("Initializing embedding engine (ONNX disabled): {}", config.model_name);
-
-        let tokenizer_path = config
-            .tokenizer_path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Tokenizer path not specified"))?;
-
-        let tokenizer = Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
-
-        Ok(Self {
-            tokenizer,
-            config: config.clone(),
-        })
-    }
-
-    /// Create a placeholder engine for testing (without actual model)
-    pub fn placeholder(config: &EmbeddingConfig) -> Result<Self> {
-        let tokenizer = tokenizers::Tokenizer::new(
-            tokenizers::models::wordpiece::WordPiece::default()
-        );
-
-        Ok(Self {
-            #[cfg(feature = "onnx")]
-            session: unsafe { std::mem::zeroed() },
-            tokenizer,
-            config: config.clone(),
-        })
-    }
-
     /// Generate embedding for a single text
     pub fn embed(&self, text: &str) -> Result<Embedding> {
         let embeddings = self.embed_batch(&[text.to_string()])?;
-        embeddings.into_iter().next()
+        embeddings
+            .into_iter()
+            .next()
             .ok_or_else(|| anyhow::anyhow!("No embedding generated"))
     }
 
     /// Generate embeddings for a batch of texts
-    #[cfg(feature = "onnx")]
     pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
         if texts.is_empty() {
             return Ok(Vec::new());
@@ -156,12 +122,9 @@ impl EmbeddingEngine {
         }
 
         // Create input tensors
-        let input_ids_array =
-            Array2::from_shape_vec((batch_size, max_len), input_ids)?;
-        let attention_mask_array =
-            Array2::from_shape_vec((batch_size, max_len), attention_mask)?;
-        let token_type_ids_array =
-            Array2::from_shape_vec((batch_size, max_len), token_type_ids)?;
+        let input_ids_array = Array2::from_shape_vec((batch_size, max_len), input_ids)?;
+        let attention_mask_array = Array2::from_shape_vec((batch_size, max_len), attention_mask)?;
+        let token_type_ids_array = Array2::from_shape_vec((batch_size, max_len), token_type_ids)?;
 
         // Run inference
         let outputs = self.session.run(ort::inputs![
@@ -208,31 +171,7 @@ impl EmbeddingEngine {
         Ok(normalized)
     }
 
-    /// Generate embeddings for a batch of texts (stub when ONNX is not available)
-    #[cfg(not(feature = "onnx"))]
-    pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
-        debug!("Generating placeholder embeddings for {} texts (ONNX disabled)", texts.len());
-
-        // Generate deterministic pseudo-embeddings based on content
-        let embeddings: Vec<Embedding> = texts
-            .iter()
-            .map(|text| {
-                let hash = xxhash_rust::xxh3::xxh3_64(text.as_bytes());
-                let embedding: Vec<f32> = (0..self.config.dimensions)
-                    .map(|i| {
-                        let val = ((hash.wrapping_add(i as u64) % 1000) as f32 / 500.0) - 1.0;
-                        val
-                    })
-                    .collect();
-                normalize_embedding(&embedding)
-            })
-            .collect();
-
-        Ok(embeddings)
-    }
-
     /// Mean pooling with attention mask
-    #[cfg(feature = "onnx")]
     fn mean_pool(
         &self,
         output: &ndarray::ArrayViewD<f32>,
