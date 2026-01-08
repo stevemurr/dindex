@@ -6,6 +6,7 @@
 //! - Vector indexing with USearch (HNSW)
 //! - Hybrid retrieval (Dense + BM25 + RRF fusion)
 //! - Semantic routing via content centroids and LSH
+//! - Distributed web scraping with polite crawling
 
 pub mod chunking;
 pub mod config;
@@ -15,6 +16,7 @@ pub mod network;
 pub mod query;
 pub mod retrieval;
 pub mod routing;
+pub mod scraping;
 pub mod types;
 
 pub use config::Config;

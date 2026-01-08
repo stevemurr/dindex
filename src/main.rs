@@ -11,12 +11,20 @@ use dindex::{
     index::{ChunkStorage, VectorIndex},
     network::NetworkNode,
     retrieval::{Bm25Index, HybridIndexer, HybridRetriever},
+    scraping::{
+        coordinator::{ScrapingConfig as ScrapingCoordConfig, ScrapingCoordinator},
+        extractor::ExtractorConfig,
+        fetcher::FetchConfig,
+        politeness::PolitenessConfig,
+    },
     types::{Document, Query},
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
+use url::Url;
 
 #[derive(Parser)]
 #[command(name = "dindex")]
@@ -106,6 +114,36 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+
+    /// Scrape URLs and index content
+    Scrape {
+        /// Seed URLs to start scraping from
+        #[arg(required = true)]
+        urls: Vec<String>,
+
+        /// Maximum crawl depth
+        #[arg(short, long, default_value = "2")]
+        depth: u8,
+
+        /// Stay within seed domains only
+        #[arg(short, long)]
+        stay_on_domain: bool,
+
+        /// Maximum pages to scrape
+        #[arg(short, long, default_value = "100")]
+        max_pages: usize,
+
+        /// Delay between requests in milliseconds
+        #[arg(long, default_value = "1000")]
+        delay_ms: u64,
+
+        /// Index scraped content
+        #[arg(long, default_value = "true")]
+        index: bool,
+    },
+
+    /// Show scraping statistics
+    ScrapeStats,
 }
 
 #[tokio::main]
@@ -162,6 +200,19 @@ async fn main() -> Result<()> {
         }
         Commands::Init { path } => {
             init_config(path).await
+        }
+        Commands::Scrape {
+            urls,
+            depth,
+            stay_on_domain,
+            max_pages,
+            delay_ms,
+            index,
+        } => {
+            scrape_urls(config, urls, depth, stay_on_domain, max_pages, delay_ms, index).await
+        }
+        Commands::ScrapeStats => {
+            show_scrape_stats(config).await
         }
     }
 }
@@ -523,6 +574,207 @@ fn truncate_content(s: &str, max_len: usize) -> String {
     } else {
         s
     }
+}
+
+async fn scrape_urls(
+    config: Config,
+    url_strings: Vec<String>,
+    max_depth: u8,
+    stay_on_domain: bool,
+    max_pages: usize,
+    delay_ms: u64,
+    should_index: bool,
+) -> Result<()> {
+    info!("Starting web scraper...");
+
+    // Parse URLs
+    let seeds: Vec<Url> = url_strings
+        .iter()
+        .filter_map(|s| {
+            Url::parse(s)
+                .or_else(|_| Url::parse(&format!("https://{}", s)))
+                .ok()
+        })
+        .collect();
+
+    if seeds.is_empty() {
+        anyhow::bail!("No valid URLs provided");
+    }
+
+    info!("Seed URLs: {:?}", seeds.iter().map(|u| u.as_str()).collect::<Vec<_>>());
+
+    // Create scraping config
+    let scraping_config = ScrapingCoordConfig {
+        enabled: true,
+        max_concurrent_fetches: config.scraping.max_concurrent_fetches,
+        max_depth,
+        stay_on_domain,
+        include_patterns: config.scraping.include_patterns.clone(),
+        exclude_patterns: config.scraping.exclude_patterns.clone(),
+        max_pages_per_domain: max_pages,
+        scrape_interval: Duration::from_millis(100),
+        politeness: PolitenessConfig {
+            user_agent: config.scraping.user_agent.clone(),
+            default_delay: Duration::from_millis(delay_ms),
+            min_delay: Duration::from_millis(delay_ms / 2),
+            max_delay: Duration::from_secs(30),
+            cache_size: 10000,
+            request_timeout: Duration::from_secs(config.scraping.request_timeout_secs),
+        },
+        fetch: FetchConfig {
+            user_agent: config.scraping.user_agent.clone(),
+            timeout: Duration::from_secs(config.scraping.request_timeout_secs),
+            connect_timeout: Duration::from_secs(10),
+            max_content_size: 10 * 1024 * 1024,
+            max_redirects: 10,
+            min_text_ratio: 0.1,
+            enable_js_rendering: config.scraping.enable_js_rendering,
+            connections_per_host: 10,
+        },
+        extractor: ExtractorConfig::default(),
+    };
+
+    // Create coordinator
+    let peer_id = format!("scraper_{}", uuid::Uuid::new_v4());
+    let mut coordinator = ScrapingCoordinator::new(scraping_config, peer_id)?;
+
+    // Add seed URLs
+    coordinator.add_seeds(seeds).await;
+
+    // Initialize indexing components if needed
+    let (indexer, vector_index, chunk_storage) = if should_index {
+        let index_path = config.node.data_dir.join("vector.index");
+        let vi = Arc::new(VectorIndex::new(config.embedding.dimensions, &config.index)?);
+        let bm25_path = config.node.data_dir.join("bm25");
+        let bm25_index = Arc::new(Bm25Index::new(&bm25_path)?);
+        let cs = Arc::new(ChunkStorage::new(&config.node.data_dir)?);
+        let idx = HybridIndexer::new(vi.clone(), bm25_index, cs.clone());
+        (Some(idx), Some(vi), Some(cs))
+    } else {
+        (None, None, None)
+    };
+
+    let splitter = TextSplitter::new(config.chunking.clone());
+
+    // Process URLs
+    let mut pages_scraped = 0;
+    let mut pages_indexed = 0;
+
+    println!("\nScraping progress:");
+    println!("==================");
+
+    while pages_scraped < max_pages {
+        let next_url = coordinator.get_next_url().await;
+
+        match next_url {
+            Some(scored_url) => {
+                let result = coordinator.process_url(&scored_url.url).await;
+
+                if result.success {
+                    pages_scraped += 1;
+
+                    let word_count = result.content.as_ref().map(|c| c.word_count).unwrap_or(0);
+                    let urls_found = result.discovered_urls.len();
+
+                    println!(
+                        "[{}/{}] {} - {} words, {} links found",
+                        pages_scraped,
+                        max_pages,
+                        truncate_content(result.url.as_str(), 60),
+                        word_count,
+                        urls_found
+                    );
+
+                    // Add discovered URLs
+                    coordinator
+                        .add_discovered_urls(result.discovered_urls, scored_url.depth)
+                        .await;
+
+                    // Index content if requested
+                    if let (Some(ref indexer), Some(content), Some(metadata)) =
+                        (&indexer, result.content, result.metadata)
+                    {
+                        let doc = ScrapingCoordinator::to_document(&result.url, &content, &metadata);
+                        let chunks = splitter.split_document(&doc);
+
+                        if !chunks.is_empty() {
+                            let chunks_with_embeddings: Vec<_> = chunks
+                                .into_iter()
+                                .map(|c| {
+                                    let embedding: Vec<f32> = (0..config.embedding.dimensions)
+                                        .map(|i| {
+                                            let hash = xxhash_rust::xxh3::xxh3_64(c.content.as_bytes());
+                                            ((hash.wrapping_add(i as u64) % 1000) as f32 / 500.0) - 1.0
+                                        })
+                                        .collect();
+                                    (c, embedding)
+                                })
+                                .collect();
+
+                            if let Ok(keys) = indexer.index_batch(&chunks_with_embeddings) {
+                                pages_indexed += 1;
+                                tracing::debug!("Indexed {} chunks", keys.len());
+                            }
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        "Failed: {} - {}",
+                        result.url,
+                        result.error.unwrap_or_default()
+                    );
+                }
+            }
+            None => {
+                // No URLs ready, check if we're done
+                let stats = coordinator.stats().await;
+                if stats.queue_size == 0 {
+                    info!("No more URLs to process");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+
+    // Save index if we indexed content
+    if let (Some(vi), Some(cs)) = (vector_index, chunk_storage) {
+        let index_path = config.node.data_dir.join("vector.index");
+        vi.save(&index_path)?;
+        info!("Saved vector index to {}", index_path.display());
+    }
+
+    // Print final stats
+    let stats = coordinator.stats().await;
+    println!("\nScraping complete!");
+    println!("==================");
+    println!("Pages scraped: {}", pages_scraped);
+    println!("Pages indexed: {}", pages_indexed);
+    println!("URLs discovered: {}", stats.urls_discovered);
+    println!("Duplicates skipped: {}", stats.duplicates_skipped);
+    println!("Queue remaining: {}", stats.queue_size);
+    println!("Avg processing time: {:.1}ms", stats.avg_processing_time_ms);
+
+    Ok(())
+}
+
+async fn show_scrape_stats(config: Config) -> Result<()> {
+    println!("\nScraping Configuration:");
+    println!("=======================");
+    println!("Enabled: {}", config.scraping.enabled);
+    println!("Max concurrent fetches: {}", config.scraping.max_concurrent_fetches);
+    println!("Max depth: {}", config.scraping.max_depth);
+    println!("Stay on domain: {}", config.scraping.stay_on_domain);
+    println!("Politeness delay: {}ms", config.scraping.politeness_delay_ms);
+    println!("Request timeout: {}s", config.scraping.request_timeout_secs);
+    println!("User agent: {}", config.scraping.user_agent);
+    println!("JS rendering: {}", config.scraping.enable_js_rendering);
+    println!("Max pages per domain: {}", config.scraping.max_pages_per_domain);
+    println!();
+    println!("Exclude patterns: {:?}", config.scraping.exclude_patterns);
+    println!("Include patterns: {:?}", config.scraping.include_patterns);
+
+    Ok(())
 }
 
 // Add walkdir and toml to dependencies
