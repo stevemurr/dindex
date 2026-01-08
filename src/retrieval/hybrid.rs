@@ -1,0 +1,215 @@
+//! Hybrid retrieval combining dense and sparse search
+
+use super::{
+    bm25::{Bm25Index, Bm25SearchResult},
+    fusion::{reciprocal_rank_fusion, to_ranked_results, FusedResult, RankedResult, RrfConfig},
+};
+use crate::config::RetrievalConfig;
+use crate::embedding::EmbeddingEngine;
+use crate::index::{ChunkStorage, VectorIndex, VectorSearchResult};
+use crate::types::{Chunk, ChunkId, Embedding, Query, SearchResult};
+use anyhow::Result;
+use std::sync::Arc;
+use tracing::{debug, info};
+
+/// Hybrid retrieval engine combining multiple search methods
+pub struct HybridRetriever {
+    /// Vector index for dense search
+    vector_index: Arc<VectorIndex>,
+    /// BM25 index for lexical search
+    bm25_index: Arc<Bm25Index>,
+    /// Chunk storage for retrieving full content
+    chunk_storage: Arc<ChunkStorage>,
+    /// Embedding engine for query encoding
+    embedding_engine: Option<Arc<EmbeddingEngine>>,
+    /// Configuration
+    config: RetrievalConfig,
+}
+
+impl HybridRetriever {
+    /// Create a new hybrid retriever
+    pub fn new(
+        vector_index: Arc<VectorIndex>,
+        bm25_index: Arc<Bm25Index>,
+        chunk_storage: Arc<ChunkStorage>,
+        embedding_engine: Option<Arc<EmbeddingEngine>>,
+        config: RetrievalConfig,
+    ) -> Self {
+        Self {
+            vector_index,
+            bm25_index,
+            chunk_storage,
+            embedding_engine,
+            config,
+        }
+    }
+
+    /// Search using hybrid retrieval
+    pub fn search(&self, query: &Query, query_embedding: Option<&Embedding>) -> Result<Vec<SearchResult>> {
+        let candidate_count = self.config.candidate_count;
+        let mut ranked_lists: Vec<Vec<RankedResult>> = Vec::new();
+
+        // Dense search
+        if self.config.enable_dense {
+            // Try to get embedding from parameter or generate it
+            let generated_embedding = if query_embedding.is_none() {
+                self.embedding_engine
+                    .as_ref()
+                    .and_then(|e| e.embed(&query.text).ok())
+            } else {
+                None
+            };
+
+            let embedding_ref = query_embedding.or(generated_embedding.as_ref());
+
+            if let Some(embedding) = embedding_ref {
+                let dense_results = self.vector_index.search(embedding, candidate_count)?;
+                let ranked: Vec<(ChunkId, f32)> = dense_results
+                    .iter()
+                    .map(|r| (r.chunk_id.clone(), r.similarity))
+                    .collect();
+                ranked_lists.push(to_ranked_results(&ranked, "dense"));
+                debug!("Dense search: {} results", dense_results.len());
+            }
+        }
+
+        // BM25 search
+        if self.config.enable_bm25 {
+            let bm25_results = self.bm25_index.search(&query.text, candidate_count)?;
+            let ranked: Vec<(ChunkId, f32)> = bm25_results
+                .iter()
+                .map(|r| (r.chunk_id.clone(), r.score))
+                .collect();
+            ranked_lists.push(to_ranked_results(&ranked, "bm25"));
+            debug!("BM25 search: {} results", bm25_results.len());
+        }
+
+        // Fuse results
+        let rrf_config = RrfConfig { k: self.config.rrf_k };
+        let fused = reciprocal_rank_fusion(&ranked_lists, &rrf_config);
+
+        // Retrieve chunk content and build final results
+        let top_k = query.top_k.min(fused.len());
+        let top_fused = &fused[..top_k];
+
+        let chunk_ids: Vec<String> = top_fused.iter().map(|f| f.chunk_id.clone()).collect();
+        let stored_chunks = self.chunk_storage.get_batch(&chunk_ids);
+
+        // Build search results
+        let mut results: Vec<SearchResult> = Vec::with_capacity(top_k);
+        for fused_result in top_fused {
+            if let Some(stored) = stored_chunks.iter().find(|s| s.chunk.metadata.chunk_id == fused_result.chunk_id) {
+                let mut result = SearchResult::new(stored.chunk.clone(), fused_result.rrf_score);
+                result.matched_by = fused_result.contributing_methods.clone();
+                results.push(result);
+            }
+        }
+
+        info!(
+            "Hybrid search for '{}': {} results",
+            truncate_query(&query.text),
+            results.len()
+        );
+
+        Ok(results)
+    }
+
+    /// Search with pre-computed embedding
+    pub fn search_with_embedding(
+        &self,
+        query: &Query,
+        embedding: &Embedding,
+    ) -> Result<Vec<SearchResult>> {
+        self.search(query, Some(embedding))
+    }
+
+    /// Dense-only search
+    pub fn dense_search(&self, embedding: &Embedding, k: usize) -> Result<Vec<VectorSearchResult>> {
+        self.vector_index.search(embedding, k)
+    }
+
+    /// BM25-only search
+    pub fn bm25_search(&self, query_text: &str, k: usize) -> Result<Vec<Bm25SearchResult>> {
+        self.bm25_index.search(query_text, k)
+    }
+}
+
+fn truncate_query(query: &str) -> String {
+    if query.len() > 50 {
+        format!("{}...", &query[..47])
+    } else {
+        query.to_string()
+    }
+}
+
+/// Builder for creating a hybrid retriever with indexing support
+pub struct HybridIndexer {
+    pub vector_index: Arc<VectorIndex>,
+    pub bm25_index: Arc<Bm25Index>,
+    pub chunk_storage: Arc<ChunkStorage>,
+}
+
+impl HybridIndexer {
+    /// Create a new hybrid indexer
+    pub fn new(
+        vector_index: Arc<VectorIndex>,
+        bm25_index: Arc<Bm25Index>,
+        chunk_storage: Arc<ChunkStorage>,
+    ) -> Self {
+        Self {
+            vector_index,
+            bm25_index,
+            chunk_storage,
+        }
+    }
+
+    /// Index a chunk with its embedding
+    pub fn index_chunk(&self, chunk: &Chunk, embedding: &Embedding) -> Result<u64> {
+        // Add to vector index
+        let key = self.vector_index.add(&chunk.metadata.chunk_id, embedding)?;
+
+        // Add to BM25 index
+        self.bm25_index.add(chunk)?;
+
+        // Store chunk data
+        let indexed_chunk = crate::types::IndexedChunk {
+            chunk: chunk.clone(),
+            embedding: embedding.clone(),
+            lsh_signature: None,
+            index_key: key,
+        };
+        self.chunk_storage.store(&indexed_chunk);
+
+        Ok(key)
+    }
+
+    /// Index multiple chunks
+    pub fn index_batch(&self, chunks: &[(Chunk, Embedding)]) -> Result<Vec<u64>> {
+        let mut keys = Vec::with_capacity(chunks.len());
+
+        for (chunk, embedding) in chunks {
+            let key = self.index_chunk(chunk, embedding)?;
+            keys.push(key);
+        }
+
+        // Commit BM25 changes
+        self.bm25_index.commit()?;
+
+        Ok(keys)
+    }
+
+    /// Remove a chunk from all indices
+    pub fn remove_chunk(&self, chunk_id: &ChunkId) -> Result<()> {
+        self.vector_index.remove(chunk_id)?;
+        self.bm25_index.delete(chunk_id)?;
+        self.chunk_storage.remove(chunk_id);
+        Ok(())
+    }
+
+    /// Save all indices
+    pub fn save(&self) -> Result<()> {
+        self.bm25_index.commit()?;
+        self.chunk_storage.save()?;
+        Ok(())
+    }
+}

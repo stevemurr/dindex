@@ -1,0 +1,449 @@
+//! P2P network node implementation
+
+use super::{
+    behaviour::DIndexBehaviour,
+    messages::{topics, NetworkMessage, QueryRequest, QueryResponse},
+};
+use crate::config::NodeConfig;
+use crate::types::{NodeAdvertisement, Query, SearchResult};
+
+use anyhow::Result;
+use futures::StreamExt;
+use libp2p::{
+    gossipsub::{self, IdentTopic},
+    identity::Keypair,
+    identify, kad,
+    multiaddr::Protocol,
+    ping, relay,
+    swarm::{SwarmEvent, self},
+    Multiaddr, PeerId, Swarm,
+};
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, error, info, warn};
+
+/// Network node for P2P communication
+pub struct NetworkNode {
+    /// Local peer ID
+    pub local_peer_id: PeerId,
+    /// Keypair for signing
+    keypair: Keypair,
+    /// Swarm instance
+    swarm: Swarm<DIndexBehaviour>,
+    /// Connected peers
+    connected_peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>,
+    /// Cached node advertisements
+    node_advertisements: Arc<RwLock<HashMap<PeerId, NodeAdvertisement>>>,
+    /// Pending query responses
+    pending_queries: HashMap<String, oneshot::Sender<QueryResponse>>,
+    /// Command receiver
+    command_rx: mpsc::Receiver<NetworkCommand>,
+    /// Event sender
+    event_tx: mpsc::Sender<NetworkEvent>,
+}
+
+/// Information about a connected peer
+#[derive(Debug, Clone)]
+pub struct PeerInfo {
+    pub peer_id: PeerId,
+    pub addresses: Vec<Multiaddr>,
+    pub connected_at: Instant,
+    pub last_seen: Instant,
+}
+
+/// Commands to send to the network node
+#[derive(Debug)]
+pub enum NetworkCommand {
+    /// Connect to a peer
+    Connect(Multiaddr),
+    /// Disconnect from a peer
+    Disconnect(PeerId),
+    /// Send a query to specific peers
+    SendQuery {
+        peers: Vec<PeerId>,
+        request: QueryRequest,
+        response_tx: oneshot::Sender<Vec<QueryResponse>>,
+    },
+    /// Broadcast advertisement
+    BroadcastAdvertisement(NodeAdvertisement),
+    /// Get connected peers
+    GetPeers(oneshot::Sender<Vec<PeerInfo>>),
+    /// Shutdown
+    Shutdown,
+}
+
+/// Events from the network node
+#[derive(Debug, Clone)]
+pub enum NetworkEvent {
+    /// Query received from peer
+    QueryReceived {
+        peer_id: PeerId,
+        request: QueryRequest,
+    },
+    /// Advertisement received
+    AdvertisementReceived(NodeAdvertisement),
+    /// Peer connected
+    PeerConnected(PeerId),
+    /// Peer disconnected
+    PeerDisconnected(PeerId),
+}
+
+/// Handle for interacting with the network node
+#[derive(Clone)]
+pub struct NetworkHandle {
+    command_tx: mpsc::Sender<NetworkCommand>,
+    pub local_peer_id: PeerId,
+}
+
+impl NetworkHandle {
+    /// Connect to a peer
+    pub async fn connect(&self, addr: Multiaddr) -> Result<()> {
+        self.command_tx
+            .send(NetworkCommand::Connect(addr))
+            .await
+            .map_err(|_| anyhow::anyhow!("Network node shut down"))?;
+        Ok(())
+    }
+
+    /// Send a query to peers
+    pub async fn query(
+        &self,
+        peers: Vec<PeerId>,
+        query: Query,
+        embedding: Option<Vec<f32>>,
+        timeout: Duration,
+    ) -> Result<Vec<QueryResponse>> {
+        let mut request = QueryRequest::new(query);
+        if let Some(emb) = embedding {
+            request = request.with_embedding(emb);
+        }
+
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(NetworkCommand::SendQuery {
+                peers,
+                request,
+                response_tx: tx,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Network node shut down"))?;
+
+        tokio::time::timeout(timeout, rx)
+            .await
+            .map_err(|_| anyhow::anyhow!("Query timeout"))?
+            .map_err(|_| anyhow::anyhow!("Response channel closed"))
+    }
+
+    /// Broadcast node advertisement
+    pub async fn broadcast_advertisement(&self, advertisement: NodeAdvertisement) -> Result<()> {
+        self.command_tx
+            .send(NetworkCommand::BroadcastAdvertisement(advertisement))
+            .await
+            .map_err(|_| anyhow::anyhow!("Network node shut down"))?;
+        Ok(())
+    }
+
+    /// Get connected peers
+    pub async fn get_peers(&self) -> Result<Vec<PeerInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(NetworkCommand::GetPeers(tx))
+            .await
+            .map_err(|_| anyhow::anyhow!("Network node shut down"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("Response channel closed"))
+    }
+
+    /// Shutdown the network node
+    pub async fn shutdown(&self) -> Result<()> {
+        self.command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .map_err(|_| anyhow::anyhow!("Network node already shut down"))?;
+        Ok(())
+    }
+}
+
+impl NetworkNode {
+    /// Create a new network node
+    pub async fn new(
+        config: &NodeConfig,
+    ) -> Result<(Self, NetworkHandle, mpsc::Receiver<NetworkEvent>)> {
+        // Generate or load keypair
+        let keypair = Keypair::generate_ed25519();
+        let local_peer_id = PeerId::from(keypair.public());
+
+        info!("Local peer ID: {}", local_peer_id);
+
+        // Build the swarm
+        let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone())
+            .with_tokio()
+            .with_quic()
+            .with_relay_client(noise::Config::new, yamux::Config::default)?
+            .with_behaviour(|key, relay_behaviour| {
+                DIndexBehaviour::new(
+                    PeerId::from(key.public()),
+                    key.public(),
+                    relay_behaviour,
+                )
+                .expect("Failed to create behaviour")
+            })?
+            .with_swarm_config(|c| {
+                c.with_idle_connection_timeout(Duration::from_secs(60))
+            })
+            .build();
+
+        // Create channels
+        let (command_tx, command_rx) = mpsc::channel(256);
+        let (event_tx, event_rx) = mpsc::channel(256);
+
+        let handle = NetworkHandle {
+            command_tx,
+            local_peer_id,
+        };
+
+        let node = Self {
+            local_peer_id,
+            keypair,
+            swarm,
+            connected_peers: Arc::new(RwLock::new(HashMap::new())),
+            node_advertisements: Arc::new(RwLock::new(HashMap::new())),
+            pending_queries: HashMap::new(),
+            command_rx,
+            event_tx,
+        };
+
+        Ok((node, handle, event_rx))
+    }
+
+    /// Start listening and processing events
+    pub async fn run(mut self, config: &NodeConfig) -> Result<()> {
+        // Start listening
+        let listen_addr: Multiaddr = config.listen_addr.parse()?;
+        self.swarm.listen_on(listen_addr)?;
+
+        // Subscribe to gossipsub topics
+        let advert_topic = IdentTopic::new(topics::ADVERTISEMENTS);
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&advert_topic)?;
+
+        // Connect to bootstrap peers
+        for peer_addr in &config.bootstrap_peers {
+            if let Ok(addr) = peer_addr.parse::<Multiaddr>() {
+                info!("Connecting to bootstrap peer: {}", addr);
+                if let Err(e) = self.swarm.dial(addr.clone()) {
+                    warn!("Failed to dial bootstrap peer {}: {}", addr, e);
+                }
+            }
+        }
+
+        // Main event loop
+        loop {
+            tokio::select! {
+                // Handle swarm events
+                event = self.swarm.select_next_some() => {
+                    self.handle_swarm_event(event).await;
+                }
+                // Handle commands
+                Some(cmd) = self.command_rx.recv() => {
+                    if matches!(cmd, NetworkCommand::Shutdown) {
+                        info!("Network node shutting down");
+                        break;
+                    }
+                    self.handle_command(cmd).await;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_swarm_event(&mut self, event: SwarmEvent<super::behaviour::DIndexBehaviourEvent>) {
+        match event {
+            SwarmEvent::Behaviour(behaviour_event) => {
+                self.handle_behaviour_event(behaviour_event).await;
+            }
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
+                info!("Connected to peer: {}", peer_id);
+                let addr = endpoint.get_remote_address().clone();
+
+                self.connected_peers.write().insert(
+                    peer_id,
+                    PeerInfo {
+                        peer_id,
+                        addresses: vec![addr],
+                        connected_at: Instant::now(),
+                        last_seen: Instant::now(),
+                    },
+                );
+
+                // Add to Kademlia
+                self.swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, endpoint.get_remote_address().clone());
+
+                let _ = self.event_tx.send(NetworkEvent::PeerConnected(peer_id)).await;
+            }
+            SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                info!("Disconnected from peer: {}", peer_id);
+                self.connected_peers.write().remove(&peer_id);
+                let _ = self
+                    .event_tx
+                    .send(NetworkEvent::PeerDisconnected(peer_id))
+                    .await;
+            }
+            SwarmEvent::NewListenAddr { address, .. } => {
+                info!("Listening on: {}/p2p/{}", address, self.local_peer_id);
+            }
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                if let Some(peer_id) = peer_id {
+                    warn!("Failed to connect to {}: {}", peer_id, error);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn handle_behaviour_event(&mut self, event: super::behaviour::DIndexBehaviourEvent) {
+        use super::behaviour::DIndexBehaviourEvent;
+
+        match event {
+            DIndexBehaviourEvent::Mdns(mdns::Event::Discovered(peers)) => {
+                for (peer_id, addr) in peers {
+                    debug!("Discovered peer via mDNS: {} at {}", peer_id, addr);
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
+
+                    if let Err(e) = self.swarm.dial(addr) {
+                        debug!("Failed to dial discovered peer: {}", e);
+                    }
+                }
+            }
+            DIndexBehaviourEvent::Mdns(mdns::Event::Expired(peers)) => {
+                for (peer_id, _) in peers {
+                    debug!("mDNS peer expired: {}", peer_id);
+                }
+            }
+            DIndexBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                propagation_source,
+                message_id,
+                message,
+            }) => {
+                debug!(
+                    "GossipSub message from {}: {:?}",
+                    propagation_source, message_id
+                );
+
+                if let Ok(msg) = bincode::deserialize::<NetworkMessage>(&message.data) {
+                    match msg {
+                        NetworkMessage::Advertisement(advert) => {
+                            let node_id = advert.node_id.clone();
+                            self.node_advertisements
+                                .write()
+                                .insert(propagation_source, advert.clone());
+                            let _ = self
+                                .event_tx
+                                .send(NetworkEvent::AdvertisementReceived(advert))
+                                .await;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            DIndexBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                id,
+                result,
+                ..
+            }) => {
+                debug!("Kademlia query {:?} progressed: {:?}", id, result);
+            }
+            DIndexBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. }) => {
+                debug!(
+                    "Identified peer {}: {} with {:?}",
+                    peer_id, info.protocol_version, info.protocols
+                );
+
+                // Add addresses to Kademlia
+                for addr in info.listen_addrs {
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr);
+                }
+            }
+            DIndexBehaviourEvent::Ping(ping::Event { peer, result, .. }) => {
+                if let Ok(rtt) = result {
+                    debug!("Ping to {}: {:?}", peer, rtt);
+                    if let Some(info) = self.connected_peers.write().get_mut(&peer) {
+                        info.last_seen = Instant::now();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn handle_command(&mut self, cmd: NetworkCommand) {
+        match cmd {
+            NetworkCommand::Connect(addr) => {
+                if let Err(e) = self.swarm.dial(addr.clone()) {
+                    warn!("Failed to dial {}: {}", addr, e);
+                }
+            }
+            NetworkCommand::Disconnect(peer_id) => {
+                let _ = self.swarm.disconnect_peer_id(peer_id);
+            }
+            NetworkCommand::SendQuery {
+                peers,
+                request,
+                response_tx,
+            } => {
+                // For now, we'll implement a simple broadcast query
+                // In a full implementation, this would use request-response protocol
+                let msg = NetworkMessage::QueryRequest(request.clone());
+                if let Ok(data) = bincode::serialize(&msg) {
+                    // Store pending query
+                    // In full impl, track per-peer responses
+                    debug!("Sending query to {} peers", peers.len());
+
+                    // For now, just send empty response (actual impl would wait)
+                    let _ = response_tx.send(Vec::new());
+                }
+            }
+            NetworkCommand::BroadcastAdvertisement(advert) => {
+                let msg = NetworkMessage::Advertisement(advert);
+                if let Ok(data) = bincode::serialize(&msg) {
+                    let topic = IdentTopic::new(topics::ADVERTISEMENTS);
+                    if let Err(e) = self
+                        .swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .publish(topic, data)
+                    {
+                        warn!("Failed to publish advertisement: {}", e);
+                    }
+                }
+            }
+            NetworkCommand::GetPeers(response_tx) => {
+                let peers: Vec<PeerInfo> = self.connected_peers.read().values().cloned().collect();
+                let _ = response_tx.send(peers);
+            }
+            NetworkCommand::Shutdown => {
+                // Handled in main loop
+            }
+        }
+    }
+}
+
+// Re-export necessary libp2p types
+use libp2p::{noise, yamux};
+use libp2p::mdns;
