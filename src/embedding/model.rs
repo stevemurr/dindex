@@ -154,6 +154,20 @@ impl ModelManager {
         Ok(())
     }
 
+    /// Check if a model exists locally
+    pub fn model_exists(&self, model_name: &str) -> Result<bool> {
+        let model_dir = self.cache_dir.join(model_name);
+        let model_path = model_dir.join("model.onnx");
+        let tokenizer_path = model_dir.join("tokenizer.json");
+        Ok(model_path.exists() && tokenizer_path.exists())
+    }
+
+    /// Download a model if it doesn't exist
+    pub async fn download_model(&self, model_name: &str) -> Result<()> {
+        let _ = self.ensure_model(model_name).await?;
+        Ok(())
+    }
+
     /// Create an embedding config with downloaded model paths
     pub async fn create_config(&self, model_name: &str) -> Result<EmbeddingConfig> {
         let (model_path, tokenizer_path) = self.ensure_model(model_name).await?;

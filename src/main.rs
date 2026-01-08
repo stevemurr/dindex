@@ -2,7 +2,7 @@
 //!
 //! A federated semantic search system optimized for LLM consumption.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use dindex::{
     chunking::TextSplitter,
@@ -10,7 +10,7 @@ use dindex::{
     config::Config,
     content::{extract_from_bytes, extract_from_path, ContentType},
     daemon::{self, Daemon, OutputFormat},
-    embedding::ModelManager,
+    embedding::{check_model_exists, init_embedding_engine, model_not_found_error, ModelManager},
     import::{DumpFormat, ImportCheckpoint, ImportCoordinatorBuilder, WikimediaSource},
     index::{ChunkStorage, DocumentRegistry, VectorIndex},
     network::NetworkNode,
@@ -571,6 +571,18 @@ async fn index_document(
 
     // Direct access fallback
     info!("Using direct index access (daemon not available)");
+
+    // Check if model exists before proceeding
+    if !check_model_exists(&config)? {
+        model_not_found_error(&config);
+        std::process::exit(1);
+    }
+
+    // Initialize embedding engine
+    let engine = init_embedding_engine(&config)
+        .await
+        .context("Failed to initialize embedding engine")?;
+
     let index_path = config.node.data_dir.join("vector.index");
     let vector_index = Arc::new(VectorIndex::new(
         config.embedding.dimensions,
@@ -588,20 +600,18 @@ async fn index_document(
         chunk_storage.clone(),
     );
 
-    // Generate dummy embeddings (in production, use embedding engine)
-    // For now, create random embeddings for testing
+    // Extract texts for batch embedding
+    let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+
+    // Generate real embeddings using the embedding engine
+    let embeddings = engine
+        .embed_batch(&texts)
+        .context("Failed to generate embeddings")?;
+
+    // Pair chunks with embeddings
     let chunks_with_embeddings: Vec<_> = chunks
         .into_iter()
-        .map(|c| {
-            let embedding: Vec<f32> = (0..config.embedding.dimensions)
-                .map(|i| {
-                    // Create deterministic pseudo-embedding based on content hash
-                    let hash = xxhash_rust::xxh3::xxh3_64(c.content.as_bytes());
-                    ((hash.wrapping_add(i as u64) % 1000) as f32 / 500.0) - 1.0
-                })
-                .collect();
-            (c, embedding)
-        })
+        .zip(embeddings.into_iter())
         .collect();
 
     // Index chunks
@@ -648,6 +658,17 @@ async fn search_index(
     }
 
     // Direct access fallback
+    // Check if model exists before proceeding
+    if !check_model_exists(&config)? {
+        model_not_found_error(&config);
+        std::process::exit(1);
+    }
+
+    // Initialize embedding engine
+    let engine = init_embedding_engine(&config)
+        .await
+        .context("Failed to initialize embedding engine")?;
+
     let index_path = config.node.data_dir.join("vector.index");
     let vector_index = if index_path.exists() {
         Arc::new(VectorIndex::load(&index_path, &config.index)?)
@@ -671,13 +692,10 @@ async fn search_index(
     // Create query
     let query = Query::new(&query_text, top_k);
 
-    // Generate query embedding (dummy for now)
-    let query_embedding: Vec<f32> = (0..config.embedding.dimensions)
-        .map(|i| {
-            let hash = xxhash_rust::xxh3::xxh3_64(query_text.as_bytes());
-            ((hash.wrapping_add(i as u64) % 1000) as f32 / 500.0) - 1.0
-        })
-        .collect();
+    // Generate query embedding using the embedding engine
+    let query_embedding = engine
+        .embed(&query_text)
+        .context("Failed to embed query")?;
 
     // Execute search
     let results = retriever.search(&query, Some(&query_embedding))?;
@@ -986,6 +1004,23 @@ async fn scrape_urls(
     // Direct scraping fallback
     info!("Using direct scraping (daemon not available or not indexing)");
 
+    // Initialize embedding engine if indexing
+    let embedding_engine = if should_index {
+        // Check if model exists before proceeding
+        if !check_model_exists(&config)? {
+            model_not_found_error(&config);
+            std::process::exit(1);
+        }
+
+        Some(
+            init_embedding_engine(&config)
+                .await
+                .context("Failed to initialize embedding engine")?,
+        )
+    } else {
+        None
+    };
+
     // Create scraping config
     let scraping_config = ScrapingCoordConfig {
         enabled: true,
@@ -1074,29 +1109,32 @@ async fn scrape_urls(
                         .await;
 
                     // Index content if requested
-                    if let (Some(ref indexer), Some(content), Some(metadata)) =
-                        (&indexer, result.content, result.metadata)
+                    if let (Some(ref indexer), Some(ref engine), Some(content), Some(metadata)) =
+                        (&indexer, &embedding_engine, result.content, result.metadata)
                     {
                         let doc = ScrapingCoordinator::to_document(&result.url, &content, &metadata);
                         let chunks = splitter.split_document(&doc);
 
                         if !chunks.is_empty() {
-                            let chunks_with_embeddings: Vec<_> = chunks
-                                .into_iter()
-                                .map(|c| {
-                                    let embedding: Vec<f32> = (0..config.embedding.dimensions)
-                                        .map(|i| {
-                                            let hash = xxhash_rust::xxh3::xxh3_64(c.content.as_bytes());
-                                            ((hash.wrapping_add(i as u64) % 1000) as f32 / 500.0) - 1.0
-                                        })
-                                        .collect();
-                                    (c, embedding)
-                                })
-                                .collect();
+                            // Extract texts for batch embedding
+                            let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
 
-                            if let Ok(keys) = indexer.index_batch(&chunks_with_embeddings) {
-                                pages_indexed += 1;
-                                tracing::debug!("Indexed {} chunks", keys.len());
+                            // Generate real embeddings
+                            match engine.embed_batch(&texts) {
+                                Ok(embeddings) => {
+                                    let chunks_with_embeddings: Vec<_> = chunks
+                                        .into_iter()
+                                        .zip(embeddings.into_iter())
+                                        .collect();
+
+                                    if let Ok(keys) = indexer.index_batch(&chunks_with_embeddings) {
+                                        pages_indexed += 1;
+                                        tracing::debug!("Indexed {} chunks", keys.len());
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to generate embeddings: {}", e);
+                                }
                             }
                         }
                     }
@@ -1303,13 +1341,24 @@ async fn import_dump(
         );
     }
 
+    // Check if model exists before proceeding
+    if !check_model_exists(&config)? {
+        model_not_found_error(&config);
+        std::process::exit(1);
+    }
+
+    // Initialize embedding engine
+    let engine = init_embedding_engine(&config)
+        .await
+        .context("Failed to initialize embedding engine")?;
+
     // Create import coordinator
     let mut coordinator = ImportCoordinatorBuilder::new(&config.node.data_dir)
         .with_batch_size(batch_size)
         .with_dedup(!no_dedup)
         .with_min_content_length(min_length)
         .with_max_documents(max_docs)
-        .with_embedding_dims(config.embedding.dimensions)
+        .with_embedding_engine(engine)
         .with_chunking_config(config.chunking.clone())
         .with_index_config(config.index.clone())
         .with_quiet(quiet)

@@ -7,7 +7,7 @@ license = "MIT"
 authors = ["DIndex Contributors"]
 
 [features]
-default = []
+default = ["onnx"]
 onnx = ["ort"]
 
 [dependencies]
