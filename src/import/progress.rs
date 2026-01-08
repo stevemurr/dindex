@@ -111,9 +111,10 @@ impl ImportProgress {
                 0.0
             };
 
-            // Show last document title (truncated)
-            let display_title = if title.len() > 30 {
-                format!("{}...", &title[..27])
+            // Show last document title (truncated safely for UTF-8)
+            let display_title = if title.chars().count() > 30 {
+                let truncated: String = title.chars().take(27).collect();
+                format!("{}...", truncated)
             } else {
                 title.to_string()
             };

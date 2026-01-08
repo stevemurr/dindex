@@ -59,6 +59,16 @@ struct PartialPage {
     redirect: bool,
 }
 
+/// Result of parsing a page from the XML stream
+enum ParseResult {
+    /// Successfully parsed a document
+    Document(DumpDocument),
+    /// Page was skipped (redirect, filtered namespace, too short, etc.)
+    Skipped,
+    /// End of file reached
+    Eof,
+}
+
 impl WikimediaSource {
     /// Open a Wikimedia XML dump file
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ImportError> {
@@ -122,7 +132,7 @@ impl WikimediaSource {
     }
 
     /// Parse the next page from the XML stream
-    fn parse_next_page(&mut self) -> Result<Option<DumpDocument>, ImportError> {
+    fn parse_next_page(&mut self) -> Result<ParseResult, ImportError> {
         let mut buf = Vec::with_capacity(8192);
         let mut text_buf = String::new();
         let mut current_element: Option<String> = None;
@@ -202,7 +212,7 @@ impl WikimediaSource {
                     }
                 }
                 Event::Eof => {
-                    return Ok(None);
+                    return Ok(ParseResult::Eof);
                 }
                 _ => {}
             }
@@ -211,29 +221,38 @@ impl WikimediaSource {
         }
     }
 
-    /// Convert a parsed page to a document (or None if filtered)
-    fn page_to_document(&self, page: PartialPage) -> Option<DumpDocument> {
+    /// Convert a parsed page to a document (or Skipped if filtered)
+    fn page_to_document(&self, page: PartialPage) -> ParseResult {
         // Filter by namespace
         if let Some(ref allowed) = self.allowed_namespaces {
             let ns = page.namespace.unwrap_or(0);
             if !allowed.contains(&ns) {
-                return None;
+                return ParseResult::Skipped;
             }
         }
 
         // Skip redirects
         if page.redirect {
-            return None;
+            return ParseResult::Skipped;
         }
 
         // Need title, id, and text
-        let title = page.title?;
-        let id = page.id?;
-        let wikitext = page.text?;
+        let title = match page.title {
+            Some(t) => t,
+            None => return ParseResult::Skipped,
+        };
+        let id = match page.id {
+            Some(i) => i,
+            None => return ParseResult::Skipped,
+        };
+        let wikitext = match page.text {
+            Some(t) => t,
+            None => return ParseResult::Skipped,
+        };
 
         // Skip empty or very short articles
         if wikitext.len() < 100 {
-            return None;
+            return ParseResult::Skipped;
         }
 
         // Convert WikiText to plaintext
@@ -241,7 +260,7 @@ impl WikimediaSource {
 
         // Skip if content is too short after parsing
         if content.len() < 50 {
-            return None;
+            return ParseResult::Skipped;
         }
 
         // Build URL
@@ -268,7 +287,7 @@ impl WikimediaSource {
             doc = doc.with_metadata("namespace", ns.to_string());
         }
 
-        Some(doc)
+        ParseResult::Document(doc)
     }
 }
 
@@ -313,8 +332,9 @@ impl<'a> Iterator for WikimediaIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.source.parse_next_page() {
-                Ok(Some(doc)) => return Some(Ok(doc)),
-                Ok(None) => return None, // EOF
+                Ok(ParseResult::Document(doc)) => return Some(Ok(doc)),
+                Ok(ParseResult::Skipped) => continue, // Filtered page, keep going
+                Ok(ParseResult::Eof) => return None,  // End of file
                 Err(e) => return Some(Err(e)),
             }
         }

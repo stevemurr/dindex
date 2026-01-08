@@ -4,7 +4,7 @@
 # =============================================================================
 # Stage 1: Builder
 # =============================================================================
-FROM rust:1.83-bookworm AS builder
+FROM rust:1.85-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -19,13 +19,8 @@ WORKDIR /app
 # Copy Cargo files first for dependency caching
 COPY Cargo.toml Cargo.lock* ./
 
-# Create dummy source to build dependencies
-RUN mkdir -p src && \
-    echo 'fn main() { println!("dummy"); }' > src/main.rs && \
-    echo 'pub fn dummy() {}' > src/lib.rs
-
-# Build dependencies (this layer will be cached)
-RUN cargo build --release && rm -rf src target/release/deps/dindex*
+# Fetch dependencies (this layer will be cached)
+RUN cargo fetch
 
 # Copy actual source code
 COPY src ./src
@@ -33,9 +28,9 @@ COPY src ./src
 # Build the actual binary
 ARG FEATURES=""
 RUN if [ -z "$FEATURES" ]; then \
-        cargo build --release; \
+    cargo build --release; \
     else \
-        cargo build --release --features "$FEATURES"; \
+    cargo build --release --features "$FEATURES"; \
     fi
 
 # =============================================================================

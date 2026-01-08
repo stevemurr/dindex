@@ -646,7 +646,12 @@ candidate_nodes = {}
 fn truncate_content(s: &str, max_len: usize) -> String {
     let s = s.replace('\n', " ");
     if s.len() > max_len {
-        format!("{}", &s[..max_len])
+        // Find a valid char boundary at or before max_len
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s[..end].to_string()
     } else {
         s
     }
