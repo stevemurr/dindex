@@ -3,8 +3,12 @@
 //! Uses ms-marco-MiniLM-L-6-v2 for reranking search results
 
 use crate::types::SearchResult;
+
+#[cfg(feature = "onnx")]
 use anyhow::{Context, Result};
+#[cfg(feature = "onnx")]
 use std::path::Path;
+#[cfg(feature = "onnx")]
 use tracing::{debug, info};
 
 #[cfg(feature = "onnx")]

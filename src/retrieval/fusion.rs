@@ -3,7 +3,7 @@
 //! Implements Reciprocal Rank Fusion (RRF) for combining results
 //! from multiple retrieval methods
 
-use crate::types::{ChunkId, SearchResult};
+use crate::types::ChunkId;
 use std::collections::HashMap;
 
 /// Reciprocal Rank Fusion (RRF) parameters

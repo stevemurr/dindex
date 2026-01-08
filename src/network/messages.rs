@@ -40,6 +40,8 @@ pub struct QueryRequest {
     pub query: Query,
     /// Pre-computed query embedding (optional, to save compute on target)
     pub query_embedding: Option<Vec<f32>>,
+    /// Originating peer (for routing response back)
+    pub origin_peer: Option<String>,
 }
 
 impl QueryRequest {
@@ -48,11 +50,17 @@ impl QueryRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
             query,
             query_embedding: None,
+            origin_peer: None,
         }
     }
 
     pub fn with_embedding(mut self, embedding: Vec<f32>) -> Self {
         self.query_embedding = Some(embedding);
+        self
+    }
+
+    pub fn with_origin(mut self, peer_id: String) -> Self {
+        self.origin_peer = Some(peer_id);
         self
     }
 }
@@ -68,6 +76,8 @@ pub struct QueryResponse {
     pub processing_time_ms: u64,
     /// Whether results were truncated
     pub truncated: bool,
+    /// Responding peer ID
+    pub responder_peer: Option<String>,
 }
 
 impl QueryResponse {
@@ -77,7 +87,18 @@ impl QueryResponse {
             results,
             processing_time_ms: 0,
             truncated: false,
+            responder_peer: None,
         }
+    }
+
+    pub fn with_timing(mut self, processing_time_ms: u64) -> Self {
+        self.processing_time_ms = processing_time_ms;
+        self
+    }
+
+    pub fn with_responder(mut self, peer_id: String) -> Self {
+        self.responder_peer = Some(peer_id);
+        self
     }
 }
 
@@ -101,4 +122,8 @@ pub mod topics {
     pub const ADVERTISEMENTS: &str = "dindex/advertisements";
     /// Topic for index updates
     pub const INDEX_UPDATES: &str = "dindex/index-updates";
+    /// Topic for query requests
+    pub const QUERIES: &str = "dindex/queries";
+    /// Topic for query responses
+    pub const QUERY_RESPONSES: &str = "dindex/query-responses";
 }

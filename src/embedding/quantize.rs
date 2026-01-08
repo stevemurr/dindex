@@ -117,7 +117,7 @@ pub fn binary_hamming_distance(a: &[u8], b: &[u8]) -> usize {
 pub fn quantized_cosine_similarity(
     a: &QuantizedEmbedding,
     b: &QuantizedEmbedding,
-    params: &QuantizationParams,
+    _params: &QuantizationParams,
 ) -> f32 {
     assert_eq!(a.len(), b.len());
 

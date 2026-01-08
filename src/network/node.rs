@@ -5,7 +5,7 @@ use super::{
     messages::{topics, NetworkMessage, QueryRequest, QueryResponse},
 };
 use crate::config::NodeConfig;
-use crate::types::{NodeAdvertisement, Query, SearchResult};
+use crate::types::{NodeAdvertisement, Query};
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -13,9 +13,8 @@ use libp2p::{
     gossipsub::{self, IdentTopic},
     identity::Keypair,
     identify, kad,
-    multiaddr::Protocol,
-    ping, relay,
-    swarm::{SwarmEvent, self},
+    ping,
+    swarm::SwarmEvent,
     Multiaddr, PeerId, Swarm,
 };
 use parking_lot::RwLock;
@@ -23,13 +22,22 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
+
+/// Pending query state
+struct PendingQuery {
+    response_tx: oneshot::Sender<Vec<QueryResponse>>,
+    responses: Vec<QueryResponse>,
+    expected_peers: Vec<PeerId>,
+    deadline: Instant,
+}
 
 /// Network node for P2P communication
 pub struct NetworkNode {
     /// Local peer ID
     pub local_peer_id: PeerId,
-    /// Keypair for signing
+    /// Keypair for signing (reserved for future signing operations)
+    #[allow(dead_code)]
     keypair: Keypair,
     /// Swarm instance
     swarm: Swarm<DIndexBehaviour>,
@@ -37,8 +45,8 @@ pub struct NetworkNode {
     connected_peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>,
     /// Cached node advertisements
     node_advertisements: Arc<RwLock<HashMap<PeerId, NodeAdvertisement>>>,
-    /// Pending query responses
-    pending_queries: HashMap<String, oneshot::Sender<QueryResponse>>,
+    /// Pending distributed queries awaiting responses
+    pending_queries: HashMap<String, PendingQuery>,
     /// Command receiver
     command_rx: mpsc::Receiver<NetworkCommand>,
     /// Event sender
@@ -66,7 +74,10 @@ pub enum NetworkCommand {
         peers: Vec<PeerId>,
         request: QueryRequest,
         response_tx: oneshot::Sender<Vec<QueryResponse>>,
+        timeout: Duration,
     },
+    /// Send a response to a query
+    SendQueryResponse(QueryResponse),
     /// Broadcast advertisement
     BroadcastAdvertisement(NodeAdvertisement),
     /// Get connected peers
@@ -78,7 +89,7 @@ pub enum NetworkCommand {
 /// Events from the network node
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
-    /// Query received from peer
+    /// Query received from peer - application should handle and respond
     QueryReceived {
         peer_id: PeerId,
         request: QueryRequest,
@@ -89,6 +100,13 @@ pub enum NetworkEvent {
     PeerConnected(PeerId),
     /// Peer disconnected
     PeerDisconnected(PeerId),
+}
+
+/// Command to send a query response
+#[derive(Debug)]
+pub struct SendQueryResponse {
+    pub request_id: String,
+    pub response: QueryResponse,
 }
 
 /// Handle for interacting with the network node
@@ -116,7 +134,8 @@ impl NetworkHandle {
         embedding: Option<Vec<f32>>,
         timeout: Duration,
     ) -> Result<Vec<QueryResponse>> {
-        let mut request = QueryRequest::new(query);
+        let mut request = QueryRequest::new(query)
+            .with_origin(self.local_peer_id.to_string());
         if let Some(emb) = embedding {
             request = request.with_embedding(emb);
         }
@@ -127,14 +146,22 @@ impl NetworkHandle {
                 peers,
                 request,
                 response_tx: tx,
+                timeout,
             })
             .await
             .map_err(|_| anyhow::anyhow!("Network node shut down"))?;
 
-        tokio::time::timeout(timeout, rx)
+        // Wait for responses - the network node handles the timeout internally
+        rx.await.map_err(|_| anyhow::anyhow!("Response channel closed"))
+    }
+
+    /// Send a response to a query
+    pub async fn send_response(&self, response: QueryResponse) -> Result<()> {
+        self.command_tx
+            .send(NetworkCommand::SendQueryResponse(response))
             .await
-            .map_err(|_| anyhow::anyhow!("Query timeout"))?
-            .map_err(|_| anyhow::anyhow!("Response channel closed"))
+            .map_err(|_| anyhow::anyhow!("Network node shut down"))?;
+        Ok(())
     }
 
     /// Broadcast node advertisement
@@ -169,7 +196,7 @@ impl NetworkHandle {
 impl NetworkNode {
     /// Create a new network node
     pub async fn new(
-        config: &NodeConfig,
+        _config: &NodeConfig,
     ) -> Result<(Self, NetworkHandle, mpsc::Receiver<NetworkEvent>)> {
         // Generate or load keypair
         let keypair = Keypair::generate_ed25519();
@@ -226,10 +253,21 @@ impl NetworkNode {
 
         // Subscribe to gossipsub topics
         let advert_topic = IdentTopic::new(topics::ADVERTISEMENTS);
+        let query_topic = IdentTopic::new(topics::QUERIES);
+        let response_topic = IdentTopic::new(topics::QUERY_RESPONSES);
+
         self.swarm
             .behaviour_mut()
             .gossipsub
             .subscribe(&advert_topic)?;
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&query_topic)?;
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&response_topic)?;
 
         // Connect to bootstrap peers
         for peer_addr in &config.bootstrap_peers {
@@ -242,6 +280,8 @@ impl NetworkNode {
         }
 
         // Main event loop
+        let mut query_timeout_check = tokio::time::interval(Duration::from_millis(100));
+
         loop {
             tokio::select! {
                 // Handle swarm events
@@ -255,6 +295,10 @@ impl NetworkNode {
                         break;
                     }
                     self.handle_command(cmd).await;
+                }
+                // Check for query timeouts
+                _ = query_timeout_check.tick() => {
+                    self.check_query_timeouts();
                 }
             }
         }
@@ -346,7 +390,7 @@ impl NetworkNode {
                 if let Ok(msg) = bincode::deserialize::<NetworkMessage>(&message.data) {
                     match msg {
                         NetworkMessage::Advertisement(advert) => {
-                            let node_id = advert.node_id.clone();
+                            let _node_id = advert.node_id.clone();
                             self.node_advertisements
                                 .write()
                                 .insert(propagation_source, advert.clone());
@@ -354,6 +398,33 @@ impl NetworkNode {
                                 .event_tx
                                 .send(NetworkEvent::AdvertisementReceived(advert))
                                 .await;
+                        }
+                        NetworkMessage::QueryRequest(request) => {
+                            // Check if this query is for us (or broadcast)
+                            debug!("Received query request: {}", request.request_id);
+                            let _ = self
+                                .event_tx
+                                .send(NetworkEvent::QueryReceived {
+                                    peer_id: propagation_source,
+                                    request,
+                                })
+                                .await;
+                        }
+                        NetworkMessage::QueryResponse(response) => {
+                            // Check if we have a pending query for this response
+                            debug!("Received query response: {}", response.request_id);
+                            if let Some(pending) = self.pending_queries.get_mut(&response.request_id) {
+                                pending.responses.push(response.clone());
+
+                                // Check if we've received all expected responses
+                                if pending.responses.len() >= pending.expected_peers.len()
+                                    || Instant::now() >= pending.deadline {
+                                    // Complete the query
+                                    if let Some(pending) = self.pending_queries.remove(&response.request_id) {
+                                        let _ = pending.response_tx.send(pending.responses);
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -406,17 +477,52 @@ impl NetworkNode {
                 peers,
                 request,
                 response_tx,
+                timeout,
             } => {
-                // For now, we'll implement a simple broadcast query
-                // In a full implementation, this would use request-response protocol
                 let msg = NetworkMessage::QueryRequest(request.clone());
                 if let Ok(data) = bincode::serialize(&msg) {
-                    // Store pending query
-                    // In full impl, track per-peer responses
-                    debug!("Sending query to {} peers", peers.len());
+                    debug!("Sending query {} to {} peers", request.request_id, peers.len());
 
-                    // For now, just send empty response (actual impl would wait)
-                    let _ = response_tx.send(Vec::new());
+                    // Store pending query
+                    self.pending_queries.insert(
+                        request.request_id.clone(),
+                        PendingQuery {
+                            response_tx,
+                            responses: Vec::new(),
+                            expected_peers: peers.clone(),
+                            deadline: Instant::now() + timeout,
+                        },
+                    );
+
+                    // Publish query via GossipSub
+                    let topic = IdentTopic::new(topics::QUERIES);
+                    if let Err(e) = self
+                        .swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .publish(topic, data)
+                    {
+                        warn!("Failed to publish query: {}", e);
+                        // Remove pending query and send empty response
+                        if let Some(pending) = self.pending_queries.remove(&request.request_id) {
+                            let _ = pending.response_tx.send(Vec::new());
+                        }
+                    }
+                }
+            }
+            NetworkCommand::SendQueryResponse(response) => {
+                let msg = NetworkMessage::QueryResponse(response.clone());
+                if let Ok(data) = bincode::serialize(&msg) {
+                    debug!("Sending query response: {}", response.request_id);
+                    let topic = IdentTopic::new(topics::QUERY_RESPONSES);
+                    if let Err(e) = self
+                        .swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .publish(topic, data)
+                    {
+                        warn!("Failed to publish query response: {}", e);
+                    }
                 }
             }
             NetworkCommand::BroadcastAdvertisement(advert) => {
@@ -439,6 +545,28 @@ impl NetworkNode {
             }
             NetworkCommand::Shutdown => {
                 // Handled in main loop
+            }
+        }
+    }
+
+    /// Check for timed-out queries and complete them with whatever responses we have
+    fn check_query_timeouts(&mut self) {
+        let now = Instant::now();
+        let timed_out: Vec<String> = self
+            .pending_queries
+            .iter()
+            .filter(|(_, q)| now >= q.deadline)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for request_id in timed_out {
+            if let Some(pending) = self.pending_queries.remove(&request_id) {
+                debug!(
+                    "Query {} timed out with {} responses",
+                    request_id,
+                    pending.responses.len()
+                );
+                let _ = pending.response_tx.send(pending.responses);
             }
         }
     }

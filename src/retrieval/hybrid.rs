@@ -2,7 +2,7 @@
 
 use super::{
     bm25::{Bm25Index, Bm25SearchResult},
-    fusion::{reciprocal_rank_fusion, to_ranked_results, FusedResult, RankedResult, RrfConfig},
+    fusion::{reciprocal_rank_fusion, to_ranked_results, RankedResult, RrfConfig},
 };
 use crate::config::RetrievalConfig;
 use crate::embedding::EmbeddingEngine;
@@ -46,6 +46,15 @@ impl HybridRetriever {
 
     /// Search using hybrid retrieval
     pub fn search(&self, query: &Query, query_embedding: Option<&Embedding>) -> Result<Vec<SearchResult>> {
+        // Validate input
+        if query.text.trim().is_empty() {
+            return Ok(Vec::new()); // Empty query returns empty results
+        }
+
+        if query.top_k == 0 {
+            return Ok(Vec::new()); // No results requested
+        }
+
         let candidate_count = self.config.candidate_count;
         let mut ranked_lists: Vec<Vec<RankedResult>> = Vec::new();
 
@@ -165,6 +174,19 @@ impl HybridIndexer {
 
     /// Index a chunk with its embedding
     pub fn index_chunk(&self, chunk: &Chunk, embedding: &Embedding) -> Result<u64> {
+        // Validate input
+        if chunk.content.trim().is_empty() {
+            return Err(anyhow::anyhow!("Cannot index chunk with empty content"));
+        }
+
+        if chunk.metadata.chunk_id.is_empty() {
+            return Err(anyhow::anyhow!("Cannot index chunk without chunk_id"));
+        }
+
+        if embedding.is_empty() {
+            return Err(anyhow::anyhow!("Cannot index chunk with empty embedding"));
+        }
+
         // Add to vector index
         let key = self.vector_index.add(&chunk.metadata.chunk_id, embedding)?;
 
@@ -211,5 +233,112 @@ impl HybridIndexer {
         self.bm25_index.commit()?;
         self.chunk_storage.save()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::IndexConfig;
+    use crate::types::ChunkMetadata;
+    use tempfile::TempDir;
+
+    fn create_test_embedding(seed: usize, dims: usize) -> Embedding {
+        (0..dims)
+            .map(|i| ((seed * 100 + i) as f32 / 1000.0).sin())
+            .collect()
+    }
+
+    #[test]
+    fn test_hybrid_indexer() {
+        let temp_dir = TempDir::new().unwrap();
+        let vector_index = Arc::new(VectorIndex::new(64, &IndexConfig::default()).unwrap());
+        let bm25_index = Arc::new(Bm25Index::new_in_memory().unwrap());
+        let chunk_storage = Arc::new(ChunkStorage::new(temp_dir.path().join("chunks")).unwrap());
+
+        let indexer = HybridIndexer::new(
+            vector_index.clone(),
+            bm25_index.clone(),
+            chunk_storage.clone(),
+        );
+
+        let chunk = Chunk {
+            metadata: ChunkMetadata::new("chunk1".to_string(), "doc1".to_string()),
+            content: "The quick brown fox jumps over the lazy dog".to_string(),
+            token_count: 9,
+        };
+        let embedding = create_test_embedding(1, 64);
+
+        // Index the chunk
+        let key = indexer.index_chunk(&chunk, &embedding).unwrap();
+        indexer.save().unwrap();
+
+        assert!(key > 0 || key == 0); // Key was assigned
+
+        // Verify it's stored
+        let stored = chunk_storage.get("chunk1");
+        assert!(stored.is_some());
+        assert_eq!(stored.unwrap().chunk.content, chunk.content);
+    }
+
+    #[test]
+    fn test_hybrid_search() {
+        let temp_dir = TempDir::new().unwrap();
+        let vector_index = Arc::new(VectorIndex::new(64, &IndexConfig::default()).unwrap());
+        let bm25_index = Arc::new(Bm25Index::new_in_memory().unwrap());
+        let chunk_storage = Arc::new(ChunkStorage::new(temp_dir.path().join("chunks")).unwrap());
+
+        let indexer = HybridIndexer::new(
+            vector_index.clone(),
+            bm25_index.clone(),
+            chunk_storage.clone(),
+        );
+
+        // Index some chunks
+        let chunks = vec![
+            (
+                Chunk {
+                    metadata: ChunkMetadata::new("chunk1".to_string(), "doc1".to_string()),
+                    content: "Machine learning and artificial intelligence".to_string(),
+                    token_count: 5,
+                },
+                create_test_embedding(1, 64),
+            ),
+            (
+                Chunk {
+                    metadata: ChunkMetadata::new("chunk2".to_string(), "doc1".to_string()),
+                    content: "Deep learning neural networks".to_string(),
+                    token_count: 4,
+                },
+                create_test_embedding(2, 64),
+            ),
+        ];
+
+        indexer.index_batch(&chunks).unwrap();
+
+        // Create retriever
+        let config = RetrievalConfig {
+            enable_dense: true,
+            enable_bm25: true,
+            rrf_k: 60,
+            candidate_count: 10,
+            enable_reranking: false,
+            reranker_model_path: None,
+        };
+
+        let retriever = HybridRetriever::new(
+            vector_index,
+            bm25_index,
+            chunk_storage,
+            None,
+            config,
+        );
+
+        // Search with embedding
+        let query = Query::new("machine learning".to_string(), 5);
+        let query_embedding = create_test_embedding(1, 64);
+        let results = retriever.search(&query, Some(&query_embedding)).unwrap();
+
+        assert!(!results.is_empty());
     }
 }

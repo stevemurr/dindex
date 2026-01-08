@@ -1,6 +1,9 @@
 //! BM25 lexical search using Tantivy
 
-use crate::types::{Chunk, ChunkId, ChunkMetadata};
+use crate::types::{Chunk, ChunkId};
+
+#[cfg(test)]
+use crate::types::ChunkMetadata;
 use anyhow::{Context, Result};
 use std::path::Path;
 use tantivy::{
@@ -10,7 +13,7 @@ use tantivy::{
     schema::{Field, Schema, Value, STORED, TEXT},
     Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument,
 };
-use tracing::{debug, info};
+use tracing::debug;
 
 /// BM25 search index using Tantivy
 pub struct Bm25Index {
@@ -124,6 +127,8 @@ impl Bm25Index {
     /// Commit pending changes
     pub fn commit(&self) -> Result<()> {
         self.writer.lock().commit()?;
+        // Force reader reload to see committed changes immediately
+        self.reader.reload()?;
         Ok(())
     }
 

@@ -217,7 +217,7 @@ impl TextSplitter {
     fn find_split_point(
         &self,
         chars: &[char],
-        start: usize,
+        _start: usize,
         target_end: usize,
         content_len: usize,
     ) -> usize {
@@ -227,7 +227,7 @@ impl TextSplitter {
 
         // Look for paragraph break first (double newline)
         let search_start = target_end.saturating_sub(100);
-        let search_end = (target_end + 100).min(content_len);
+        let _search_end = (target_end + 100).min(content_len);
 
         for i in (search_start..target_end).rev() {
             if i + 1 < chars.len() && chars[i] == '\n' && chars[i + 1] == '\n' {
@@ -287,6 +287,7 @@ impl TextSplitter {
 struct Section {
     hierarchy: Vec<String>,
     content: String,
+    #[allow(dead_code)]
     start_line: usize,
 }
 

@@ -1,12 +1,14 @@
 //! Index storage and persistence utilities
 
-use crate::types::{Chunk, ChunkMetadata, IndexedChunk};
-use anyhow::{Context, Result};
+use crate::types::{Chunk, IndexedChunk};
+use anyhow::Result;
+
+#[cfg(test)]
+use crate::types::ChunkMetadata;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
 
 /// Storage for chunk metadata and content
 pub struct ChunkStorage {
