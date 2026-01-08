@@ -10,8 +10,10 @@
 //! - Bulk import from offline dumps (Wikipedia, etc.)
 
 pub mod chunking;
+pub mod client;
 pub mod config;
 pub mod content;
+pub mod daemon;
 pub mod embedding;
 pub mod import;
 pub mod index;

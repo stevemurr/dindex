@@ -1,0 +1,46 @@
+[Unit]
+Description=DIndex Daemon - Decentralized Semantic Search Index
+Documentation=https://github.com/stevemurr/dindex
+After=network.target
+
+[Service]
+Type=simple
+User=dindex
+Group=dindex
+ExecStart=/usr/local/bin/dindex start --foreground
+ExecStop=/usr/local/bin/dindex daemon stop
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=SIGTERM
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=4G
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+
+# Directories
+WorkingDirectory=/var/lib/dindex
+RuntimeDirectory=dindex
+StateDirectory=dindex
+ConfigurationDirectory=dindex
+
+# Environment
+Environment="RUST_LOG=info"
+Environment="DINDEX_DATA_DIR=/var/lib/dindex"
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dindex
+
+[Install]
+WantedBy=multi-user.target

@@ -6,8 +6,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dindex::{
     chunking::TextSplitter,
+    client::{self, ClientError, DaemonClient},
     config::Config,
     content::{extract_from_bytes, extract_from_path, ContentType},
+    daemon::{self, Daemon, OutputFormat},
     embedding::ModelManager,
     import::{DumpFormat, ImportCheckpoint, ImportCoordinatorBuilder, WikimediaSource},
     index::{ChunkStorage, DocumentRegistry, VectorIndex},
@@ -24,7 +26,7 @@ use dindex::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use url::Url;
 
@@ -51,7 +53,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the DIndex node
+    /// Manage the DIndex daemon
+    #[command(name = "daemon")]
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+
+    /// Start the DIndex node (daemon + P2P)
     Start {
         /// Listen address
         #[arg(short, long)]
@@ -60,6 +69,10 @@ enum Commands {
         /// Bootstrap peers
         #[arg(short, long)]
         bootstrap: Vec<String>,
+
+        /// Run in foreground (don't daemonize)
+        #[arg(short, long)]
+        foreground: bool,
     },
 
     /// Index a document or directory
@@ -218,6 +231,23 @@ enum CliDumpFormat {
     Warc,
 }
 
+/// Daemon management actions
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Start the daemon
+    Start {
+        /// Run in foreground (don't daemonize)
+        #[arg(short, long)]
+        foreground: bool,
+    },
+    /// Stop the running daemon
+    Stop,
+    /// Check daemon status
+    Status,
+    /// Restart the daemon
+    Restart,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -252,8 +282,13 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&config.node.data_dir)?;
 
     match cli.command {
-        Commands::Start { listen, bootstrap } => {
-            start_node(config, listen, bootstrap).await
+        Commands::Daemon { action } => handle_daemon(config, action).await,
+        Commands::Start {
+            listen,
+            bootstrap,
+            foreground,
+        } => {
+            start_node(config, listen, bootstrap, foreground).await
         }
         Commands::Index { path, title, url } => {
             index_document(config, path, title, url).await
@@ -314,25 +349,102 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Handle daemon management commands
+async fn handle_daemon(config: Config, action: DaemonAction) -> Result<()> {
+    match action {
+        DaemonAction::Start { foreground } => {
+            if daemon::is_daemon_running(&config.node.data_dir) {
+                println!("Daemon is already running");
+                return Ok(());
+            }
+
+            if foreground {
+                println!("Starting daemon in foreground...");
+                let daemon = Daemon::start(config).await?;
+                daemon.run().await?;
+            } else {
+                // For now, just start in foreground
+                // TODO: Implement true daemonization
+                println!("Starting daemon...");
+                let daemon = Daemon::start(config).await?;
+                daemon.run().await?;
+            }
+            Ok(())
+        }
+        DaemonAction::Stop => {
+            if !daemon::is_daemon_running(&config.node.data_dir) {
+                println!("Daemon is not running");
+                return Ok(());
+            }
+
+            println!("Stopping daemon...");
+            match client::shutdown().await {
+                Ok(()) => println!("Daemon stopped"),
+                Err(ClientError::DaemonNotRunning) => println!("Daemon is not running"),
+                Err(e) => anyhow::bail!("Failed to stop daemon: {}", e),
+            }
+            Ok(())
+        }
+        DaemonAction::Status => {
+            match client::status().await {
+                Ok(status) => {
+                    println!("Daemon Status:");
+                    println!("  Running: {}", status.running);
+                    println!("  Uptime: {}s", status.uptime_seconds);
+                    println!("  Memory: {} MB", status.memory_mb);
+                    println!("  Active Jobs: {}", status.active_jobs);
+                    println!("  Pending Writes: {}", status.pending_writes);
+                }
+                Err(ClientError::DaemonNotRunning) => {
+                    println!("Daemon is not running");
+                    if let Some(pid) = daemon::get_daemon_pid(&config.node.data_dir) {
+                        println!("  Stale PID file found (PID {})", pid);
+                    }
+                }
+                Err(e) => anyhow::bail!("Failed to get status: {}", e),
+            }
+            Ok(())
+        }
+        DaemonAction::Restart => {
+            // Stop first if running
+            if daemon::is_daemon_running(&config.node.data_dir) {
+                println!("Stopping daemon...");
+                let _ = client::shutdown().await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+
+            println!("Starting daemon...");
+            let daemon = Daemon::start(config).await?;
+            daemon.run().await?;
+            Ok(())
+        }
+    }
+}
+
 async fn start_node(
     mut config: Config,
     listen: Option<String>,
     bootstrap: Vec<String>,
+    foreground: bool,
 ) -> Result<()> {
     if let Some(addr) = listen {
         config.node.listen_addr = addr;
     }
     config.node.bootstrap_peers.extend(bootstrap);
 
-    info!("Starting DIndex node...");
+    info!("Starting DIndex node (daemon + P2P)...");
     info!("Data directory: {}", config.node.data_dir.display());
 
-    // Initialize components
+    // Start daemon first
+    let daemon = Daemon::start(config.clone()).await?;
+    info!("Daemon started");
+
+    // Initialize P2P components
     let (node, handle, mut event_rx) = NetworkNode::new(&config.node).await?;
 
     info!("Node started with peer ID: {}", handle.local_peer_id);
 
-    // Run the node
+    // Run the P2P node in background
     let node_config = config.node.clone();
     tokio::spawn(async move {
         if let Err(e) = node.run(&node_config).await {
@@ -340,10 +452,8 @@ async fn start_node(
         }
     });
 
-    // Handle events
-    while let Some(event) = event_rx.recv().await {
-        info!("Network event: {:?}", event);
-    }
+    // Run daemon (this blocks until shutdown)
+    daemon.run().await?;
 
     Ok(())
 }
@@ -441,7 +551,26 @@ async fn index_document(
 
     info!("Created {} chunks", chunks.len());
 
-    // Initialize index components
+    // Try daemon first
+    match client::index_chunks(chunks.clone()).await {
+        Ok(stats) => {
+            info!(
+                "Indexed {} chunks via daemon in {}ms",
+                stats.chunks_indexed, stats.duration_ms
+            );
+            return Ok(());
+        }
+        Err(ClientError::DaemonNotRunning) => {
+            // Fallback to direct access
+            tracing::debug!("Daemon not running, using direct access");
+        }
+        Err(e) => {
+            tracing::warn!("Daemon indexing failed: {}, falling back to direct access", e);
+        }
+    }
+
+    // Direct access fallback
+    info!("Using direct index access (daemon not available)");
     let index_path = config.node.data_dir.join("vector.index");
     let vector_index = Arc::new(VectorIndex::new(
         config.embedding.dimensions,
@@ -496,7 +625,29 @@ async fn search_index(
 ) -> Result<()> {
     info!("Searching for: {}", query_text);
 
-    // Load index
+    // Convert format string to OutputFormat
+    let output_format = match format.as_str() {
+        "json" => OutputFormat::Json,
+        "json-pretty" => OutputFormat::JsonPretty,
+        _ => OutputFormat::Text,
+    };
+
+    // Try daemon first
+    match client::search(&query_text, top_k, output_format.clone()).await {
+        Ok(results) => {
+            output_search_results(&results, &format);
+            return Ok(());
+        }
+        Err(ClientError::DaemonNotRunning) => {
+            // Fallback to direct access
+            tracing::debug!("Daemon not running, using direct access");
+        }
+        Err(e) => {
+            tracing::warn!("Daemon search failed: {}, falling back to direct access", e);
+        }
+    }
+
+    // Direct access fallback
     let index_path = config.node.data_dir.join("vector.index");
     let vector_index = if index_path.exists() {
         Arc::new(VectorIndex::load(&index_path, &config.index)?)
@@ -531,10 +682,15 @@ async fn search_index(
     // Execute search
     let results = retriever.search(&query, Some(&query_embedding))?;
 
-    // Output results
-    match format.as_str() {
+    output_search_results(&results, &format);
+    Ok(())
+}
+
+/// Output search results in the requested format
+fn output_search_results(results: &[dindex::types::SearchResult], format: &str) {
+    match format {
         "json" => {
-            let json = serde_json::to_string_pretty(&results)?;
+            let json = serde_json::to_string_pretty(results).unwrap_or_default();
             println!("{}", json);
         }
         _ => {
@@ -551,13 +707,27 @@ async fn search_index(
             }
         }
     }
-
-    Ok(())
 }
 
 async fn show_stats(config: Config) -> Result<()> {
     info!("Loading index statistics...");
 
+    // Try daemon first
+    if let Ok(stats) = client::stats().await {
+        println!("\nDIndex Statistics (via daemon):");
+        println!("================================");
+        println!("Data directory: {}", config.node.data_dir.display());
+        println!("Total documents: {}", stats.total_documents);
+        println!("Total chunks: {}", stats.total_chunks);
+        println!("Vector index size: {} bytes", stats.vector_index_size_bytes);
+        println!("BM25 index size: {} bytes", stats.bm25_index_size_bytes);
+        println!("Storage size: {} bytes", stats.storage_size_bytes);
+        println!("Embedding dimensions: {}", config.embedding.dimensions);
+        println!("Model: {}", config.embedding.model_name);
+        return Ok(());
+    }
+
+    // Fallback to direct access
     let chunk_storage = ChunkStorage::load(&config.node.data_dir)?;
 
     println!("\nDIndex Statistics:");
@@ -751,6 +921,70 @@ async fn scrape_urls(
     }
 
     info!("Seed URLs: {:?}", seeds.iter().map(|u| u.as_str()).collect::<Vec<_>>());
+
+    // Try daemon first if indexing is requested
+    if should_index {
+        use crate::daemon::protocol::ScrapeOptions;
+
+        let options = ScrapeOptions {
+            max_depth,
+            stay_on_domain,
+            delay_ms,
+            max_pages,
+        };
+
+        match client::start_scrape(url_strings.clone(), options).await {
+            Ok(job_id) => {
+                info!("Scrape job started via daemon: {}", job_id);
+                println!("Scrape job started: {}", job_id);
+                println!("Monitoring progress...");
+
+                // Poll for progress
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    match client::job_progress(job_id).await {
+                        Ok(progress) => {
+                            let rate_str = progress.rate.map(|r| format!("{:.1} pages/s", r)).unwrap_or_default();
+                            let eta_str = progress.eta_seconds.map(|e| format!("ETA: {}s", e)).unwrap_or_default();
+                            print!("\r{}: {}/{} {} {}",
+                                progress.stage,
+                                progress.current,
+                                progress.total.unwrap_or(0),
+                                rate_str,
+                                eta_str
+                            );
+                            use std::io::Write;
+                            std::io::stdout().flush().ok();
+
+                            if progress.stage == "completed" || progress.stage == "failed" || progress.stage == "cancelled" {
+                                println!("\nScrape {}", progress.stage);
+                                break;
+                            }
+                        }
+                        Err(ClientError::JobNotFound(_)) => {
+                            println!("\nScrape completed");
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("Error getting job progress: {}", e);
+                        }
+                    }
+                }
+
+                return Ok(());
+            }
+            Err(ClientError::DaemonNotRunning) => {
+                info!("Daemon not running, using direct scraping");
+            }
+            Err(e) => {
+                warn!("Daemon scrape failed: {}, falling back to direct scraping", e);
+            }
+        }
+    }
+
+    // Direct scraping fallback
+    info!("Using direct scraping (daemon not available or not indexing)");
 
     // Create scraping config
     let scraping_config = ScrapingCoordConfig {
@@ -964,11 +1198,86 @@ async fn import_dump(
 
     info!("Importing from: {} (format: {:?})", path.display(), dump_format);
 
+    // Try daemon first for Wikimedia XML format
+    if matches!(dump_format, DumpFormat::WikimediaXml) {
+        use crate::daemon::protocol::{ImportOptions, ImportSource};
+
+        let source = ImportSource::WikimediaXml {
+            path: path.to_string_lossy().to_string(),
+        };
+        let options = ImportOptions {
+            batch_size,
+            deduplicate: !no_dedup,
+            min_content_length: min_length,
+            max_documents: max_docs,
+        };
+
+        match client::start_import(source, options).await {
+            Ok(job_id) => {
+                info!("Import job started via daemon: {}", job_id);
+                if !quiet {
+                    println!("Import job started: {}", job_id);
+                    println!("Monitoring progress...");
+                }
+
+                // Poll for progress
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    match client::job_progress(job_id).await {
+                        Ok(progress) => {
+                            if !quiet {
+                                let rate_str = progress.rate.map(|r| format!("{:.1} docs/s", r)).unwrap_or_default();
+                                let eta_str = progress.eta_seconds.map(|e| format!("ETA: {}s", e)).unwrap_or_default();
+                                print!("\r{}: {} processed {} {}",
+                                    progress.stage,
+                                    progress.current,
+                                    rate_str,
+                                    eta_str
+                                );
+                                use std::io::Write;
+                                std::io::stdout().flush().ok();
+                            }
+
+                            if progress.stage == "completed" || progress.stage == "failed" || progress.stage == "cancelled" {
+                                if !quiet {
+                                    println!("\nImport {}", progress.stage);
+                                }
+                                break;
+                            }
+                        }
+                        Err(ClientError::JobNotFound(_)) => {
+                            // Job completed and was cleaned up
+                            if !quiet {
+                                println!("\nImport completed");
+                            }
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("Error getting job progress: {}", e);
+                        }
+                    }
+                }
+
+                return Ok(());
+            }
+            Err(ClientError::DaemonNotRunning) => {
+                info!("Daemon not running, using direct import");
+            }
+            Err(e) => {
+                warn!("Daemon import failed: {}, falling back to direct import", e);
+            }
+        }
+    }
+
+    // Direct import fallback
+    info!("Using direct import (daemon not available)");
+
     // Determine checkpoint path
     let checkpoint_path = checkpoint.or_else(|| {
-        if config.import.enable_checkpoints {
+        if config.bulk_import.enable_checkpoints {
             let filename = path.file_name()?.to_str()?;
-            Some(config.import.checkpoint_dir.join(format!("{}.checkpoint", filename)))
+            Some(config.bulk_import.checkpoint_dir.join(format!("{}.checkpoint", filename)))
         } else {
             None
         }
@@ -1021,7 +1330,7 @@ async fn import_dump(
                 .map_err(|e| anyhow::anyhow!("Failed to open dump: {}", e))?;
 
             // Configure namespace filter from config
-            source = source.with_namespaces(Some(config.import.wikipedia_namespaces.clone()));
+            source = source.with_namespaces(Some(config.bulk_import.wikipedia_namespaces.clone()));
 
             if let Some(cp) = existing_checkpoint {
                 coordinator

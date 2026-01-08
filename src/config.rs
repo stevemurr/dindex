@@ -21,12 +21,15 @@ pub struct Config {
     /// Scraping configuration
     #[serde(default)]
     pub scraping: ScrapingConfig,
-    /// Import configuration
+    /// Bulk import configuration
     #[serde(default)]
-    pub import: BulkImportConfig,
+    pub bulk_import: BulkImportConfig,
     /// Deduplication configuration
     #[serde(default)]
     pub dedup: DedupConfig,
+    /// Daemon configuration
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 }
 
 impl Default for Config {
@@ -39,8 +42,9 @@ impl Default for Config {
             retrieval: RetrievalConfig::default(),
             routing: RoutingConfig::default(),
             scraping: ScrapingConfig::default(),
-            import: BulkImportConfig::default(),
+            bulk_import: BulkImportConfig::default(),
             dedup: DedupConfig::default(),
+            daemon: DaemonConfig::default(),
         }
     }
 }
@@ -341,6 +345,33 @@ impl Default for DedupConfig {
             simhash_distance_threshold: 3,
             normalize_content: true,
             update_near_duplicates: true,
+        }
+    }
+}
+
+/// Daemon configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    /// Automatically start daemon if not running
+    pub auto_start: bool,
+    /// Socket path override (defaults to XDG_RUNTIME_DIR/dindex/dindex.sock)
+    pub socket_path: Option<PathBuf>,
+    /// Write pipeline batch size
+    pub batch_size: usize,
+    /// Commit interval in seconds
+    pub commit_interval_secs: u64,
+    /// Maximum pending writes before forcing commit
+    pub max_pending_writes: usize,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            auto_start: false,
+            socket_path: None,
+            batch_size: 100,
+            commit_interval_secs: 30,
+            max_pending_writes: 10000,
         }
     }
 }
