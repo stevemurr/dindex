@@ -3,11 +3,13 @@
 use super::progress::ImportProgress;
 use super::source::{DumpDocument, DumpSource, ImportCheckpoint, ImportConfig, ImportError, ImportStats};
 use crate::chunking::TextSplitter;
-use crate::config::{ChunkingConfig, IndexConfig};
-use crate::index::{ChunkStorage, VectorIndex};
+use crate::config::{ChunkingConfig, DedupConfig, IndexConfig};
+use crate::index::{
+    ChunkStorage, DocumentProcessor, DocumentRegistry, ProcessingResult, ProcessorConfig,
+    VectorIndex,
+};
 use crate::retrieval::{Bm25Index, HybridIndexer};
-use crate::scraping::dedup::ContentDeduplicator;
-use crate::types::{Chunk, Embedding};
+use crate::types::Embedding;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -16,16 +18,10 @@ use tracing::{info, warn};
 pub struct ImportCoordinator {
     /// Import configuration
     config: ImportConfig,
-    /// Hybrid indexer for storing documents
-    indexer: HybridIndexer,
+    /// Document processor for unified ingestion
+    processor: DocumentProcessor,
     /// Vector index (for saving)
     vector_index: Arc<VectorIndex>,
-    /// Chunk storage (for saving)
-    chunk_storage: Arc<ChunkStorage>,
-    /// Text splitter
-    splitter: TextSplitter,
-    /// Content deduplicator
-    dedup: Option<ContentDeduplicator>,
     /// Embedding dimensions
     embedding_dims: usize,
     /// Data directory for saving
@@ -41,10 +37,17 @@ impl ImportCoordinator {
         data_dir: impl AsRef<Path>,
         chunking_config: ChunkingConfig,
         index_config: IndexConfig,
+        dedup_config: DedupConfig,
         embedding_dims: usize,
     ) -> Result<Self, ImportError> {
         let data_dir = data_dir.as_ref().to_path_buf();
-        std::fs::create_dir_all(&data_dir).map_err(|e| ImportError::Io(e))?;
+        std::fs::create_dir_all(&data_dir).map_err(ImportError::Io)?;
+
+        // Initialize document registry
+        let registry = Arc::new(
+            DocumentRegistry::load(&data_dir, dedup_config.simhash_distance_threshold)
+                .map_err(|e| ImportError::Index(e.to_string()))?,
+        );
 
         // Initialize index components
         let vector_index = Arc::new(
@@ -61,28 +64,28 @@ impl ImportCoordinator {
             ChunkStorage::new(&data_dir).map_err(|e| ImportError::Index(e.to_string()))?,
         );
 
-        let indexer = HybridIndexer::new(
+        let indexer = Arc::new(HybridIndexer::new(
             vector_index.clone(),
             bm25_index,
-            chunk_storage.clone(),
-        );
+            chunk_storage,
+        ));
 
         let splitter = TextSplitter::new(chunking_config);
 
-        let dedup = if config.deduplicate {
-            // local_node_id is used for distributed dedup tracking, use a placeholder for import
-            Some(ContentDeduplicator::new(100_000, 3, "import".to_string()))
-        } else {
-            None
+        // Create processor config from dedup config
+        let processor_config = ProcessorConfig {
+            min_content_length: config.min_content_length,
+            dedup_enabled: config.deduplicate && dedup_config.enabled,
+            simhash_threshold: dedup_config.simhash_distance_threshold,
+            update_near_duplicates: dedup_config.update_near_duplicates,
         };
+
+        let processor = DocumentProcessor::new(registry, indexer, splitter, processor_config);
 
         Ok(Self {
             config,
-            indexer,
+            processor,
             vector_index,
-            chunk_storage,
-            splitter,
-            dedup,
             embedding_dims,
             data_dir,
             quiet: false,
@@ -109,8 +112,6 @@ impl ImportCoordinator {
             self.quiet,
         );
 
-        // Process documents in batches
-        let mut batch: Vec<(Chunk, Embedding)> = Vec::with_capacity(self.config.batch_size);
         let mut docs_count = 0;
 
         for doc_result in source.iter_documents() {
@@ -133,57 +134,49 @@ impl ImportCoordinator {
                     let title = doc.title.clone();
                     let doc_size = doc.content.len() as u64;
 
-                    // Filter by content length
-                    if doc.content.len() < self.config.min_content_length {
-                        progress.document_processed(&title, false, 0, doc_size);
-                        continue;
-                    }
+                    // Process document using the unified processor
+                    let embedding_dims = self.embedding_dims;
+                    let result = self.processor.process(
+                        &doc.content,
+                        doc.url.clone(),
+                        Some(title.clone()),
+                        "wikipedia",
+                        Some(("wikipedia_id", doc.id.as_str())),
+                        |text| Self::generate_embedding(text, embedding_dims),
+                    );
 
-                    // Check for duplicate content
-                    if let Some(ref mut dedup) = self.dedup {
-                        if dedup.is_duplicate_local(&doc.content).is_some() {
+                    match result {
+                        Ok(ProcessingResult::Indexed { chunks_created, .. }) => {
+                            progress.document_processed(&title, true, chunks_created, doc_size);
+                            docs_count += 1;
+                        }
+                        Ok(ProcessingResult::MetadataUpdated { .. }) => {
+                            // Document already exists, metadata updated
                             progress.document_processed(&title, false, 0, doc_size);
-                            continue;
+                        }
+                        Ok(ProcessingResult::ContentUpdated { chunks_created, .. }) => {
+                            // Document content updated
+                            progress.document_processed(&title, true, chunks_created, doc_size);
+                            docs_count += 1;
+                        }
+                        Ok(ProcessingResult::Skipped { reason, .. }) => {
+                            tracing::debug!("Skipped document '{}': {}", title, reason);
+                            progress.document_processed(&title, false, 0, doc_size);
+                        }
+                        Err(e) => {
+                            warn!("Error processing document '{}': {}", title, e);
+                            progress.document_error(&e.to_string());
                         }
                     }
-
-                    // Convert to Document and chunk
-                    let chunks = self.process_document(&doc);
-
-                    if chunks.is_empty() {
-                        progress.document_processed(&title, false, 0, doc_size);
-                        continue;
-                    }
-
-                    let chunk_count = chunks.len();
-
-                    // Add to batch
-                    for chunk in chunks {
-                        batch.push(chunk);
-
-                        // Process batch when full
-                        if batch.len() >= self.config.batch_size {
-                            self.index_batch(&batch)?;
-                            batch.clear();
-                        }
-                    }
-
-                    progress.document_processed(&title, true, chunk_count, doc_size);
-                    docs_count += 1;
                 }
                 Err(e) => {
-                    warn!("Error processing document: {}", e);
+                    warn!("Error reading document: {}", e);
                     progress.document_error(&e.to_string());
                 }
             }
         }
 
-        // Process remaining batch
-        if !batch.is_empty() {
-            self.index_batch(&batch)?;
-        }
-
-        // Save indices
+        // Save all data
         self.save()?;
 
         progress.finish();
@@ -213,43 +206,19 @@ impl ImportCoordinator {
         self.import(source)
     }
 
-    /// Process a single document into chunks with embeddings
-    fn process_document(&self, doc: &DumpDocument) -> Vec<(Chunk, Embedding)> {
-        let document = doc.to_document();
-        let chunks = self.splitter.split_document(&document);
-
-        // Generate embeddings for each chunk
-        chunks
-            .into_iter()
-            .map(|chunk| {
-                let embedding = self.generate_embedding(&chunk.content);
-                (chunk, embedding)
-            })
-            .collect()
-    }
-
     /// Generate embedding for text (placeholder - uses hash-based pseudo-embedding)
-    fn generate_embedding(&self, text: &str) -> Embedding {
+    fn generate_embedding(text: &str, dims: usize) -> Embedding {
         // In production, this would use the real embedding engine
         // For now, create deterministic pseudo-embeddings based on content hash
         let hash = xxhash_rust::xxh3::xxh3_64(text.as_bytes());
 
-        (0..self.embedding_dims)
+        (0..dims)
             .map(|i| {
                 let h = hash.wrapping_add(i as u64);
                 // Use hash to generate pseudo-random values in [-1, 1]
                 ((h % 2000) as f32 / 1000.0) - 1.0
             })
             .collect()
-    }
-
-    /// Index a batch of chunks
-    fn index_batch(&self, batch: &[(Chunk, Embedding)]) -> Result<(), ImportError> {
-        let refs: Vec<(Chunk, Embedding)> = batch.to_vec();
-        self.indexer
-            .index_batch(&refs)
-            .map_err(|e| ImportError::Index(e.to_string()))?;
-        Ok(())
     }
 
     /// Save all indices to disk
@@ -259,12 +228,17 @@ impl ImportCoordinator {
             .save(&index_path)
             .map_err(|e| ImportError::Index(e.to_string()))?;
 
-        self.indexer
+        self.processor
             .save()
             .map_err(|e| ImportError::Index(e.to_string()))?;
 
         info!("Saved indices to {}", self.data_dir.display());
         Ok(())
+    }
+
+    /// Get access to the document processor
+    pub fn processor(&self) -> &DocumentProcessor {
+        &self.processor
     }
 }
 
@@ -274,6 +248,7 @@ pub struct ImportCoordinatorBuilder {
     data_dir: PathBuf,
     chunking_config: ChunkingConfig,
     index_config: IndexConfig,
+    dedup_config: DedupConfig,
     embedding_dims: usize,
     quiet: bool,
 }
@@ -286,6 +261,7 @@ impl ImportCoordinatorBuilder {
             data_dir: data_dir.as_ref().to_path_buf(),
             chunking_config: ChunkingConfig::default(),
             index_config: IndexConfig::default(),
+            dedup_config: DedupConfig::default(),
             embedding_dims: 768,
             quiet: false,
         }
@@ -345,6 +321,12 @@ impl ImportCoordinatorBuilder {
         self
     }
 
+    /// Set dedup configuration
+    pub fn with_dedup_config(mut self, config: DedupConfig) -> Self {
+        self.dedup_config = config;
+        self
+    }
+
     /// Set quiet mode
     pub fn with_quiet(mut self, quiet: bool) -> Self {
         self.quiet = quiet;
@@ -358,6 +340,7 @@ impl ImportCoordinatorBuilder {
             self.data_dir,
             self.chunking_config,
             self.index_config,
+            self.dedup_config,
             self.embedding_dims,
         )
         .map(|c| c.with_quiet(self.quiet))
@@ -392,17 +375,9 @@ mod tests {
 
     #[test]
     fn test_generate_embedding() {
-        let temp_dir = TempDir::new().unwrap();
-
-        let coordinator = ImportCoordinatorBuilder::new(temp_dir.path())
-            .with_embedding_dims(64)
-            .with_quiet(true)
-            .build()
-            .unwrap();
-
-        let embedding1 = coordinator.generate_embedding("test content");
-        let embedding2 = coordinator.generate_embedding("test content");
-        let embedding3 = coordinator.generate_embedding("different content");
+        let embedding1 = ImportCoordinator::generate_embedding("test content", 64);
+        let embedding2 = ImportCoordinator::generate_embedding("test content", 64);
+        let embedding3 = ImportCoordinator::generate_embedding("different content", 64);
 
         // Same content should produce same embedding
         assert_eq!(embedding1, embedding2);

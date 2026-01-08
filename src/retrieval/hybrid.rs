@@ -228,6 +228,26 @@ impl HybridIndexer {
         Ok(())
     }
 
+    /// Remove all chunks for a document
+    pub fn remove_document(&self, document_id: &str) -> Result<usize> {
+        // Get all chunks for this document
+        let chunks = self.chunk_storage.get_by_document(document_id);
+        let count = chunks.len();
+
+        // Remove each chunk
+        for stored_chunk in chunks {
+            let chunk_id = &stored_chunk.chunk.metadata.chunk_id;
+            self.vector_index.remove(chunk_id)?;
+            self.bm25_index.delete(chunk_id)?;
+            self.chunk_storage.remove(chunk_id);
+        }
+
+        // Commit BM25 changes
+        self.bm25_index.commit()?;
+
+        Ok(count)
+    }
+
     /// Save all indices
     pub fn save(&self) -> Result<()> {
         self.bm25_index.commit()?;

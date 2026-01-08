@@ -19,7 +19,8 @@ use super::{
     politeness::{FetchDecision, PolitenessConfig, PolitenessController},
 };
 
-use crate::types::Document;
+use crate::index::{DocumentRegistry, DuplicateCheckResult};
+use crate::types::{Document, DocumentIdentity};
 
 /// Configuration for the scraping coordinator
 #[derive(Debug, Clone)]
@@ -128,8 +129,10 @@ pub struct ScrapingCoordinator {
     extractor: ContentExtractor,
     /// URL deduplicator
     url_dedup: Arc<RwLock<UrlDeduplicator>>,
-    /// Content deduplicator
+    /// Content deduplicator (legacy, used if no registry is provided)
     content_dedup: Arc<RwLock<ContentDeduplicator>>,
+    /// Document registry for unified deduplication (optional)
+    document_registry: Option<Arc<DocumentRegistry>>,
     /// Statistics
     stats: Arc<RwLock<ScrapingStats>>,
     /// Seed domains (for stay_on_domain mode)
@@ -167,10 +170,17 @@ impl ScrapingCoordinator {
             extractor,
             url_dedup: Arc::new(RwLock::new(url_dedup)),
             content_dedup: Arc::new(RwLock::new(content_dedup)),
+            document_registry: None,
             stats: Arc::new(RwLock::new(ScrapingStats::default())),
             seed_domains: HashSet::new(),
             running: Arc::new(RwLock::new(false)),
         })
+    }
+
+    /// Set the document registry for unified deduplication
+    pub fn with_document_registry(mut self, registry: Arc<DocumentRegistry>) -> Self {
+        self.document_registry = Some(registry);
+        self
     }
 
     /// Add seed URLs to start crawling
@@ -299,8 +309,55 @@ impl ScrapingCoordinator {
             }
         };
 
-        // Check content deduplication
-        let simhash = {
+        // Check content deduplication using registry if available, otherwise use legacy dedup
+        let simhash = if let Some(ref registry) = self.document_registry {
+            // Use unified document registry for deduplication
+            let identity = DocumentIdentity::compute(&content.text_content);
+
+            match registry.check_duplicate(&identity) {
+                DuplicateCheckResult::ExactMatch { entry } => {
+                    // Exact match - update URL mapping and skip
+                    registry.update_metadata(&entry.content_id, Some(url.to_string()), None);
+
+                    let mut stats = self.stats.write().await;
+                    stats.duplicates_skipped += 1;
+
+                    return ProcessResult {
+                        url: url.clone(),
+                        success: false,
+                        content: None,
+                        metadata: None,
+                        simhash: None,
+                        discovered_urls: Vec::new(),
+                        error: Some(format!("Duplicate of {}", entry.content_id)),
+                        duration: start.elapsed(),
+                    };
+                }
+                DuplicateCheckResult::NearDuplicate { entry, hamming_distance } => {
+                    // Near-duplicate - update URL mapping and skip
+                    registry.update_metadata(&entry.content_id, Some(url.to_string()), None);
+
+                    let mut stats = self.stats.write().await;
+                    stats.duplicates_skipped += 1;
+
+                    return ProcessResult {
+                        url: url.clone(),
+                        success: false,
+                        content: None,
+                        metadata: None,
+                        simhash: None,
+                        discovered_urls: Vec::new(),
+                        error: Some(format!("Near-duplicate of {} (distance: {})", entry.content_id, hamming_distance)),
+                        duration: start.elapsed(),
+                    };
+                }
+                DuplicateCheckResult::New => {
+                    // New content - will be registered after processing
+                    SimHash(identity.simhash)
+                }
+            }
+        } else {
+            // Legacy deduplication using ContentDeduplicator
             let mut content_dedup = self.content_dedup.write().await;
 
             if let Some(existing_doc) = content_dedup.is_duplicate_local(&content.text_content) {
