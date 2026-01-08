@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use dindex::{
     chunking::TextSplitter,
     config::Config,
+    content::{extract_from_bytes, extract_from_path, ContentType},
     embedding::ModelManager,
     import::{DumpFormat, ImportCheckpoint, ImportCoordinatorBuilder, WikimediaSource},
     index::{ChunkStorage, DocumentRegistry, VectorIndex},
@@ -353,25 +354,70 @@ async fn index_document(
     title: Option<String>,
     url: Option<String>,
 ) -> Result<()> {
-    info!("Indexing: {}", path.display());
+    let path_str = path.to_string_lossy();
 
-    // Read document content
-    let content = if path.is_file() {
-        std::fs::read_to_string(&path)?
+    // Check if path is a URL
+    let (content, extracted_title, source_url) = if path_str.starts_with("http://")
+        || path_str.starts_with("https://")
+    {
+        info!("Fetching URL: {}", path_str);
+
+        // Fetch content from URL
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent("dindex/0.1")
+            .build()?;
+
+        let response = client.get(path_str.as_ref()).send().await?;
+
+        // Get content type from headers or URL
+        let content_type_header = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        let content_type = if !content_type_header.is_empty() {
+            ContentType::from_mime(content_type_header)
+        } else {
+            ContentType::from_url(&path_str)
+        };
+
+        let bytes = response.bytes().await?;
+        info!(
+            "Fetched {} bytes, content type: {:?}",
+            bytes.len(),
+            content_type
+        );
+
+        let extracted = extract_from_bytes(&bytes, content_type)?;
+        (extracted.content, extracted.title, Some(path_str.to_string()))
+    } else if path.is_file() {
+        info!("Indexing file: {}", path.display());
+
+        let extracted = extract_from_path(&path)?;
+        (extracted.content, extracted.title, url)
     } else if path.is_dir() {
-        // Index all text files in directory
+        info!("Indexing directory: {}", path.display());
+
+        // Index all files in directory
         let mut combined = String::new();
         for entry in walkdir::WalkDir::new(&path)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
         {
-            if let Ok(text) = std::fs::read_to_string(entry.path()) {
-                combined.push_str(&text);
-                combined.push_str("\n\n");
+            match extract_from_path(entry.path()) {
+                Ok(extracted) => {
+                    combined.push_str(&extracted.content);
+                    combined.push_str("\n\n");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to extract {}: {}", entry.path().display(), e);
+                }
             }
         }
-        combined
+        (combined, None, url)
     } else {
         anyhow::bail!("Path does not exist: {}", path.display());
     };
@@ -380,10 +426,12 @@ async fn index_document(
     let mut doc = Document::new(content);
     if let Some(t) = title {
         doc = doc.with_title(t);
+    } else if let Some(t) = extracted_title {
+        doc = doc.with_title(t);
     } else {
         doc = doc.with_title(path.file_name().unwrap_or_default().to_string_lossy());
     }
-    if let Some(u) = url {
+    if let Some(u) = source_url {
         doc = doc.with_url(u);
     }
 

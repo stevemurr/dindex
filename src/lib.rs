@@ -11,6 +11,7 @@
 
 pub mod chunking;
 pub mod config;
+pub mod content;
 pub mod embedding;
 pub mod import;
 pub mod index;
