@@ -38,7 +38,7 @@ usearch = "2"
 
 # Embedding inference (optional - requires ONNX Runtime)
 ort = { version = "2.0.0-rc.11", optional = true }
-ndarray = "0.16"
+ndarray = "0.17"
 tokenizers = "0.20"
 
 # Serialization

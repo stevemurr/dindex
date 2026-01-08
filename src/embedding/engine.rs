@@ -5,8 +5,8 @@
 use crate::config::EmbeddingConfig;
 use crate::types::Embedding;
 use anyhow::{Context, Result};
-use ndarray::Array2;
-use ort::{execution_providers::CPUExecutionProvider, session::Session};
+use ort::{execution_providers::CPUExecutionProvider, session::Session, value::Tensor};
+use parking_lot::Mutex;
 use tokenizers::Tokenizer;
 use tracing::{debug, info};
 
@@ -14,8 +14,8 @@ use tracing::{debug, info};
 ///
 /// Uses ONNX Runtime for CPU-optimized inference.
 pub struct EmbeddingEngine {
-    /// ONNX session for inference
-    session: Session,
+    /// ONNX session for inference (wrapped in Mutex for interior mutability)
+    session: Mutex<Session>,
     /// Tokenizer for text preprocessing
     tokenizer: Tokenizer,
     /// Model configuration
@@ -60,7 +60,7 @@ impl EmbeddingEngine {
         );
 
         Ok(Self {
-            session,
+            session: Mutex::new(session),
             tokenizer,
             config: config.clone(),
         })
@@ -121,27 +121,38 @@ impl EmbeddingEngine {
             }
         }
 
-        // Create input tensors
-        let input_ids_array = Array2::from_shape_vec((batch_size, max_len), input_ids)?;
-        let attention_mask_array = Array2::from_shape_vec((batch_size, max_len), attention_mask)?;
-        let token_type_ids_array = Array2::from_shape_vec((batch_size, max_len), token_type_ids)?;
+        // Create input tensors using (shape, data) tuple format
+        let shape = [batch_size, max_len];
 
-        // Run inference
-        let outputs = self.session.run(ort::inputs![
-            "input_ids" => input_ids_array,
-            "attention_mask" => attention_mask_array,
-            "token_type_ids" => token_type_ids_array,
-        ]?)?;
+        // Run inference and extract output data (copy to owned)
+        let (output_shape, output_data): (Vec<usize>, Vec<f32>) = {
+            let mut session = self.session.lock();
+            let outputs = session.run(ort::inputs![
+                "input_ids" => Tensor::from_array((shape, input_ids))?,
+                "attention_mask" => Tensor::from_array((shape, attention_mask))?,
+                "token_type_ids" => Tensor::from_array((shape, token_type_ids))?,
+            ])?;
 
-        // Extract embeddings from output
-        let output_tensor = outputs
-            .get("last_hidden_state")
-            .or_else(|| outputs.get("sentence_embedding"))
-            .or_else(|| outputs.iter().next().map(|(_, v)| v))
-            .ok_or_else(|| anyhow::anyhow!("No output tensor found"))?;
+            // Extract embeddings from output - convert to owned data
+            if let Some(t) = outputs.get("last_hidden_state") {
+                let arr = t.try_extract_array::<f32>()?;
+                (arr.shape().to_vec(), arr.iter().copied().collect())
+            } else if let Some(t) = outputs.get("sentence_embedding") {
+                let arr = t.try_extract_array::<f32>()?;
+                (arr.shape().to_vec(), arr.iter().copied().collect())
+            } else {
+                let (_, v) = outputs
+                    .iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("No output tensor found"))?;
+                let arr = v.try_extract_array::<f32>()?;
+                (arr.shape().to_vec(), arr.iter().copied().collect())
+            }
+        };
 
-        let output_array = output_tensor.try_extract_tensor::<f32>()?;
-        let output_view = output_array.view();
+        // Reconstruct as ndarray view from owned data
+        let output_view =
+            ndarray::ArrayViewD::from_shape(output_shape.as_slice(), output_data.as_slice())?;
 
         let embeddings = match output_view.ndim() {
             3 => {

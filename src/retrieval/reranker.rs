@@ -13,15 +13,15 @@ use tracing::{debug, info};
 
 #[cfg(feature = "onnx")]
 use {
-    ndarray::Array2,
-    ort::{execution_providers::CPUExecutionProvider, session::Session},
+    ort::{execution_providers::CPUExecutionProvider, session::Session, value::Tensor},
+    parking_lot::Mutex,
     tokenizers::Tokenizer,
 };
 
 /// Cross-encoder reranker for improving search result ordering
 #[cfg(feature = "onnx")]
 pub struct Reranker {
-    session: Session,
+    session: Mutex<Session>,
     tokenizer: Tokenizer,
     max_length: usize,
 }
@@ -42,7 +42,7 @@ impl Reranker {
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
         Ok(Self {
-            session,
+            session: Mutex::new(session),
             tokenizer,
             max_length: 512,
         })
@@ -119,25 +119,30 @@ impl Reranker {
             }
         }
 
-        // Create input tensors
-        let input_ids_array = Array2::from_shape_vec((batch_size, max_len), input_ids)?;
-        let attention_mask_array = Array2::from_shape_vec((batch_size, max_len), attention_mask)?;
+        // Create input tensors using (shape, data) tuple format
+        let shape = [batch_size, max_len];
 
-        // Run inference
-        let outputs = self.session.run(ort::inputs![
-            "input_ids" => input_ids_array,
-            "attention_mask" => attention_mask_array,
-        ]?)?;
+        // Run inference and extract output data (copy to owned)
+        let (logits_shape, logits_data): (Vec<usize>, Vec<f32>) = {
+            let mut session = self.session.lock();
+            let outputs = session.run(ort::inputs![
+                "input_ids" => Tensor::from_array((shape, input_ids))?,
+                "attention_mask" => Tensor::from_array((shape, attention_mask))?,
+            ])?;
 
-        // Extract scores (logits)
-        let output_tensor = outputs
-            .iter()
-            .next()
-            .map(|(_, v)| v)
-            .ok_or_else(|| anyhow::anyhow!("No output tensor"))?;
+            // Extract scores (logits) - convert to owned data
+            let (_, v) = outputs
+                .iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("No output tensor"))?;
 
-        let logits = output_tensor.try_extract_tensor::<f32>()?;
-        let logits_view = logits.view();
+            let arr = v.try_extract_array::<f32>()?;
+            (arr.shape().to_vec(), arr.iter().copied().collect())
+        };
+
+        // Reconstruct as ndarray view from owned data
+        let logits_view =
+            ndarray::ArrayViewD::from_shape(logits_shape.as_slice(), logits_data.as_slice())?;
 
         // For cross-encoders, typically take the logit for the positive class
         // or apply sigmoid for relevance score
@@ -145,7 +150,7 @@ impl Reranker {
             .map(|i| {
                 // If model outputs 2 logits (binary classification), take positive class
                 // Otherwise take single logit and apply sigmoid
-                if logits_view.shape().len() > 1 && logits_view.shape()[1] > 1 {
+                if logits_view.ndim() > 1 && logits_view.shape()[1] > 1 {
                     logits_view[[i, 1]]
                 } else {
                     sigmoid(logits_view[[i, 0]])
