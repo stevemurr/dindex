@@ -1,0 +1,408 @@
+//! Request Handler
+//!
+//! Dispatches incoming requests to the appropriate service and returns responses.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use dashmap::DashMap;
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tracing::{debug, error, info, warn};
+use uuid::Uuid;
+
+use crate::types::Chunk;
+
+use super::index_manager::IndexManager;
+use super::protocol::*;
+use super::write_pipeline::{IngestItem, WritePipeline};
+
+/// Active indexing stream state
+struct IndexStream {
+    chunks: Vec<(Chunk, Option<Vec<f32>>)>,
+    created_at: Instant,
+}
+
+/// Request handler that processes incoming IPC requests
+pub struct RequestHandler {
+    index_manager: Arc<IndexManager>,
+    write_pipeline: Arc<WritePipeline>,
+    start_time: Instant,
+    shutdown_tx: broadcast::Sender<()>,
+
+    /// Active indexing streams (stream_id -> stream state)
+    active_streams: DashMap<Uuid, IndexStream>,
+
+    /// Active background jobs (job_id -> progress sender)
+    active_jobs: DashMap<Uuid, mpsc::Sender<Progress>>,
+}
+
+impl RequestHandler {
+    /// Create a new request handler
+    pub fn new(
+        index_manager: Arc<IndexManager>,
+        write_pipeline: Arc<WritePipeline>,
+        shutdown_tx: broadcast::Sender<()>,
+    ) -> Self {
+        Self {
+            index_manager,
+            write_pipeline,
+            start_time: Instant::now(),
+            shutdown_tx,
+            active_streams: DashMap::new(),
+            active_jobs: DashMap::new(),
+        }
+    }
+
+    /// Handle an incoming request and return a response
+    pub async fn handle(&self, request: Request) -> Response {
+        debug!("Handling request: {:?}", std::mem::discriminant(&request));
+
+        match request {
+            // Query operations
+            Request::Search {
+                query,
+                top_k,
+                format: _,
+            } => self.handle_search(query, top_k).await,
+
+            // Write operations
+            Request::IndexDocuments { stream_id } => self.handle_index_documents(stream_id).await,
+            Request::IndexChunk { stream_id, chunk } => {
+                self.handle_index_chunk(stream_id, chunk).await
+            }
+            Request::IndexComplete { stream_id } => self.handle_index_complete(stream_id).await,
+
+            // Import operations
+            Request::ImportStart { source, options } => {
+                self.handle_import_start(source, options).await
+            }
+            Request::ImportCancel { job_id } => self.handle_job_cancel(job_id).await,
+            Request::JobProgress { job_id } => self.handle_job_progress(job_id).await,
+
+            // Scrape operations
+            Request::ScrapeStart { urls, options } => {
+                self.handle_scrape_start(urls, options).await
+            }
+            Request::ScrapeCancel { job_id } => self.handle_job_cancel(job_id).await,
+
+            // Management operations
+            Request::Ping => Response::Pong,
+            Request::Status => self.handle_status().await,
+            Request::Stats => self.handle_stats().await,
+            Request::ForceCommit => self.handle_force_commit().await,
+            Request::Shutdown => self.handle_shutdown().await,
+        }
+    }
+
+    // ============ Query Handlers ============
+
+    async fn handle_search(&self, query: String, top_k: usize) -> Response {
+        match self.index_manager.search(&query, top_k) {
+            Ok((results, query_time_ms)) => Response::SearchResults {
+                results,
+                query_time_ms,
+            },
+            Err(e) => {
+                error!("Search failed: {}", e);
+                Response::error(ErrorCode::SearchFailed, e.to_string())
+            }
+        }
+    }
+
+    // ============ Write Handlers ============
+
+    async fn handle_index_documents(&self, stream_id: Uuid) -> Response {
+        // Create a new indexing stream
+        self.active_streams.insert(
+            stream_id,
+            IndexStream {
+                chunks: Vec::new(),
+                created_at: Instant::now(),
+            },
+        );
+
+        debug!("Created indexing stream: {}", stream_id);
+        Response::StreamReady { stream_id }
+    }
+
+    async fn handle_index_chunk(&self, stream_id: Uuid, chunk: ChunkPayload) -> Response {
+        let mut stream = match self.active_streams.get_mut(&stream_id) {
+            Some(s) => s,
+            None => {
+                return Response::error(
+                    ErrorCode::StreamNotFound,
+                    format!("Stream {} not found", stream_id),
+                )
+            }
+        };
+
+        // Convert payload to chunk
+        let chunk_obj = Chunk {
+            metadata: chunk.metadata,
+            content: chunk.content,
+            token_count: 0, // Will be recalculated if needed
+        };
+
+        stream.chunks.push((chunk_obj, chunk.embedding));
+        let count = stream.chunks.len();
+
+        Response::ChunkAck { stream_id, count }
+    }
+
+    async fn handle_index_complete(&self, stream_id: Uuid) -> Response {
+        // Remove the stream
+        let stream = match self.active_streams.remove(&stream_id) {
+            Some((_, s)) => s,
+            None => {
+                return Response::error(
+                    ErrorCode::StreamNotFound,
+                    format!("Stream {} not found", stream_id),
+                )
+            }
+        };
+
+        let chunk_count = stream.chunks.len();
+        let duration_ms = stream.created_at.elapsed().as_millis() as u64;
+
+        // Send chunks to write pipeline
+        for (chunk, embedding) in stream.chunks {
+            if let Err(e) = self
+                .write_pipeline
+                .ingest(IngestItem::Chunk {
+                    stream_id,
+                    chunk,
+                    embedding,
+                })
+                .await
+            {
+                error!("Failed to ingest chunk: {}", e);
+                return Response::error(ErrorCode::IndexFailed, e.to_string());
+            }
+        }
+
+        // Request commit
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self
+            .write_pipeline
+            .ingest(IngestItem::Commit {
+                stream_id,
+                respond_to: tx,
+            })
+            .await
+        {
+            error!("Failed to request commit: {}", e);
+            return Response::error(ErrorCode::IndexFailed, e.to_string());
+        }
+
+        // Wait for commit to complete
+        match rx.await {
+            Ok(Ok(())) => Response::JobComplete {
+                job_id: stream_id,
+                stats: JobStats {
+                    documents_processed: 1,
+                    chunks_indexed: chunk_count,
+                    duration_ms,
+                    errors: 0,
+                },
+            },
+            Ok(Err(e)) => {
+                error!("Commit failed: {}", e);
+                Response::error(ErrorCode::IndexFailed, e.to_string())
+            }
+            Err(_) => Response::error(ErrorCode::InternalError, "Commit channel closed"),
+        }
+    }
+
+    // ============ Import Handlers ============
+
+    async fn handle_import_start(&self, source: ImportSource, options: ImportOptions) -> Response {
+        let job_id = Uuid::new_v4();
+
+        // TODO: Implement background import job
+        // For now, return JobStarted to indicate the API works
+        info!(
+            "Import job {} started: {:?} with options {:?}",
+            job_id, source, options
+        );
+
+        // Create progress channel
+        let (progress_tx, _progress_rx) = mpsc::channel(100);
+        self.active_jobs.insert(job_id, progress_tx);
+
+        Response::JobStarted { job_id }
+    }
+
+    async fn handle_job_cancel(&self, job_id: Uuid) -> Response {
+        if self.active_jobs.remove(&job_id).is_some() {
+            info!("Cancelled job: {}", job_id);
+            Response::Ok
+        } else {
+            Response::error(
+                ErrorCode::JobNotFound,
+                format!("Job {} not found", job_id),
+            )
+        }
+    }
+
+    async fn handle_job_progress(&self, job_id: Uuid) -> Response {
+        if self.active_jobs.contains_key(&job_id) {
+            // TODO: Get actual progress from job
+            Response::JobProgress {
+                job_id,
+                progress: Progress {
+                    job_id,
+                    stage: "processing".to_string(),
+                    current: 0,
+                    total: None,
+                    rate: None,
+                    eta_seconds: None,
+                },
+            }
+        } else {
+            Response::error(
+                ErrorCode::JobNotFound,
+                format!("Job {} not found", job_id),
+            )
+        }
+    }
+
+    // ============ Scrape Handlers ============
+
+    async fn handle_scrape_start(&self, urls: Vec<String>, options: ScrapeOptions) -> Response {
+        let job_id = Uuid::new_v4();
+
+        // TODO: Implement background scrape job
+        info!(
+            "Scrape job {} started: {:?} with options {:?}",
+            job_id, urls, options
+        );
+
+        // Create progress channel
+        let (progress_tx, _progress_rx) = mpsc::channel(100);
+        self.active_jobs.insert(job_id, progress_tx);
+
+        Response::JobStarted { job_id }
+    }
+
+    // ============ Management Handlers ============
+
+    async fn handle_status(&self) -> Response {
+        let uptime_seconds = self.start_time.elapsed().as_secs();
+        let memory_mb = self.get_memory_usage();
+        let active_jobs = self.active_jobs.len();
+        let pending_writes = self.index_manager.pending_count();
+
+        Response::Status(DaemonStatus {
+            running: true,
+            uptime_seconds,
+            memory_mb,
+            active_jobs,
+            pending_writes,
+        })
+    }
+
+    async fn handle_stats(&self) -> Response {
+        match self.index_manager.stats() {
+            Ok(stats) => Response::Stats(stats),
+            Err(e) => {
+                error!("Failed to get stats: {}", e);
+                Response::error(ErrorCode::InternalError, e.to_string())
+            }
+        }
+    }
+
+    async fn handle_force_commit(&self) -> Response {
+        match self.index_manager.commit() {
+            Ok(()) => Response::Ok,
+            Err(e) => {
+                error!("Force commit failed: {}", e);
+                Response::error(ErrorCode::InternalError, e.to_string())
+            }
+        }
+    }
+
+    async fn handle_shutdown(&self) -> Response {
+        info!("Shutdown requested");
+
+        // Commit any pending changes
+        if let Err(e) = self.index_manager.commit() {
+            warn!("Failed to commit during shutdown: {}", e);
+        }
+
+        // Signal shutdown
+        let _ = self.shutdown_tx.send(());
+
+        Response::Ok
+    }
+
+    /// Get approximate memory usage in MB
+    fn get_memory_usage(&self) -> u64 {
+        // Try to read from /proc/self/statm on Linux
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
+                if let Some(rss) = content.split_whitespace().nth(1) {
+                    if let Ok(pages) = rss.parse::<u64>() {
+                        // Page size is typically 4KB
+                        return pages * 4 / 1024;
+                    }
+                }
+            }
+        }
+
+        // Fallback: return 0
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn create_test_handler() -> (RequestHandler, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = temp_dir.path().to_path_buf();
+
+        let index_manager = Arc::new(IndexManager::load(&config).unwrap());
+        let write_pipeline = Arc::new(WritePipeline::new(index_manager.clone(), 100));
+        let (shutdown_tx, _) = broadcast::channel(1);
+
+        let handler = RequestHandler::new(index_manager, write_pipeline, shutdown_tx);
+        (handler, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn test_ping() {
+        let (handler, _temp) = create_test_handler().await;
+        let response = handler.handle(Request::Ping).await;
+        assert!(matches!(response, Response::Pong));
+    }
+
+    #[tokio::test]
+    async fn test_status() {
+        let (handler, _temp) = create_test_handler().await;
+        let response = handler.handle(Request::Status).await;
+
+        match response {
+            Response::Status(status) => {
+                assert!(status.running);
+            }
+            _ => panic!("Expected Status response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stats() {
+        let (handler, _temp) = create_test_handler().await;
+        let response = handler.handle(Request::Stats).await;
+
+        match response {
+            Response::Stats(stats) => {
+                assert_eq!(stats.total_chunks, 0);
+            }
+            _ => panic!("Expected Stats response"),
+        }
+    }
+}
