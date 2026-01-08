@@ -8,12 +8,14 @@ pub mod connection;
 pub use connection::DaemonClient;
 
 use crate::daemon::protocol::{
-    DaemonStatus, IndexStats, OutputFormat, Request, Response,
+    ChunkPayload, DaemonStatus, ImportOptions, ImportSource, IndexStats, JobStats, OutputFormat,
+    Progress, Request, Response, ScrapeOptions,
 };
-use crate::types::SearchResult;
+use crate::types::{Chunk, SearchResult};
 
 use anyhow::Result;
 use thiserror::Error;
+use uuid::Uuid;
 
 /// Errors that can occur when communicating with the daemon
 #[derive(Debug, Error)]
@@ -35,6 +37,15 @@ pub enum ClientError {
 
     #[error("Index operation failed: {0}")]
     IndexFailed(String),
+
+    #[error("Import operation failed: {0}")]
+    ImportFailed(String),
+
+    #[error("Scrape operation failed: {0}")]
+    ScrapeFailed(String),
+
+    #[error("Job not found: {0}")]
+    JobNotFound(Uuid),
 
     #[error("Daemon error: {0}")]
     DaemonError(String),
@@ -120,6 +131,134 @@ pub async fn force_commit() -> Result<(), ClientError> {
     match response {
         Response::Ok => Ok(()),
         Response::Error { message, .. } => Err(ClientError::DaemonError(message)),
+        _ => Err(ClientError::UnexpectedResponse),
+    }
+}
+
+/// Index chunks via daemon
+/// Returns job stats upon completion
+pub async fn index_chunks(chunks: Vec<Chunk>) -> Result<JobStats, ClientError> {
+    let mut client = DaemonClient::connect().await?;
+    let stream_id = Uuid::new_v4();
+
+    // Start stream
+    let response = client
+        .send(Request::IndexDocuments { stream_id })
+        .await?;
+
+    match response {
+        Response::StreamReady { stream_id: sid } => {
+            if sid != stream_id {
+                return Err(ClientError::UnexpectedResponse);
+            }
+        }
+        Response::Error { message, .. } => return Err(ClientError::IndexFailed(message)),
+        _ => return Err(ClientError::UnexpectedResponse),
+    }
+
+    // Send chunks
+    for chunk in chunks {
+        let payload = ChunkPayload::from(chunk);
+        let response = client
+            .send(Request::IndexChunk {
+                stream_id,
+                chunk: payload,
+            })
+            .await?;
+
+        match response {
+            Response::ChunkAck { .. } => {}
+            Response::Error { message, .. } => return Err(ClientError::IndexFailed(message)),
+            _ => return Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    // Complete and wait for commit
+    let response = client.send(Request::IndexComplete { stream_id }).await?;
+
+    match response {
+        Response::JobComplete { stats, .. } => Ok(stats),
+        Response::Error { message, .. } => Err(ClientError::IndexFailed(message)),
+        _ => Err(ClientError::UnexpectedResponse),
+    }
+}
+
+/// Start an import job
+/// Returns job_id for tracking progress
+pub async fn start_import(
+    source: ImportSource,
+    options: ImportOptions,
+) -> Result<Uuid, ClientError> {
+    let mut client = DaemonClient::connect().await?;
+
+    let response = client
+        .send(Request::ImportStart { source, options })
+        .await?;
+
+    match response {
+        Response::JobStarted { job_id } => Ok(job_id),
+        Response::Error { message, .. } => Err(ClientError::ImportFailed(message)),
+        _ => Err(ClientError::UnexpectedResponse),
+    }
+}
+
+/// Cancel an import job
+pub async fn cancel_import(job_id: Uuid) -> Result<(), ClientError> {
+    let mut client = DaemonClient::connect().await?;
+
+    let response = client.send(Request::ImportCancel { job_id }).await?;
+
+    match response {
+        Response::Ok => Ok(()),
+        Response::Error { message, .. } => Err(ClientError::DaemonError(message)),
+        _ => Err(ClientError::UnexpectedResponse),
+    }
+}
+
+/// Start a scrape job
+/// Returns job_id for tracking progress
+pub async fn start_scrape(urls: Vec<String>, options: ScrapeOptions) -> Result<Uuid, ClientError> {
+    let mut client = DaemonClient::connect().await?;
+
+    let response = client
+        .send(Request::ScrapeStart { urls, options })
+        .await?;
+
+    match response {
+        Response::JobStarted { job_id } => Ok(job_id),
+        Response::Error { message, .. } => Err(ClientError::ScrapeFailed(message)),
+        _ => Err(ClientError::UnexpectedResponse),
+    }
+}
+
+/// Cancel a scrape job
+pub async fn cancel_scrape(job_id: Uuid) -> Result<(), ClientError> {
+    let mut client = DaemonClient::connect().await?;
+
+    let response = client.send(Request::ScrapeCancel { job_id }).await?;
+
+    match response {
+        Response::Ok => Ok(()),
+        Response::Error { message, .. } => Err(ClientError::DaemonError(message)),
+        _ => Err(ClientError::UnexpectedResponse),
+    }
+}
+
+/// Get progress of a job
+pub async fn job_progress(job_id: Uuid) -> Result<Progress, ClientError> {
+    let mut client = DaemonClient::connect().await?;
+
+    let response = client.send(Request::JobProgress { job_id }).await?;
+
+    match response {
+        Response::JobProgress { progress, .. } => Ok(progress),
+        Response::Error { code, message } => {
+            if code == crate::daemon::protocol::ErrorCode::JobNotFound {
+                Err(ClientError::JobNotFound(job_id))
+            } else {
+                Err(ClientError::DaemonError(message))
+            }
+        }
         _ => Err(ClientError::UnexpectedResponse),
     }
 }

@@ -6,13 +6,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use dashmap::DashMap;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::config::Config;
 use crate::types::Chunk;
 
 use super::index_manager::IndexManager;
+use super::jobs::JobManager;
 use super::protocol::*;
 use super::write_pipeline::{IngestItem, WritePipeline};
 
@@ -26,14 +28,12 @@ struct IndexStream {
 pub struct RequestHandler {
     index_manager: Arc<IndexManager>,
     write_pipeline: Arc<WritePipeline>,
+    job_manager: Arc<JobManager>,
     start_time: Instant,
     shutdown_tx: broadcast::Sender<()>,
 
     /// Active indexing streams (stream_id -> stream state)
     active_streams: DashMap<Uuid, IndexStream>,
-
-    /// Active background jobs (job_id -> progress sender)
-    active_jobs: DashMap<Uuid, mpsc::Sender<Progress>>,
 }
 
 impl RequestHandler {
@@ -41,15 +41,23 @@ impl RequestHandler {
     pub fn new(
         index_manager: Arc<IndexManager>,
         write_pipeline: Arc<WritePipeline>,
+        config: Config,
         shutdown_tx: broadcast::Sender<()>,
     ) -> Self {
+        let job_manager = Arc::new(JobManager::new(
+            index_manager.clone(),
+            write_pipeline.clone(),
+            config,
+            shutdown_tx.clone(),
+        ));
+
         Self {
             index_manager,
             write_pipeline,
+            job_manager,
             start_time: Instant::now(),
             shutdown_tx,
             active_streams: DashMap::new(),
-            active_jobs: DashMap::new(),
         }
     }
 
@@ -216,71 +224,47 @@ impl RequestHandler {
     // ============ Import Handlers ============
 
     async fn handle_import_start(&self, source: ImportSource, options: ImportOptions) -> Response {
-        let job_id = Uuid::new_v4();
-
-        // TODO: Implement background import job
-        // For now, return JobStarted to indicate the API works
         info!(
-            "Import job {} started: {:?} with options {:?}",
-            job_id, source, options
+            "Starting import job: {:?} with options {:?}",
+            source, options
         );
 
-        // Create progress channel
-        let (progress_tx, _progress_rx) = mpsc::channel(100);
-        self.active_jobs.insert(job_id, progress_tx);
-
+        let job_id = self.job_manager.start_import(source, options);
         Response::JobStarted { job_id }
     }
 
     async fn handle_job_cancel(&self, job_id: Uuid) -> Response {
-        if self.active_jobs.remove(&job_id).is_some() {
+        if self.job_manager.cancel(job_id) {
             info!("Cancelled job: {}", job_id);
             Response::Ok
         } else {
             Response::error(
                 ErrorCode::JobNotFound,
-                format!("Job {} not found", job_id),
+                format!("Job {} not found or already completed", job_id),
             )
         }
     }
 
     async fn handle_job_progress(&self, job_id: Uuid) -> Response {
-        if self.active_jobs.contains_key(&job_id) {
-            // TODO: Get actual progress from job
-            Response::JobProgress {
-                job_id,
-                progress: Progress {
-                    job_id,
-                    stage: "processing".to_string(),
-                    current: 0,
-                    total: None,
-                    rate: None,
-                    eta_seconds: None,
-                },
-            }
-        } else {
-            Response::error(
+        match self.job_manager.get_progress(job_id) {
+            Some(progress) => Response::JobProgress { job_id, progress },
+            None => Response::error(
                 ErrorCode::JobNotFound,
                 format!("Job {} not found", job_id),
-            )
+            ),
         }
     }
 
     // ============ Scrape Handlers ============
 
     async fn handle_scrape_start(&self, urls: Vec<String>, options: ScrapeOptions) -> Response {
-        let job_id = Uuid::new_v4();
-
-        // TODO: Implement background scrape job
         info!(
-            "Scrape job {} started: {:?} with options {:?}",
-            job_id, urls, options
+            "Starting scrape job: {} URLs with options {:?}",
+            urls.len(),
+            options
         );
 
-        // Create progress channel
-        let (progress_tx, _progress_rx) = mpsc::channel(100);
-        self.active_jobs.insert(job_id, progress_tx);
-
+        let job_id = self.job_manager.start_scrape(urls, options);
         Response::JobStarted { job_id }
     }
 
@@ -289,7 +273,7 @@ impl RequestHandler {
     async fn handle_status(&self) -> Response {
         let uptime_seconds = self.start_time.elapsed().as_secs();
         let memory_mb = self.get_memory_usage();
-        let active_jobs = self.active_jobs.len();
+        let active_jobs = self.job_manager.active_count();
         let pending_writes = self.index_manager.pending_count();
 
         Response::Status(DaemonStatus {
@@ -369,7 +353,7 @@ mod tests {
         let write_pipeline = Arc::new(WritePipeline::new(index_manager.clone(), 100));
         let (shutdown_tx, _) = broadcast::channel(1);
 
-        let handler = RequestHandler::new(index_manager, write_pipeline, shutdown_tx);
+        let handler = RequestHandler::new(index_manager, write_pipeline, config, shutdown_tx);
         (handler, temp_dir)
     }
 

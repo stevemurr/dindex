@@ -26,7 +26,7 @@ use dindex::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use url::Url;
 
@@ -551,7 +551,26 @@ async fn index_document(
 
     info!("Created {} chunks", chunks.len());
 
-    // Initialize index components
+    // Try daemon first
+    match client::index_chunks(chunks.clone()).await {
+        Ok(stats) => {
+            info!(
+                "Indexed {} chunks via daemon in {}ms",
+                stats.chunks_indexed, stats.duration_ms
+            );
+            return Ok(());
+        }
+        Err(ClientError::DaemonNotRunning) => {
+            // Fallback to direct access
+            tracing::debug!("Daemon not running, using direct access");
+        }
+        Err(e) => {
+            tracing::warn!("Daemon indexing failed: {}, falling back to direct access", e);
+        }
+    }
+
+    // Direct access fallback
+    info!("Using direct index access (daemon not available)");
     let index_path = config.node.data_dir.join("vector.index");
     let vector_index = Arc::new(VectorIndex::new(
         config.embedding.dimensions,
@@ -903,6 +922,70 @@ async fn scrape_urls(
 
     info!("Seed URLs: {:?}", seeds.iter().map(|u| u.as_str()).collect::<Vec<_>>());
 
+    // Try daemon first if indexing is requested
+    if should_index {
+        use crate::daemon::protocol::ScrapeOptions;
+
+        let options = ScrapeOptions {
+            max_depth,
+            stay_on_domain,
+            delay_ms,
+            max_pages,
+        };
+
+        match client::start_scrape(url_strings.clone(), options).await {
+            Ok(job_id) => {
+                info!("Scrape job started via daemon: {}", job_id);
+                println!("Scrape job started: {}", job_id);
+                println!("Monitoring progress...");
+
+                // Poll for progress
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    match client::job_progress(job_id).await {
+                        Ok(progress) => {
+                            let rate_str = progress.rate.map(|r| format!("{:.1} pages/s", r)).unwrap_or_default();
+                            let eta_str = progress.eta_seconds.map(|e| format!("ETA: {}s", e)).unwrap_or_default();
+                            print!("\r{}: {}/{} {} {}",
+                                progress.stage,
+                                progress.current,
+                                progress.total.unwrap_or(0),
+                                rate_str,
+                                eta_str
+                            );
+                            use std::io::Write;
+                            std::io::stdout().flush().ok();
+
+                            if progress.stage == "completed" || progress.stage == "failed" || progress.stage == "cancelled" {
+                                println!("\nScrape {}", progress.stage);
+                                break;
+                            }
+                        }
+                        Err(ClientError::JobNotFound(_)) => {
+                            println!("\nScrape completed");
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("Error getting job progress: {}", e);
+                        }
+                    }
+                }
+
+                return Ok(());
+            }
+            Err(ClientError::DaemonNotRunning) => {
+                info!("Daemon not running, using direct scraping");
+            }
+            Err(e) => {
+                warn!("Daemon scrape failed: {}, falling back to direct scraping", e);
+            }
+        }
+    }
+
+    // Direct scraping fallback
+    info!("Using direct scraping (daemon not available or not indexing)");
+
     // Create scraping config
     let scraping_config = ScrapingCoordConfig {
         enabled: true,
@@ -1114,6 +1197,81 @@ async fn import_dump(
     };
 
     info!("Importing from: {} (format: {:?})", path.display(), dump_format);
+
+    // Try daemon first for Wikimedia XML format
+    if matches!(dump_format, DumpFormat::WikimediaXml) {
+        use crate::daemon::protocol::{ImportOptions, ImportSource};
+
+        let source = ImportSource::WikimediaXml {
+            path: path.to_string_lossy().to_string(),
+        };
+        let options = ImportOptions {
+            batch_size,
+            deduplicate: !no_dedup,
+            min_content_length: min_length,
+            max_documents: max_docs,
+        };
+
+        match client::start_import(source, options).await {
+            Ok(job_id) => {
+                info!("Import job started via daemon: {}", job_id);
+                if !quiet {
+                    println!("Import job started: {}", job_id);
+                    println!("Monitoring progress...");
+                }
+
+                // Poll for progress
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    match client::job_progress(job_id).await {
+                        Ok(progress) => {
+                            if !quiet {
+                                let rate_str = progress.rate.map(|r| format!("{:.1} docs/s", r)).unwrap_or_default();
+                                let eta_str = progress.eta_seconds.map(|e| format!("ETA: {}s", e)).unwrap_or_default();
+                                print!("\r{}: {} processed {} {}",
+                                    progress.stage,
+                                    progress.current,
+                                    rate_str,
+                                    eta_str
+                                );
+                                use std::io::Write;
+                                std::io::stdout().flush().ok();
+                            }
+
+                            if progress.stage == "completed" || progress.stage == "failed" || progress.stage == "cancelled" {
+                                if !quiet {
+                                    println!("\nImport {}", progress.stage);
+                                }
+                                break;
+                            }
+                        }
+                        Err(ClientError::JobNotFound(_)) => {
+                            // Job completed and was cleaned up
+                            if !quiet {
+                                println!("\nImport completed");
+                            }
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("Error getting job progress: {}", e);
+                        }
+                    }
+                }
+
+                return Ok(());
+            }
+            Err(ClientError::DaemonNotRunning) => {
+                info!("Daemon not running, using direct import");
+            }
+            Err(e) => {
+                warn!("Daemon import failed: {}, falling back to direct import", e);
+            }
+        }
+    }
+
+    // Direct import fallback
+    info!("Using direct import (daemon not available)");
 
     // Determine checkpoint path
     let checkpoint_path = checkpoint.or_else(|| {

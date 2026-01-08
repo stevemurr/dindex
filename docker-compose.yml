@@ -10,8 +10,10 @@ services:
     image: dindex:latest
     container_name: dindex
 
-    # Run as P2P node by default
-    command: ["start", "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1"]
+    # Run as daemon + P2P node (single process architecture)
+    # The daemon handles all index operations via Unix socket IPC
+    # CLI commands connect to the daemon for search/index/import/scrape
+    command: ["start", "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1", "--foreground"]
 
     ports:
       # P2P QUIC port
@@ -22,20 +24,31 @@ services:
     volumes:
       # Persistent data storage
       - dindex-data:/data
+      # Unix socket for IPC (optional: expose for host CLI access)
+      - dindex-socket:/run/dindex
       # Optional: mount local documents for indexing
       # - ./documents:/documents:ro
 
     environment:
       - RUST_LOG=info
       - DINDEX_DATA_DIR=/data
+      - XDG_RUNTIME_DIR=/run/dindex
 
     restart: unless-stopped
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "dindex", "daemon", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
     # Resource limits (adjust based on your needs)
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 4G
         reservations:
           memory: 512M
 
@@ -81,4 +94,6 @@ services:
 
 volumes:
   dindex-data:
+    driver: local
+  dindex-socket:
     driver: local

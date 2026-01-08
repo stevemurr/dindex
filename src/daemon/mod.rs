@@ -51,17 +51,23 @@
 
 pub mod handler;
 pub mod index_manager;
+pub mod jobs;
 pub mod lifecycle;
+pub mod metrics;
 pub mod protocol;
+pub mod recovery;
 pub mod server;
 pub mod write_pipeline;
 
 pub use handler::RequestHandler;
 pub use index_manager::IndexManager;
+pub use jobs::JobManager;
 pub use lifecycle::{get_daemon_pid, is_daemon_running, Daemon};
+pub use metrics::{DaemonMetrics, MetricsSnapshot, Timer};
 pub use protocol::{
-    decode_message, encode_message, DaemonStatus, ErrorCode, IndexStats, JobStats, OutputFormat,
-    Progress, Request, Response,
+    decode_message, encode_message, ChunkPayload, DaemonStatus, ErrorCode, ImportOptions,
+    ImportSource, IndexStats, JobStats, OutputFormat, Progress, Request, Response, ScrapeOptions,
 };
+pub use recovery::{RecoveryManager, RecoveryResult, RecoveryState};
 pub use server::IpcServer;
 pub use write_pipeline::WritePipeline;

@@ -29,16 +29,18 @@ pub enum ImportSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportOptions {
     pub batch_size: usize,
-    pub resume_from_checkpoint: bool,
-    pub namespaces: Option<Vec<i32>>,
+    pub deduplicate: bool,
+    pub min_content_length: usize,
+    pub max_documents: Option<usize>,
 }
 
 impl Default for ImportOptions {
     fn default() -> Self {
         Self {
             batch_size: 100,
-            resume_from_checkpoint: true,
-            namespaces: Some(vec![0]),
+            deduplicate: true,
+            min_content_length: 100,
+            max_documents: None,
         }
     }
 }
@@ -46,19 +48,19 @@ impl Default for ImportOptions {
 /// Options for scrape operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScrapeOptions {
-    pub max_depth: u32,
-    pub max_pages: Option<usize>,
+    pub max_depth: u8,
+    pub stay_on_domain: bool,
     pub delay_ms: u64,
-    pub respect_robots: bool,
+    pub max_pages: usize,
 }
 
 impl Default for ScrapeOptions {
     fn default() -> Self {
         Self {
             max_depth: 2,
-            max_pages: Some(100),
+            stay_on_domain: false,
             delay_ms: 1000,
-            respect_robots: true,
+            max_pages: 100,
         }
     }
 }

@@ -62,6 +62,7 @@ impl Daemon {
         let handler = Arc::new(RequestHandler::new(
             index_manager.clone(),
             write_pipeline.clone(),
+            config.clone(),
             shutdown_tx.clone(),
         ));
 
@@ -92,14 +93,14 @@ impl Daemon {
 
         // Start IPC server
         let server_handle = {
-            let server = &self.server;
             let shutdown_rx = self.shutdown_tx.subscribe();
-            let socket_path = server.socket_path().to_path_buf();
-            let handler = Arc::clone(&Arc::new(RequestHandler::new(
+            let socket_path = self.server.socket_path().to_path_buf();
+            let handler = Arc::new(RequestHandler::new(
                 self.index_manager.clone(),
                 self.write_pipeline.clone(),
+                self.config.clone(),
                 self.shutdown_tx.clone(),
-            )));
+            ));
 
             let server = IpcServer::new(socket_path, handler);
             tokio::spawn(async move {
