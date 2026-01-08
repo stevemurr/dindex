@@ -49,6 +49,88 @@ cargo build --release
 cargo install --path .
 ```
 
+### Docker Installation
+
+```bash
+# Build the Docker image
+docker build -t dindex .
+
+# Or use docker-compose
+docker compose build
+```
+
+## Docker Usage
+
+### Quick Start with Docker
+
+```bash
+# Initialize configuration
+docker run --rm -v dindex-data:/data dindex init --data-dir /data
+
+# Download embedding model
+docker run --rm -v dindex-data:/data dindex download nomic-embed-text-v1.5
+
+# Start P2P node
+docker run -d --name dindex \
+  -p 4001:4001/udp \
+  -p 4001:4001/tcp \
+  -v dindex-data:/data \
+  dindex start --listen /ip4/0.0.0.0/udp/4001/quic-v1
+
+# Search
+docker run --rm -v dindex-data:/data dindex search "your query" --top-k 10
+
+# Index local documents
+docker run --rm \
+  -v dindex-data:/data \
+  -v ./documents:/documents:ro \
+  dindex index /documents --title "My Documents"
+```
+
+### Docker Compose
+
+```bash
+# Initialize (one-time setup)
+docker compose --profile init run --rm dindex-init
+
+# Download embedding model (one-time setup)
+docker compose --profile setup run --rm dindex-download-model
+
+# Start P2P node
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Stop
+docker compose down
+```
+
+### Building with ONNX Support
+
+To enable ONNX Runtime for embedding inference:
+
+```bash
+# Build with ONNX feature
+docker build --build-arg FEATURES="onnx" -t dindex:onnx .
+
+# Or edit docker-compose.yml and uncomment FEATURES: "onnx"
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUST_LOG` | `info` | Log level (trace, debug, info, warn, error) |
+| `DINDEX_DATA_DIR` | `/data` | Data directory inside container |
+
+### Exposed Ports
+
+| Port | Protocol | Description |
+|------|----------|-------------|
+| 4001 | UDP | P2P QUIC transport (primary) |
+| 4001 | TCP | P2P TCP fallback |
+
 ## Quick Start
 
 ```bash
