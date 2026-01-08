@@ -8,7 +8,9 @@
 mod engine;
 mod model;
 mod quantize;
+mod service;
 
 pub use engine::*;
 pub use model::*;
 pub use quantize::*;
+pub use service::{check_model_exists, init_embedding_engine, model_not_found_error};

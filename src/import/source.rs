@@ -218,6 +218,9 @@ pub enum ImportError {
     #[error("Embedding error: {0}")]
     Embedding(String),
 
+    #[error("Configuration error: {0}")]
+    Config(String),
+
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 

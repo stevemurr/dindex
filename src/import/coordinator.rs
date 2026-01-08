@@ -1,15 +1,15 @@
 //! Import coordinator that orchestrates the bulk import process
 
 use super::progress::ImportProgress;
-use super::source::{DumpDocument, DumpSource, ImportCheckpoint, ImportConfig, ImportError, ImportStats};
+use super::source::{DumpSource, ImportCheckpoint, ImportConfig, ImportError, ImportStats};
 use crate::chunking::TextSplitter;
 use crate::config::{ChunkingConfig, DedupConfig, IndexConfig};
+use crate::embedding::EmbeddingEngine;
 use crate::index::{
     ChunkStorage, DocumentProcessor, DocumentRegistry, ProcessingResult, ProcessorConfig,
     VectorIndex,
 };
 use crate::retrieval::{Bm25Index, HybridIndexer};
-use crate::types::Embedding;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -22,8 +22,8 @@ pub struct ImportCoordinator {
     processor: DocumentProcessor,
     /// Vector index (for saving)
     vector_index: Arc<VectorIndex>,
-    /// Embedding dimensions
-    embedding_dims: usize,
+    /// Embedding engine for generating embeddings
+    embedding_engine: Arc<EmbeddingEngine>,
     /// Data directory for saving
     data_dir: PathBuf,
     /// Quiet mode
@@ -38,10 +38,12 @@ impl ImportCoordinator {
         chunking_config: ChunkingConfig,
         index_config: IndexConfig,
         dedup_config: DedupConfig,
-        embedding_dims: usize,
+        embedding_engine: Arc<EmbeddingEngine>,
     ) -> Result<Self, ImportError> {
         let data_dir = data_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&data_dir).map_err(ImportError::Io)?;
+
+        let embedding_dims = embedding_engine.dimensions();
 
         // Initialize document registry
         let registry = Arc::new(
@@ -86,7 +88,7 @@ impl ImportCoordinator {
             config,
             processor,
             vector_index,
-            embedding_dims,
+            embedding_engine,
             data_dir,
             quiet: false,
         })
@@ -134,15 +136,22 @@ impl ImportCoordinator {
                     let title = doc.title.clone();
                     let doc_size = doc.content.len() as u64;
 
-                    // Process document using the unified processor
-                    let embedding_dims = self.embedding_dims;
+                    // Process document using the unified processor with real embeddings
+                    let engine = self.embedding_engine.clone();
                     let result = self.processor.process(
                         &doc.content,
                         doc.url.clone(),
                         Some(title.clone()),
                         "wikipedia",
                         Some(("wikipedia_id", doc.id.as_str())),
-                        |text| Self::generate_embedding(text, embedding_dims),
+                        |text| {
+                            engine
+                                .embed(text)
+                                .unwrap_or_else(|e| {
+                                    tracing::warn!("Embedding failed: {}, using zero vector", e);
+                                    vec![0.0; engine.dimensions()]
+                                })
+                        },
                     );
 
                     match result {
@@ -206,21 +215,6 @@ impl ImportCoordinator {
         self.import(source)
     }
 
-    /// Generate embedding for text (placeholder - uses hash-based pseudo-embedding)
-    fn generate_embedding(text: &str, dims: usize) -> Embedding {
-        // In production, this would use the real embedding engine
-        // For now, create deterministic pseudo-embeddings based on content hash
-        let hash = xxhash_rust::xxh3::xxh3_64(text.as_bytes());
-
-        (0..dims)
-            .map(|i| {
-                let h = hash.wrapping_add(i as u64);
-                // Use hash to generate pseudo-random values in [-1, 1]
-                ((h % 2000) as f32 / 1000.0) - 1.0
-            })
-            .collect()
-    }
-
     /// Save all indices to disk
     pub fn save(&self) -> Result<(), ImportError> {
         let index_path = self.data_dir.join("vector.index");
@@ -249,7 +243,7 @@ pub struct ImportCoordinatorBuilder {
     chunking_config: ChunkingConfig,
     index_config: IndexConfig,
     dedup_config: DedupConfig,
-    embedding_dims: usize,
+    embedding_engine: Option<Arc<EmbeddingEngine>>,
     quiet: bool,
 }
 
@@ -262,7 +256,7 @@ impl ImportCoordinatorBuilder {
             chunking_config: ChunkingConfig::default(),
             index_config: IndexConfig::default(),
             dedup_config: DedupConfig::default(),
-            embedding_dims: 768,
+            embedding_engine: None,
             quiet: false,
         }
     }
@@ -303,9 +297,9 @@ impl ImportCoordinatorBuilder {
         self
     }
 
-    /// Set embedding dimensions
-    pub fn with_embedding_dims(mut self, dims: usize) -> Self {
-        self.embedding_dims = dims;
+    /// Set embedding engine
+    pub fn with_embedding_engine(mut self, engine: Arc<EmbeddingEngine>) -> Self {
+        self.embedding_engine = Some(engine);
         self
     }
 
@@ -335,13 +329,17 @@ impl ImportCoordinatorBuilder {
 
     /// Build the coordinator
     pub fn build(self) -> Result<ImportCoordinator, ImportError> {
+        let engine = self.embedding_engine.ok_or_else(|| {
+            ImportError::Config("Embedding engine is required. Call with_embedding_engine() first.".into())
+        })?;
+
         ImportCoordinator::new(
             self.config,
             self.data_dir,
             self.chunking_config,
             self.index_config,
             self.dedup_config,
-            self.embedding_dims,
+            engine,
         )
         .map(|c| c.with_quiet(self.quiet))
     }
@@ -353,39 +351,22 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_coordinator_builder() {
+    fn test_coordinator_builder_requires_engine() {
         let temp_dir = TempDir::new().unwrap();
 
-        let coordinator = ImportCoordinatorBuilder::new(temp_dir.path())
+        // Building without embedding engine should fail
+        let result = ImportCoordinatorBuilder::new(temp_dir.path())
             .with_batch_size(50)
             .with_dedup(true)
             .with_min_content_length(100)
             .with_max_documents(Some(1000))
-            .with_embedding_dims(256)
             .with_quiet(true)
-            .build()
-            .unwrap();
+            .build();
 
-        // Coordinator was created successfully
-        assert!(coordinator.config.deduplicate);
-        assert_eq!(coordinator.config.batch_size, 50);
-        assert_eq!(coordinator.config.min_content_length, 100);
-        assert_eq!(coordinator.config.max_documents, Some(1000));
-    }
-
-    #[test]
-    fn test_generate_embedding() {
-        let embedding1 = ImportCoordinator::generate_embedding("test content", 64);
-        let embedding2 = ImportCoordinator::generate_embedding("test content", 64);
-        let embedding3 = ImportCoordinator::generate_embedding("different content", 64);
-
-        // Same content should produce same embedding
-        assert_eq!(embedding1, embedding2);
-
-        // Different content should produce different embedding
-        assert_ne!(embedding1, embedding3);
-
-        // Correct dimensions
-        assert_eq!(embedding1.len(), 64);
+        assert!(result.is_err());
+        match result {
+            Err(ImportError::Config(_)) => (),
+            _ => panic!("Expected ImportError::Config"),
+        }
     }
 }
