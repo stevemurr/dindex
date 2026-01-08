@@ -24,6 +24,9 @@ pub struct Config {
     /// Import configuration
     #[serde(default)]
     pub import: BulkImportConfig,
+    /// Deduplication configuration
+    #[serde(default)]
+    pub dedup: DedupConfig,
 }
 
 impl Default for Config {
@@ -37,6 +40,7 @@ impl Default for Config {
             routing: RoutingConfig::default(),
             scraping: ScrapingConfig::default(),
             import: BulkImportConfig::default(),
+            dedup: DedupConfig::default(),
         }
     }
 }
@@ -313,6 +317,30 @@ impl Default for BulkImportConfig {
             min_content_length: 100,
             deduplicate: true,
             checkpoint_interval: 1000,
+        }
+    }
+}
+
+/// Deduplication configuration for unified document identity
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DedupConfig {
+    /// Enable deduplication
+    pub enabled: bool,
+    /// Maximum SimHash Hamming distance for near-duplicate detection
+    pub simhash_distance_threshold: u32,
+    /// Normalize content before computing identity (lowercase, collapse whitespace)
+    pub normalize_content: bool,
+    /// Update existing documents when near-duplicates are found
+    pub update_near_duplicates: bool,
+}
+
+impl Default for DedupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            simhash_distance_threshold: 3,
+            normalize_content: true,
+            update_near_duplicates: true,
         }
     }
 }
