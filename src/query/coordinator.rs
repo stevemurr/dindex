@@ -114,11 +114,38 @@ impl QueryCoordinator {
 
         // Query remote nodes (if network available)
         if let Some(network) = &self.network {
-            let peer_ids: Vec<PeerId> = plan
+            // Get candidate peer IDs from semantic routing
+            let mut peer_ids: Vec<PeerId> = plan
                 .candidate_nodes
                 .iter()
                 .filter_map(|c| c.node_id.parse().ok())
                 .collect();
+
+            info!(
+                "Semantic routing returned {} candidate nodes",
+                plan.candidate_nodes.len()
+            );
+
+            // If no candidates from semantic routing, fall back to all connected peers
+            if peer_ids.is_empty() {
+                info!("No semantic routing candidates, checking connected peers...");
+                match network.get_peers().await {
+                    Ok(peers) => {
+                        info!("Found {} connected peers", peers.len());
+                        peer_ids = peers.into_iter().map(|p| p.peer_id).collect();
+                        if !peer_ids.is_empty() {
+                            info!(
+                                "Will query {} connected peers: {:?}",
+                                peer_ids.len(),
+                                peer_ids
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to get connected peers: {}", e);
+                    }
+                }
+            }
 
             if !peer_ids.is_empty() {
                 match network
