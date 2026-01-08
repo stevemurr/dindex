@@ -7,10 +7,12 @@
 //! - Hybrid retrieval (Dense + BM25 + RRF fusion)
 //! - Semantic routing via content centroids and LSH
 //! - Distributed web scraping with polite crawling
+//! - Bulk import from offline dumps (Wikipedia, etc.)
 
 pub mod chunking;
 pub mod config;
 pub mod embedding;
+pub mod import;
 pub mod index;
 pub mod network;
 pub mod query;
