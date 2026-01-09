@@ -72,21 +72,14 @@ impl QueryRouter {
         let query_dims = query_embedding.len();
 
         for (node_id, advertisement) in node_ads.iter() {
-            // Check bloom filter first if available
-            if let (Some(bloom_data), Some(lsh)) = (&advertisement.lsh_bloom_filter, query_lsh) {
-                if let Some(bloom) = BloomFilter::from_bytes(bloom_data) {
-                    // Check if any of the query LSH bits might match
-                    let lsh_bytes: Vec<u8> = lsh
-                        .bits
-                        .iter()
-                        .flat_map(|b| b.to_le_bytes())
-                        .collect();
-                    if !bloom.contains(&lsh_bytes) {
-                        debug!("Bloom filter rejected node {}", node_id);
-                        continue;
-                    }
-                }
-            }
+            // NOTE: Bloom filter pre-check disabled. The bloom filter contains LSH signatures
+            // of individual chunks, but checking if the query's LSH is in this set is flawed:
+            // - Query LSH will rarely exactly match any chunk's LSH
+            // - Small indexes have sparse bloom filters that correctly reject queries
+            // - Large indexes have dense bloom filters that pass due to false positives
+            // This caused asymmetric routing where small nodes were never queried.
+            // Centroid similarity (below) is the correct semantic filter.
+            let _ = (query_lsh, &advertisement.lsh_bloom_filter); // Suppress unused warnings
 
             // Compare with centroids
             let mut max_similarity = 0.0f32;
