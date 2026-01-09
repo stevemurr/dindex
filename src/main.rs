@@ -624,7 +624,7 @@ async fn start_node_inner(
     if !embeddings.is_empty() {
         let advertisement = AdvertisementBuilder::new(handle.local_peer_id.to_string())
             .with_centroids(&embeddings, config.routing.num_centroids, Some(config.embedding.truncated_dimensions))
-            .build();
+            .build(config.routing.lsh_bits);
         info!(
             "Broadcasting advertisement: {} centroids, {} chunks",
             advertisement.centroids.len(),
