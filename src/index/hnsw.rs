@@ -1,4 +1,6 @@
 //! HNSW index implementation using USearch
+//!
+//! Uses sled for mapping persistence instead of JSON for better scalability.
 
 use crate::config::IndexConfig;
 use crate::types::{ChunkId, Embedding};
@@ -14,12 +16,14 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 pub struct VectorIndex {
     /// USearch index
     index: Index,
-    /// Mapping from internal key to chunk ID
+    /// Mapping from internal key to chunk ID (in-memory for fast lookup)
     key_to_chunk: RwLock<HashMap<u64, ChunkId>>,
-    /// Mapping from chunk ID to internal key
+    /// Mapping from chunk ID to internal key (in-memory for fast lookup)
     chunk_to_key: RwLock<HashMap<ChunkId, u64>>,
     /// Next available key
     next_key: AtomicU64,
+    /// Sled database for persistent mappings
+    mappings_db: Option<sled::Db>,
     /// Index configuration (reserved for future tuning)
     #[allow(dead_code)]
     config: IndexConfig,
@@ -64,6 +68,7 @@ impl VectorIndex {
             key_to_chunk: RwLock::new(HashMap::new()),
             chunk_to_key: RwLock::new(HashMap::new()),
             next_key: AtomicU64::new(0),
+            mappings_db: None, // Will be set on first save/load
             config: config.clone(),
             dimensions,
         })
@@ -90,30 +95,87 @@ impl VectorIndex {
 
         let dimensions = index.dimensions();
 
-        // Load mappings
-        let mappings_path = path.with_extension("mappings.json");
-        let (key_to_chunk, chunk_to_key, next_key) = if mappings_path.exists() {
-            let data = std::fs::read_to_string(&mappings_path)?;
-            let mappings: SavedMappings = serde_json::from_str(&data)?;
-            let chunk_to_key: HashMap<ChunkId, u64> = mappings
-                .key_to_chunk
-                .iter()
-                .map(|(k, v)| (v.clone(), *k))
-                .collect();
-            (
-                mappings.key_to_chunk,
-                chunk_to_key,
-                mappings.next_key,
-            )
-        } else {
-            (HashMap::new(), HashMap::new(), 0)
-        };
+        // Open sled database for mappings
+        let mappings_db_path = path.with_extension("mappings.sled");
+        let json_mappings_path = path.with_extension("mappings.json");
+
+        // Check if we need to migrate from JSON
+        let (key_to_chunk, chunk_to_key, next_key, mappings_db) =
+            if json_mappings_path.exists() && !mappings_db_path.exists() {
+                // Migrate from JSON to sled
+                info!("Migrating vector index mappings from JSON to sled...");
+                let data = std::fs::read_to_string(&json_mappings_path)?;
+                let old_mappings: SavedMappings = serde_json::from_str(&data)?;
+
+                // Open new sled database
+                let db = sled::open(&mappings_db_path)
+                    .context("Failed to open mappings database")?;
+
+                // Write all mappings to sled
+                for (key, chunk_id) in &old_mappings.key_to_chunk {
+                    db.insert(&key.to_le_bytes(), chunk_id.as_bytes())?;
+                }
+                // Store next_key with special prefix
+                db.insert(b"__next_key__", &old_mappings.next_key.to_le_bytes())?;
+                db.flush()?;
+
+                // Build in-memory maps
+                let chunk_to_key: HashMap<ChunkId, u64> = old_mappings
+                    .key_to_chunk
+                    .iter()
+                    .map(|(k, v)| (v.clone(), *k))
+                    .collect();
+
+                // Backup old JSON file
+                let backup_path = path.with_extension("mappings.json.backup");
+                std::fs::rename(&json_mappings_path, &backup_path)?;
+                info!("Migration complete. Old JSON backed up to {:?}", backup_path);
+
+                (old_mappings.key_to_chunk, chunk_to_key, old_mappings.next_key, Some(db))
+            } else if mappings_db_path.exists() {
+                // Load from sled
+                let db = sled::open(&mappings_db_path)
+                    .context("Failed to open mappings database")?;
+
+                let mut key_to_chunk = HashMap::new();
+                let mut chunk_to_key = HashMap::new();
+
+                // Load next_key
+                let next_key = db
+                    .get(b"__next_key__")?
+                    .map(|v| {
+                        let bytes: [u8; 8] = v.as_ref().try_into().unwrap_or([0; 8]);
+                        u64::from_le_bytes(bytes)
+                    })
+                    .unwrap_or(0);
+
+                // Load all mappings
+                for result in db.iter() {
+                    let (k, v) = result?;
+                    // Skip special keys
+                    if k.starts_with(b"__") {
+                        continue;
+                    }
+                    let key = u64::from_le_bytes(k.as_ref().try_into().unwrap_or([0; 8]));
+                    let chunk_id = String::from_utf8(v.to_vec())
+                        .context("Invalid chunk ID in mappings")?;
+                    chunk_to_key.insert(chunk_id.clone(), key);
+                    key_to_chunk.insert(key, chunk_id);
+                }
+
+                info!("Loaded {} mappings from sled", key_to_chunk.len());
+                (key_to_chunk, chunk_to_key, next_key, Some(db))
+            } else {
+                // No existing mappings
+                (HashMap::new(), HashMap::new(), 0, None)
+            };
 
         Ok(Self {
             index,
             key_to_chunk: RwLock::new(key_to_chunk),
             chunk_to_key: RwLock::new(chunk_to_key),
             next_key: AtomicU64::new(next_key),
+            mappings_db,
             config: config.clone(),
             dimensions,
         })
@@ -127,15 +189,27 @@ impl VectorIndex {
         let path_str = path.to_str().ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
         self.index.save(path_str).context("Failed to save index")?;
 
-        // Save mappings
-        let mappings = SavedMappings {
-            key_to_chunk: self.key_to_chunk.read().clone(),
-            next_key: self.next_key.load(Ordering::SeqCst),
+        // Save mappings to sled
+        let mappings_db_path = path.with_extension("mappings.sled");
+        let db = if let Some(ref db) = self.mappings_db {
+            db.clone()
+        } else {
+            sled::open(&mappings_db_path).context("Failed to open mappings database")?
         };
-        let mappings_path = path.with_extension("mappings.json");
-        let data = serde_json::to_string_pretty(&mappings)?;
-        std::fs::write(&mappings_path, data)?;
 
+        // Write all mappings (in case of new index or changes)
+        let key_to_chunk = self.key_to_chunk.read();
+        for (key, chunk_id) in key_to_chunk.iter() {
+            db.insert(&key.to_le_bytes(), chunk_id.as_bytes())?;
+        }
+
+        // Save next_key
+        let next_key = self.next_key.load(Ordering::SeqCst);
+        db.insert(b"__next_key__", &next_key.to_le_bytes())?;
+
+        db.flush().context("Failed to flush mappings database")?;
+
+        info!("Saved {} mappings to sled", key_to_chunk.len());
         Ok(())
     }
 
@@ -248,7 +322,7 @@ impl VectorIndex {
     }
 }
 
-/// Serializable mappings for persistence
+/// Serializable mappings for JSON format (used only for migration from old format)
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedMappings {
     key_to_chunk: HashMap<u64, ChunkId>,
@@ -304,5 +378,53 @@ mod tests {
 
         index.remove(&"chunk1".to_string()).unwrap();
         assert!(!index.contains(&"chunk1".to_string()));
+    }
+
+    #[test]
+    fn test_persistence() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("test.index");
+
+        let config = IndexConfig {
+            hnsw_m: 8,
+            hnsw_ef_construction: 100,
+            hnsw_ef_search: 50,
+            memory_mapped: false,
+            max_capacity: 1000,
+        };
+
+        // Create and populate index
+        {
+            let index = VectorIndex::new(4, &config).unwrap();
+            index
+                .add(&"chunk1".to_string(), &vec![1.0, 0.0, 0.0, 0.0])
+                .unwrap();
+            index
+                .add(&"chunk2".to_string(), &vec![0.0, 1.0, 0.0, 0.0])
+                .unwrap();
+
+            index.save(&index_path).unwrap();
+            assert_eq!(index.len(), 2);
+        }
+
+        // Reload and verify
+        {
+            let index = VectorIndex::load(&index_path, &config).unwrap();
+            assert_eq!(index.len(), 2);
+            assert!(index.contains(&"chunk1".to_string()));
+            assert!(index.contains(&"chunk2".to_string()));
+
+            // Verify mappings work
+            let key1 = index.get_key(&"chunk1".to_string());
+            assert!(key1.is_some());
+            let chunk_id = index.get_chunk_id(key1.unwrap());
+            assert_eq!(chunk_id, Some("chunk1".to_string()));
+        }
+
+        // Verify sled file exists (not JSON)
+        assert!(temp_dir.path().join("test.mappings.sled").exists());
+        assert!(!temp_dir.path().join("test.mappings.json").exists());
     }
 }
