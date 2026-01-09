@@ -99,7 +99,11 @@ impl UrlDeduplicator {
     /// Hash a normalized URL
     fn hash_url(normalized: &str) -> u64 {
         let h = hash(normalized.as_bytes());
-        u64::from_be_bytes(h.as_bytes()[..8].try_into().unwrap())
+        // blake3 always produces 32 bytes, so [..8] is always valid
+        let bytes: [u8; 8] = h.as_bytes()[..8]
+            .try_into()
+            .expect("blake3 hash is always 32 bytes");
+        u64::from_be_bytes(bytes)
     }
 }
 
@@ -146,7 +150,11 @@ impl SimHash {
         // For each feature, hash it and update counts
         for feature in features {
             let h = hash(feature.as_bytes());
-            let feature_hash = u64::from_be_bytes(h.as_bytes()[..8].try_into().unwrap());
+            // blake3 always produces 32 bytes, so [..8] is always valid
+            let bytes: [u8; 8] = h.as_bytes()[..8]
+                .try_into()
+                .expect("blake3 hash is always 32 bytes");
+            let feature_hash = u64::from_be_bytes(bytes);
 
             for i in 0..64 {
                 if (feature_hash >> i) & 1 == 1 {
@@ -197,8 +205,11 @@ pub struct ContentDeduplicator {
 impl ContentDeduplicator {
     /// Create a new content deduplicator
     pub fn new(cache_size: usize, max_distance: u32, local_node_id: String) -> Self {
+        // Use max(1) to ensure cache_size is at least 1
+        let cache_capacity = NonZeroUsize::new(cache_size.max(1))
+            .expect("max(1) guarantees non-zero");
         Self {
-            local_cache: LruCache::new(NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::new(10000).unwrap())),
+            local_cache: LruCache::new(cache_capacity),
             max_distance,
             local_node_id,
         }
@@ -369,9 +380,10 @@ mod tests {
         dedup.register(text1, "doc1".to_string());
 
         // Check for duplicate
-        let dup_result = dedup.is_duplicate_local(text2);
-        assert!(dup_result.is_some());
-        assert_eq!(dup_result.unwrap(), "doc1");
+        let dup_result = dedup
+            .is_duplicate_local(text2)
+            .expect("similar text should be detected as duplicate");
+        assert_eq!(dup_result, "doc1");
 
         // Check different document
         let diff_result = dedup.is_duplicate_local(text3);

@@ -84,6 +84,9 @@ console = "0.15"
 walkdir = "2"
 toml = "0.8"
 
+# Embedded database for chunk storage
+sled = "0.34"
+
 # Scraping dependencies
 url = "2"
 scraper = "0.21"

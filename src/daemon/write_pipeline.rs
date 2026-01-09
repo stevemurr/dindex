@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::embedding::EmbeddingEngine;
+use crate::embedding::{hash_based_embedding, EmbeddingEngine};
 use crate::types::Chunk;
 
 use super::index_manager::IndexManager;
@@ -225,19 +225,16 @@ impl WritePipelineWorker {
                 Ok(embedding) => return embedding,
                 Err(e) => {
                     warn!("Embedding generation failed, using fallback: {}", e);
+                    // Use engine's configured dimensions for fallback
+                    return hash_based_embedding(content, engine.dimensions());
                 }
             }
         }
 
         // Fallback: generate deterministic fake embedding if no engine available
+        // Use configured dimensions from IndexManager
         warn!("No embedding engine available, using hash-based fallback");
-        let dims = 768;
-        (0..dims)
-            .map(|i| {
-                let hash = xxhash_rust::xxh3::xxh3_64(content.as_bytes());
-                ((hash.wrapping_add(i as u64) % 1000) as f32 / 500.0) - 1.0
-            })
-            .collect()
+        hash_based_embedding(content, self.index_manager.dimensions())
     }
 }
 

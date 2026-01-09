@@ -2,9 +2,12 @@
 //!
 //! Routes queries to relevant nodes based on content centroids and LSH
 
-use super::{BloomFilter, CentroidGenerator, LshIndex};
+use super::{BandedBloomFilter, CentroidGenerator, LshIndex};
 use crate::config::RoutingConfig;
 use crate::types::{Embedding, LshSignature, NodeAdvertisement, NodeCentroid, NodeId};
+
+/// Number of bands for LSH banding (divides 128-bit LSH into 8 bands of 16 bits)
+const LSH_NUM_BANDS: usize = 8;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use tracing::{debug, info};
@@ -72,14 +75,19 @@ impl QueryRouter {
         let query_dims = query_embedding.len();
 
         for (node_id, advertisement) in node_ads.iter() {
-            // NOTE: Bloom filter pre-check disabled. The bloom filter contains LSH signatures
-            // of individual chunks, but checking if the query's LSH is in this set is flawed:
-            // - Query LSH will rarely exactly match any chunk's LSH
-            // - Small indexes have sparse bloom filters that correctly reject queries
-            // - Large indexes have dense bloom filters that pass due to false positives
-            // This caused asymmetric routing where small nodes were never queried.
-            // Centroid similarity (below) is the correct semantic filter.
-            let _ = (query_lsh, &advertisement.lsh_bloom_filter); // Suppress unused warnings
+            // LSH banded bloom filter pre-check
+            // Uses banding technique: if ANY band of query LSH matches a band in the filter,
+            // the node might have relevant content. This correctly handles semantic similarity
+            // where similar vectors have similar (not identical) LSH signatures.
+            if let (Some(lsh), Some(bloom_bytes)) = (query_lsh, &advertisement.lsh_bloom_filter) {
+                if let Some(bloom) = BandedBloomFilter::from_bytes(bloom_bytes) {
+                    if !bloom.might_contain_similar(&lsh.bits, lsh.num_bits) {
+                        // No bands match - skip this node (definitely no similar content)
+                        debug!("Skipping node {} - no LSH band matches", node_id);
+                        continue;
+                    }
+                }
+            }
 
             // Compare with centroids
             let mut max_similarity = 0.0f32;
@@ -126,7 +134,11 @@ impl QueryRouter {
         }
 
         // Sort by similarity
-        candidates.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
+        candidates.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Return top candidates
         let top_k = self.config.candidate_nodes.min(candidates.len());
@@ -206,13 +218,18 @@ impl AdvertisementBuilder {
     }
 
     /// Build the advertisement
-    pub fn build(self) -> NodeAdvertisement {
-        // Create bloom filter from LSH signatures
+    pub fn build(self, lsh_bits: usize) -> NodeAdvertisement {
+        // Create banded bloom filter from LSH signatures
+        // Uses LSH banding technique for proper semantic filtering
         let bloom_filter = if !self.lsh_signatures.is_empty() {
-            let mut bloom = BloomFilter::new(self.lsh_signatures.len(), 0.01);
+            let mut bloom = BandedBloomFilter::new(
+                self.lsh_signatures.len(),
+                lsh_bits,
+                LSH_NUM_BANDS,
+                0.01, // 1% false positive rate per band
+            );
             for sig in &self.lsh_signatures {
-                let bytes: Vec<u8> = sig.bits.iter().flat_map(|b| b.to_le_bytes()).collect();
-                bloom.insert(&bytes);
+                bloom.insert(&sig.bits, sig.num_bits);
             }
             Some(bloom.to_bytes())
         } else {
@@ -268,7 +285,7 @@ mod tests {
 
         let ad = AdvertisementBuilder::new("node1".to_string())
             .with_centroids(&embeddings, 5, None)
-            .build();
+            .build(config.lsh_bits);
 
         router.register_node(ad);
 

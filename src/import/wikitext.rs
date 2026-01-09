@@ -2,6 +2,27 @@
 //!
 //! Converts MediaWiki markup to clean plaintext for indexing.
 
+use regex_lite::Regex;
+use std::sync::OnceLock;
+
+// Lazy-compiled regex patterns for better performance
+static RE_NOWIKI: OnceLock<Regex> = OnceLock::new();
+static RE_PRE: OnceLock<Regex> = OnceLock::new();
+static RE_CATEGORIES: OnceLock<Regex> = OnceLock::new();
+static RE_FILES: OnceLock<Regex> = OnceLock::new();
+static RE_EXTERNAL_LINK: OnceLock<Regex> = OnceLock::new();
+static RE_EXTERNAL_BARE: OnceLock<Regex> = OnceLock::new();
+static RE_HEADING1: OnceLock<Regex> = OnceLock::new();
+static RE_HEADING2: OnceLock<Regex> = OnceLock::new();
+static RE_HEADING3: OnceLock<Regex> = OnceLock::new();
+static RE_HEADING4: OnceLock<Regex> = OnceLock::new();
+static RE_HEADING5: OnceLock<Regex> = OnceLock::new();
+static RE_HEADING6: OnceLock<Regex> = OnceLock::new();
+static RE_LIST: OnceLock<Regex> = OnceLock::new();
+static RE_DEF_LIST: OnceLock<Regex> = OnceLock::new();
+static RE_INTERWIKI: OnceLock<Regex> = OnceLock::new();
+static RE_MAGIC_WORDS: OnceLock<Regex> = OnceLock::new();
+
 /// WikiText parser that converts MediaWiki markup to plain text
 pub struct WikiTextParser {
     /// Remove references and citations
@@ -90,11 +111,11 @@ impl WikiTextParser {
         let mut result = text.to_string();
 
         // Remove nowiki tags but keep content
-        let re_nowiki = regex_lite::Regex::new(r"<nowiki>(.*?)</nowiki>").unwrap();
+        let re_nowiki = RE_NOWIKI.get_or_init(|| Regex::new(r"<nowiki>(.*?)</nowiki>").unwrap());
         result = re_nowiki.replace_all(&result, "$1").to_string();
 
         // Remove pre tags but keep content
-        let re_pre = regex_lite::Regex::new(r"<pre>(.*?)</pre>").unwrap();
+        let re_pre = RE_PRE.get_or_init(|| Regex::new(r"<pre>(.*?)</pre>").unwrap());
         result = re_pre.replace_all(&result, "$1").to_string();
 
         result
@@ -256,13 +277,17 @@ impl WikiTextParser {
 
     /// Remove category links [[Category:...]]
     fn remove_categories_markup(&self, text: &str) -> String {
-        let re = regex_lite::Regex::new(r"(?i)\[\[(Category|Kategorie|Catégorie|Categoría):[^\]]*\]\]").unwrap();
+        let re = RE_CATEGORIES.get_or_init(|| {
+            Regex::new(r"(?i)\[\[(Category|Kategorie|Catégorie|Categoría):[^\]]*\]\]").unwrap()
+        });
         re.replace_all(text, "").to_string()
     }
 
     /// Remove file/image links [[File:...]] and [[Image:...]]
     fn remove_file_links(&self, text: &str) -> String {
-        let re = regex_lite::Regex::new(r"(?i)\[\[(File|Image|Datei|Fichier|Archivo):[^\]]*\]\]").unwrap();
+        let re = RE_FILES.get_or_init(|| {
+            Regex::new(r"(?i)\[\[(File|Image|Datei|Fichier|Archivo):[^\]]*\]\]").unwrap()
+        });
         re.replace_all(text, "").to_string()
     }
 
@@ -341,11 +366,15 @@ impl WikiTextParser {
 
     /// Process external links [url text] -> text or just show url
     fn process_external_links(&self, text: &str) -> String {
-        let re = regex_lite::Regex::new(r"\[https?://[^\s\]]+\s+([^\]]+)\]").unwrap();
+        let re = RE_EXTERNAL_LINK.get_or_init(|| {
+            Regex::new(r"\[https?://[^\s\]]+\s+([^\]]+)\]").unwrap()
+        });
         let result = re.replace_all(text, "$1").to_string();
 
         // Handle bare external links [url]
-        let re_bare = regex_lite::Regex::new(r"\[(https?://[^\s\]]+)\]").unwrap();
+        let re_bare = RE_EXTERNAL_BARE.get_or_init(|| {
+            Regex::new(r"\[(https?://[^\s\]]+)\]").unwrap()
+        });
         re_bare.replace_all(&result, "$1").to_string()
     }
 
@@ -359,23 +388,30 @@ impl WikiTextParser {
         result = result.replace("'''", ""); // bold
         result = result.replace("''", ""); // italic
 
-        // Remove heading markup but keep content
+        // Remove heading markup but keep content (using pre-compiled regexes)
         // ==== Heading ==== -> Heading
-        for level in (1..=6).rev() {
-            let markers = "=".repeat(level);
-            let re = regex_lite::Regex::new(&format!(r"{}+\s*(.*?)\s*{}+", markers, markers)).unwrap();
-            result = re.replace_all(&result, "$1\n").to_string();
-        }
+        let re_h6 = RE_HEADING6.get_or_init(|| Regex::new(r"======+\s*(.*?)\s*======+").unwrap());
+        result = re_h6.replace_all(&result, "$1\n").to_string();
+        let re_h5 = RE_HEADING5.get_or_init(|| Regex::new(r"=====+\s*(.*?)\s*=====+").unwrap());
+        result = re_h5.replace_all(&result, "$1\n").to_string();
+        let re_h4 = RE_HEADING4.get_or_init(|| Regex::new(r"====+\s*(.*?)\s*====+").unwrap());
+        result = re_h4.replace_all(&result, "$1\n").to_string();
+        let re_h3 = RE_HEADING3.get_or_init(|| Regex::new(r"===+\s*(.*?)\s*===+").unwrap());
+        result = re_h3.replace_all(&result, "$1\n").to_string();
+        let re_h2 = RE_HEADING2.get_or_init(|| Regex::new(r"==+\s*(.*?)\s*==+").unwrap());
+        result = re_h2.replace_all(&result, "$1\n").to_string();
+        let re_h1 = RE_HEADING1.get_or_init(|| Regex::new(r"=+\s*(.*?)\s*=+").unwrap());
+        result = re_h1.replace_all(&result, "$1\n").to_string();
 
         // Remove horizontal rules
         result = result.replace("----", "");
 
         // Remove bullet points and numbered lists
-        let re_list = regex_lite::Regex::new(r"(?m)^[*#:;]+\s*").unwrap();
+        let re_list = RE_LIST.get_or_init(|| Regex::new(r"(?m)^[*#:;]+\s*").unwrap());
         result = re_list.replace_all(&result, "").to_string();
 
         // Remove definition list markup
-        let re_def = regex_lite::Regex::new(r"(?m)^;([^:]+):(.+)$").unwrap();
+        let re_def = RE_DEF_LIST.get_or_init(|| Regex::new(r"(?m)^;([^:]+):(.+)$").unwrap());
         result = re_def.replace_all(&result, "$1: $2").to_string();
 
         result
@@ -384,13 +420,15 @@ impl WikiTextParser {
     /// Remove interwiki links [[lang:...]]
     fn remove_interwiki_links(&self, text: &str) -> String {
         // Common language codes
-        let re = regex_lite::Regex::new(r"\[\[[a-z]{2,3}(-[a-z]+)?:[^\]]+\]\]").unwrap();
+        let re = RE_INTERWIKI.get_or_init(|| {
+            Regex::new(r"\[\[[a-z]{2,3}(-[a-z]+)?:[^\]]+\]\]").unwrap()
+        });
         re.replace_all(text, "").to_string()
     }
 
     /// Remove magic words like __NOTOC__, __TOC__, etc.
     fn remove_magic_words(&self, text: &str) -> String {
-        let re = regex_lite::Regex::new(r"__[A-Z]+__").unwrap();
+        let re = RE_MAGIC_WORDS.get_or_init(|| Regex::new(r"__[A-Z]+__").unwrap());
         re.replace_all(text, "").to_string()
     }
 

@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use tracing::{debug, info};
 
 use crate::config::Config;
-use crate::embedding::EmbeddingEngine;
+use crate::embedding::{hash_based_embedding, EmbeddingEngine};
 use crate::index::{ChunkStorage, VectorIndex};
 use crate::retrieval::{Bm25Index, HybridIndexer, HybridRetriever};
 use crate::types::{Chunk, Query, SearchResult};
@@ -56,13 +56,8 @@ impl IndexManager {
         let bm25_index = Arc::new(Bm25Index::new(&bm25_path)?);
         info!("BM25 index loaded");
 
-        // Load or create chunk storage
-        let chunks_path = data_dir.join("chunks.json");
-        let chunk_storage = if chunks_path.exists() {
-            Arc::new(ChunkStorage::load(data_dir)?)
-        } else {
-            Arc::new(ChunkStorage::new(data_dir)?)
-        };
+        // Load or create chunk storage (auto-migrates from JSON if needed)
+        let chunk_storage = Arc::new(ChunkStorage::load(data_dir)?);
         info!("Chunk storage loaded with {} chunks", chunk_storage.len());
 
         // Create retriever for search operations
@@ -175,12 +170,12 @@ impl IndexManager {
         let bm25_index_size = self.dir_size(data_dir.join("bm25"));
         let storage_size = self.file_size(data_dir.join("chunks.json"));
 
-        // Count unique documents by looking at chunk metadata
-        // This is an approximation since we don't have a dedicated document store
+        // Count chunks and unique documents
         let total_chunks = self.chunk_storage.len();
+        let total_documents = self.chunk_storage.document_count();
 
         Ok(IndexStats {
-            total_documents: 0, // Would need separate document tracking
+            total_documents,
             total_chunks,
             vector_index_size_bytes: vector_index_size,
             bm25_index_size_bytes: bm25_index_size,
@@ -212,6 +207,11 @@ impl IndexManager {
             .collect()
     }
 
+    /// Get the configured embedding dimensions
+    pub fn dimensions(&self) -> usize {
+        self.config.embedding.dimensions
+    }
+
     /// Set the embedding engine for generating query embeddings
     pub fn set_embedding_engine(&self, engine: Arc<EmbeddingEngine>) {
         let mut guard = self.embedding_engine.write();
@@ -225,19 +225,14 @@ impl IndexManager {
                 Ok(embedding) => return embedding,
                 Err(e) => {
                     tracing::warn!("Embedding generation failed, using fallback: {}", e);
+                    return hash_based_embedding(content, engine.dimensions());
                 }
             }
         }
 
         // Fallback: generate deterministic fake embedding if no engine available
         tracing::warn!("No embedding engine available for search, using hash-based fallback");
-        let dims = self.config.embedding.dimensions;
-        (0..dims)
-            .map(|i| {
-                let hash = xxhash_rust::xxh3::xxh3_64(content.as_bytes());
-                ((hash.wrapping_add(i as u64) % 1000) as f32 / 500.0) - 1.0
-            })
-            .collect()
+        hash_based_embedding(content, self.config.embedding.dimensions)
     }
 
     /// Get file size, returning 0 if file doesn't exist

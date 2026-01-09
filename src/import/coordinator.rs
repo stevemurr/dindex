@@ -137,7 +137,9 @@ impl ImportCoordinator {
                     let doc_size = doc.content.len() as u64;
 
                     // Process document using the unified processor with real embeddings
+                    // Track embedding failures to skip documents with failed embeddings
                     let engine = self.embedding_engine.clone();
+                    let embedding_failed = std::sync::atomic::AtomicBool::new(false);
                     let result = self.processor.process(
                         &doc.content,
                         doc.url.clone(),
@@ -145,14 +147,26 @@ impl ImportCoordinator {
                         "wikipedia",
                         Some(("wikipedia_id", doc.id.as_str())),
                         |text| {
-                            engine
-                                .embed(text)
-                                .unwrap_or_else(|e| {
-                                    tracing::warn!("Embedding failed: {}, using zero vector", e);
-                                    vec![0.0; engine.dimensions()]
-                                })
+                            match engine.embed(text) {
+                                Ok(embedding) => embedding,
+                                Err(e) => {
+                                    tracing::error!("Embedding failed for '{}': {}", title, e);
+                                    embedding_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    // Return placeholder - document will be skipped below
+                                    vec![f32::NAN; engine.dimensions()]
+                                }
+                            }
                         },
                     );
+
+                    // Skip documents where embedding failed (NaN vectors are invalid)
+                    if embedding_failed.load(std::sync::atomic::Ordering::Relaxed) {
+                        warn!("Skipping document '{}' due to embedding failure", title);
+                        progress.document_error("Embedding generation failed");
+                        continue;
+                    }
+
+                    let result = result;
 
                     match result {
                         Ok(ProcessingResult::Indexed { chunks_created, .. }) => {

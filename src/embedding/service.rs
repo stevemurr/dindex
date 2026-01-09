@@ -85,3 +85,20 @@ pub fn model_not_found_error(config: &Config) {
     eprintln!("  - bge-base-en-v1.5 (768 dims)");
     eprintln!("  - all-MiniLM-L6-v2 (smallest, 384 dims)");
 }
+
+/// Generate a deterministic hash-based embedding (fallback when embedding engine unavailable)
+///
+/// This produces embeddings that are deterministic for the same content but have no
+/// semantic meaning. Use only as a fallback for testing or when the embedding model
+/// is unavailable. Values are in the range [-1, 1].
+///
+/// WARNING: Hash-based embeddings will not produce meaningful search results.
+/// Always prefer using a real embedding engine when possible.
+pub fn hash_based_embedding(content: &str, dims: usize) -> Vec<f32> {
+    (0..dims)
+        .map(|i| {
+            let hash = xxhash_rust::xxh3::xxh3_64(content.as_bytes());
+            ((hash.wrapping_add(i as u64) % 1000) as f32 / 500.0) - 1.0
+        })
+        .collect()
+}

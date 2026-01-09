@@ -2,6 +2,8 @@
 //!
 //! Provides content-based document identity and deduplication that works
 //! uniformly across all input sources (Wikipedia import, web scraping, local files).
+//!
+//! Uses sled for entry persistence with in-memory indices for fast lookups.
 
 use crate::types::{ChunkId, ContentHash, ContentId, DocumentIdentity};
 use anyhow::{Context, Result};
@@ -99,7 +101,7 @@ pub enum DuplicateCheckResult {
 
 /// Persistent document registry for deduplication
 pub struct DocumentRegistry {
-    /// Content ID to entry mapping
+    /// Content ID to entry mapping (in-memory cache)
     entries: RwLock<HashMap<String, DocumentEntry>>,
     /// SimHash to content ID mapping (for exact simhash lookups)
     simhash_index: RwLock<HashMap<u64, String>>,
@@ -107,6 +109,8 @@ pub struct DocumentRegistry {
     simhash_buckets: RwLock<HashMap<u8, HashSet<String>>>,
     /// URL to content ID mapping (for URL-based lookups)
     url_index: RwLock<HashMap<String, String>>,
+    /// Sled database for persistent storage
+    db: Option<sled::Db>,
     /// Storage path
     data_dir: PathBuf,
     /// Near-duplicate threshold (max Hamming distance)
@@ -124,55 +128,101 @@ impl DocumentRegistry {
             simhash_index: RwLock::new(HashMap::new()),
             simhash_buckets: RwLock::new(HashMap::new()),
             url_index: RwLock::new(HashMap::new()),
+            db: None,
             data_dir,
             distance_threshold,
         })
     }
 
-    /// Load registry from disk
+    /// Load registry from disk (auto-migrates from JSON if needed)
     pub fn load(data_dir: impl AsRef<Path>, distance_threshold: u32) -> Result<Self> {
         let data_dir = data_dir.as_ref().to_path_buf();
-        let registry_path = data_dir.join("document_registry.json");
+        let json_path = data_dir.join("document_registry.json");
+        let sled_path = data_dir.join("document_registry.sled");
 
-        let registry = if registry_path.exists() {
-            let data = std::fs::read_to_string(&registry_path)
+        // Check if we need to migrate from JSON
+        if json_path.exists() && !sled_path.exists() {
+            info!("Migrating document registry from JSON to sled...");
+            let data = std::fs::read_to_string(&json_path)
                 .context("Failed to read document registry")?;
             let saved: SavedRegistry =
                 serde_json::from_str(&data).context("Failed to parse document registry")?;
 
-            info!("Loaded document registry with {} entries", saved.entries.len());
+            // Create sled database
+            let db = sled::open(&sled_path).context("Failed to open registry database")?;
 
-            let mut new_registry = Self::new(&data_dir, distance_threshold)?;
+            // Write all entries to sled
+            for (content_id, entry) in &saved.entries {
+                let data = bincode::serialize(&entry)?;
+                db.insert(content_id.as_bytes(), data)?;
+            }
+            db.flush()?;
 
-            // Rebuild all indices from loaded entries
+            // Build in-memory registry
+            let mut registry = Self::new(&data_dir, distance_threshold)?;
+            registry.db = Some(db);
+
             for (content_id, entry) in saved.entries {
-                new_registry.add_entry_internal(content_id, entry);
+                registry.add_entry_internal(content_id, entry);
             }
 
-            new_registry
-        } else {
-            Self::new(data_dir, distance_threshold)?
-        };
+            // Backup old JSON file
+            let backup_path = data_dir.join("document_registry.json.backup");
+            std::fs::rename(&json_path, &backup_path)?;
+            info!(
+                "Migration complete. Old JSON backed up to {:?}",
+                backup_path
+            );
 
-        Ok(registry)
+            return Ok(registry);
+        }
+
+        // Load from sled if it exists
+        if sled_path.exists() {
+            let db = sled::open(&sled_path).context("Failed to open registry database")?;
+
+            let mut registry = Self::new(&data_dir, distance_threshold)?;
+
+            // Load all entries and rebuild indices
+            for result in db.iter() {
+                let (k, v) = result?;
+                let content_id = String::from_utf8(k.to_vec())
+                    .context("Invalid content ID in registry")?;
+                let entry: DocumentEntry = bincode::deserialize(&v)
+                    .context("Failed to deserialize registry entry")?;
+                registry.add_entry_internal(content_id, entry);
+            }
+
+            info!("Loaded document registry with {} entries from sled", registry.len());
+            registry.db = Some(db);
+
+            return Ok(registry);
+        }
+
+        // No existing registry
+        Self::new(data_dir, distance_threshold)
     }
 
     /// Save registry to disk
     pub fn save(&self) -> Result<()> {
-        let registry_path = self.data_dir.join("document_registry.json");
+        let sled_path = self.data_dir.join("document_registry.sled");
 
-        let saved = SavedRegistry {
-            entries: self.entries.read().clone(),
-            version: 1,
+        let db = if let Some(ref db) = self.db {
+            db.clone()
+        } else {
+            sled::open(&sled_path).context("Failed to open registry database")?
         };
 
-        let data = serde_json::to_string_pretty(&saved)?;
-        std::fs::write(&registry_path, data)?;
+        // Write all entries to sled
+        let entries = self.entries.read();
+        for (content_id, entry) in entries.iter() {
+            let data = bincode::serialize(entry)?;
+            db.insert(content_id.as_bytes(), data)?;
+        }
 
-        info!(
-            "Saved document registry with {} entries",
-            saved.entries.len()
-        );
+        db.flush().context("Failed to flush registry database")?;
+
+        info!("Saved document registry with {} entries", entries.len());
 
         Ok(())
     }
@@ -281,7 +331,16 @@ impl DocumentRegistry {
             .or_default()
             .insert(content_id_str.clone());
 
-        self.entries.write().insert(content_id_str, entry.clone());
+        self.entries
+            .write()
+            .insert(content_id_str.clone(), entry.clone());
+
+        // Persist to sled
+        if let Some(ref db) = self.db {
+            if let Ok(data) = bincode::serialize(&entry) {
+                let _ = db.insert(content_id_str.as_bytes(), data);
+            }
+        }
 
         debug!("Registered new document: {}", entry.content_id);
 
@@ -309,7 +368,16 @@ impl DocumentRegistry {
             }
 
             entry.last_updated = Utc::now();
-            Some(entry.clone())
+            let result = entry.clone();
+
+            // Persist to sled
+            if let Some(ref db) = self.db {
+                if let Ok(data) = bincode::serialize(&result) {
+                    let _ = db.insert(content_id_str.as_bytes(), data);
+                }
+            }
+
+            Some(result)
         } else {
             None
         }
@@ -328,7 +396,16 @@ impl DocumentRegistry {
         if let Some(entry) = entries.get_mut(content_id_str) {
             let old_chunk_ids = std::mem::replace(&mut entry.chunk_ids, chunk_ids);
             entry.update_content(new_identity.content_hash);
-            Some((entry.clone(), old_chunk_ids))
+            let result = entry.clone();
+
+            // Persist to sled
+            if let Some(ref db) = self.db {
+                if let Ok(data) = bincode::serialize(&result) {
+                    let _ = db.insert(content_id_str.as_bytes(), data);
+                }
+            }
+
+            Some((result, old_chunk_ids))
         } else {
             None
         }
@@ -350,6 +427,11 @@ impl DocumentRegistry {
 
         for url in &entry.urls {
             self.url_index.write().remove(url);
+        }
+
+        // Remove from sled
+        if let Some(ref db) = self.db {
+            let _ = db.remove(content_id_str.as_bytes());
         }
 
         Some(entry)
@@ -436,10 +518,11 @@ pub struct RegistryStats {
     pub source_counts: HashMap<String, usize>,
 }
 
-/// Serializable registry for persistence
+/// Serializable registry for JSON format (used only for migration from old format)
 #[derive(Serialize, Deserialize)]
 struct SavedRegistry {
     entries: HashMap<String, DocumentEntry>,
+    #[allow(dead_code)]
     version: u32,
 }
 
@@ -560,9 +643,10 @@ mod tests {
         );
 
         // Lookup by URL
-        let entry = registry.check_url("https://example.com/page");
-        assert!(entry.is_some());
-        assert_eq!(entry.unwrap().title, Some("Test".to_string()));
+        let entry = registry
+            .check_url("https://example.com/page")
+            .expect("URL should be found in registry");
+        assert_eq!(entry.title, Some("Test".to_string()));
 
         // Non-existent URL
         let entry = registry.check_url("https://other.com/page");
@@ -602,6 +686,10 @@ mod tests {
                 _ => panic!("Expected ExactMatch after reload"),
             }
         }
+
+        // Verify sled file exists (not JSON)
+        assert!(temp_dir.path().join("document_registry.sled").exists());
+        assert!(!temp_dir.path().join("document_registry.json").exists());
     }
 
     #[test]
@@ -626,8 +714,7 @@ mod tests {
             Some(("extra_id", "456")),
         );
 
-        assert!(updated.is_some());
-        let updated = updated.unwrap();
+        let updated = updated.expect("update_metadata should succeed");
         assert!(updated.urls.contains("https://example.com/first"));
         assert!(updated.urls.contains("https://example.com/second"));
         assert_eq!(updated.source_ids.get("extra_id"), Some(&"456".to_string()));

@@ -36,8 +36,11 @@ impl DIndexBehaviour {
         // Kademlia configuration
         let protocol = StreamProtocol::new(super::QUERY_PROTOCOL);
         let mut kad_config = kad::Config::new(protocol);
+        // SAFETY: 20 is always non-zero
+        let replication_factor = std::num::NonZeroUsize::new(20)
+            .expect("20 is non-zero");
         kad_config
-            .set_replication_factor(std::num::NonZeroUsize::new(20).unwrap())
+            .set_replication_factor(replication_factor)
             .set_query_timeout(Duration::from_secs(60))
             .set_record_ttl(Some(Duration::from_secs(48 * 60 * 60))) // 48 hours
             .set_provider_record_ttl(Some(Duration::from_secs(48 * 60 * 60)))
