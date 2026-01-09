@@ -128,6 +128,17 @@ impl ChunkStorage {
             .cloned()
             .collect()
     }
+
+    /// Count unique documents by looking at chunk document_ids
+    pub fn document_count(&self) -> usize {
+        use std::collections::HashSet;
+        self.chunks
+            .read()
+            .values()
+            .map(|stored| &stored.chunk.metadata.document_id)
+            .collect::<HashSet<_>>()
+            .len()
+    }
 }
 
 /// Document storage for managing full documents

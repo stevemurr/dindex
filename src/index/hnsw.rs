@@ -141,10 +141,11 @@ impl VectorIndex {
 
     /// Add a single embedding to the index
     pub fn add(&self, chunk_id: &ChunkId, embedding: &Embedding) -> Result<u64> {
-        assert_eq!(
-            embedding.len(),
+        anyhow::ensure!(
+            embedding.len() == self.dimensions,
+            "Embedding dimension mismatch: expected {}, got {}",
             self.dimensions,
-            "Embedding dimension mismatch"
+            embedding.len()
         );
 
         let key = self.next_key.fetch_add(1, Ordering::SeqCst);
@@ -174,10 +175,11 @@ impl VectorIndex {
 
     /// Search for nearest neighbors
     pub fn search(&self, query: &Embedding, k: usize) -> Result<Vec<VectorSearchResult>> {
-        assert_eq!(
-            query.len(),
+        anyhow::ensure!(
+            query.len() == self.dimensions,
+            "Query dimension mismatch: expected {}, got {}",
             self.dimensions,
-            "Query dimension mismatch"
+            query.len()
         );
 
         let results = self.index.search(query, k).context("Search failed")?;
