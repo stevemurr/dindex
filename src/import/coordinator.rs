@@ -139,7 +139,10 @@ impl ImportCoordinator {
                     // Process document using the unified processor with real embeddings
                     // Track embedding failures to skip documents with failed embeddings
                     let engine = self.embedding_engine.clone();
-                    let embedding_failed = std::sync::atomic::AtomicBool::new(false);
+                    let embedding_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let embedding_failed_clone = embedding_failed.clone();
+                    let title_clone = title.clone();
+
                     let result = self.processor.process(
                         &doc.content,
                         doc.url.clone(),
@@ -147,26 +150,30 @@ impl ImportCoordinator {
                         "wikipedia",
                         Some(("wikipedia_id", doc.id.as_str())),
                         |text| {
+                            // Check if a previous embedding in this document already failed
+                            // If so, return zeros early to avoid partial indexing
+                            if embedding_failed_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                                return vec![0.0; engine.dimensions()];
+                            }
+
                             match engine.embed(text) {
                                 Ok(embedding) => embedding,
                                 Err(e) => {
-                                    tracing::error!("Embedding failed for '{}': {}", title, e);
-                                    embedding_failed.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    // Return placeholder - document will be skipped below
-                                    vec![f32::NAN; engine.dimensions()]
+                                    tracing::error!("Embedding failed for '{}': {}", title_clone, e);
+                                    embedding_failed_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    // Return zero vector (safer than NaN, will result in 0 similarity)
+                                    vec![0.0; engine.dimensions()]
                                 }
                             }
                         },
                     );
 
-                    // Skip documents where embedding failed (NaN vectors are invalid)
+                    // Skip documents where embedding failed
                     if embedding_failed.load(std::sync::atomic::Ordering::Relaxed) {
                         warn!("Skipping document '{}' due to embedding failure", title);
                         progress.document_error("Embedding generation failed");
                         continue;
                     }
-
-                    let result = result;
 
                     match result {
                         Ok(ProcessingResult::Indexed { chunks_created, .. }) => {

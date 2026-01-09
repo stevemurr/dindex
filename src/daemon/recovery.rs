@@ -184,7 +184,7 @@ impl RecoveryManager {
     }
 
     /// Verify index integrity
-    pub fn verify_integrity(&mut self, config: &Config) -> Result<IntegrityResult> {
+    pub fn verify_integrity(&mut self, _config: &Config) -> Result<IntegrityResult> {
         info!("Verifying index integrity...");
 
         let mut issues = Vec::new();
@@ -210,17 +210,23 @@ impl RecoveryManager {
             issues.push("BM25 index path exists but is not a directory".to_string());
         }
 
-        // Check chunk storage
-        let chunks_path = self.data_dir.join("chunks.json");
+        // Check chunk storage (sled database)
+        let chunks_path = self.data_dir.join("chunks.sled");
         if chunks_path.exists() {
-            match fs::read_to_string(&chunks_path) {
-                Ok(content) => {
-                    if let Err(e) = serde_json::from_str::<serde_json::Value>(&content) {
-                        issues.push(format!("Chunk storage JSON is invalid: {}", e));
+            if !chunks_path.is_dir() {
+                issues.push("Chunk storage path exists but is not a directory".to_string());
+            } else {
+                // Try to open the sled database to verify integrity
+                match sled::open(&chunks_path) {
+                    Ok(db) => {
+                        // Verify we can read from the database
+                        if let Err(e) = db.first() {
+                            issues.push(format!("Chunk storage database is corrupted: {}", e));
+                        }
                     }
-                }
-                Err(e) => {
-                    issues.push(format!("Cannot read chunk storage: {}", e));
+                    Err(e) => {
+                        issues.push(format!("Cannot open chunk storage database: {}", e));
+                    }
                 }
             }
         }

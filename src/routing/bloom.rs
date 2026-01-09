@@ -123,8 +123,18 @@ impl BloomFilter {
         let k = self.num_hashes as f64;
         let x = set_bits as f64;
 
+        // Handle edge cases: if all bits are set or nearly all, we can't estimate accurately
+        // ln(0) is undefined, so guard against x >= m
+        if x >= m || k == 0.0 {
+            return set_bits; // Return number of set bits as upper bound
+        }
+
         // n ≈ -m/k * ln(1 - x/m)
-        ((-m / k) * (1.0 - x / m).ln()).round() as usize
+        let estimate = (-m / k) * (1.0 - x / m).ln();
+        if estimate.is_nan() || estimate.is_infinite() || estimate < 0.0 {
+            return 0;
+        }
+        estimate.round() as usize
     }
 
     /// Merge another bloom filter into this one (union)

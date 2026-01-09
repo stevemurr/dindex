@@ -179,7 +179,11 @@ impl TextSplitter {
             let chunk_text = chunk_text.trim().to_string();
 
             if chunk_text.len() >= min_chars || start + target_chars >= content_len {
-                let position = start as f32 / total_chars as f32;
+                let position = if total_chars > 0 {
+                    start as f32 / total_chars as f32
+                } else {
+                    0.0
+                };
                 let token_count = self.estimate_tokens(&chunk_text);
 
                 let metadata = ChunkMetadata {
