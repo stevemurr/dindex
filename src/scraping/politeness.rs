@@ -287,10 +287,13 @@ impl PolitenessController {
             .build()
             .unwrap_or_default();
 
+        // Use max(1) to ensure cache_size is at least 1, with fallback default of 1000
+        let cache_size = config.cache_size.max(1);
+        let cache_capacity = NonZeroUsize::new(cache_size)
+            .expect("cache_size.max(1) guarantees non-zero");
+
         Self {
-            robots_cache: LruCache::new(
-                NonZeroUsize::new(config.cache_size).unwrap_or(NonZeroUsize::new(1000).unwrap()),
-            ),
+            robots_cache: LruCache::new(cache_capacity),
             domain_state: HashMap::new(),
             config,
             http_client,

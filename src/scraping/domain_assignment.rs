@@ -78,14 +78,22 @@ impl DomainAssignment {
     /// Hash a hostname to a u64 position on the ring
     fn hash_hostname(hostname: &str) -> u64 {
         let h = hash(hostname.as_bytes());
-        u64::from_be_bytes(h.as_bytes()[..8].try_into().unwrap())
+        // blake3 always produces 32 bytes, so [..8] is always valid
+        let bytes: [u8; 8] = h.as_bytes()[..8]
+            .try_into()
+            .expect("blake3 hash is always 32 bytes");
+        u64::from_be_bytes(bytes)
     }
 
     /// Hash a virtual node key to a ring position
     fn hash_vnode(peer_id: &str, vnode_index: usize) -> u64 {
         let key = format!("{}:{}", peer_id, vnode_index);
         let h = hash(key.as_bytes());
-        u64::from_be_bytes(h.as_bytes()[..8].try_into().unwrap())
+        // blake3 always produces 32 bytes, so [..8] is always valid
+        let bytes: [u8; 8] = h.as_bytes()[..8]
+            .try_into()
+            .expect("blake3 hash is always 32 bytes");
+        u64::from_be_bytes(bytes)
     }
 
     /// Handle a node joining the network

@@ -136,7 +136,8 @@ impl ImportProgress {
     /// Check if we should create a checkpoint
     fn maybe_checkpoint(&self) {
         if let Some(ref path) = self.checkpoint_path {
-            let mut last = self.last_checkpoint.lock().unwrap();
+            // Use unwrap_or_else to recover from poisoned mutex
+            let mut last = self.last_checkpoint.lock().unwrap_or_else(|e| e.into_inner());
             if last.elapsed() >= Duration::from_secs(30) {
                 // Create checkpoint
                 let stats = self.get_stats();

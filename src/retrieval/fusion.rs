@@ -78,7 +78,11 @@ pub fn reciprocal_rank_fusion(
 
     // Sort by RRF score descending
     let mut results: Vec<FusedResult> = chunk_scores.into_values().collect();
-    results.sort_by(|a, b| b.rrf_score.partial_cmp(&a.rrf_score).unwrap());
+    results.sort_by(|a, b| {
+        b.rrf_score
+            .partial_cmp(&a.rrf_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     results
 }
@@ -133,7 +137,7 @@ pub fn linear_combination(
     }
 
     let mut results: Vec<(ChunkId, f32)> = chunk_scores.into_iter().collect();
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results
 }
 

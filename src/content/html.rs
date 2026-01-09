@@ -20,9 +20,11 @@ impl HtmlExtractor {
     /// Extract readable content from an HTML string
     pub fn extract_from_str(html: &str, url: Option<&str>) -> Result<ExtractedDocument> {
         // Parse the URL or use a placeholder
+        // SAFETY: "http://localhost/" is a valid URL
+        let fallback_url = Url::parse("http://localhost/").expect("localhost is a valid URL");
         let parsed_url = url
             .and_then(|u| Url::parse(u).ok())
-            .unwrap_or_else(|| Url::parse("http://localhost/").unwrap());
+            .unwrap_or(fallback_url);
 
         let mut cursor = Cursor::new(html.as_bytes());
 

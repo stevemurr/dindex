@@ -311,17 +311,19 @@ async fn run_import_job(
             job.progress.current = current;
             job.progress.total = total;
 
-            // Calculate rate
+            // Calculate rate and ETA
             let elapsed = job.started_at.elapsed().as_secs_f64();
-            if elapsed > 0.0 {
-                job.progress.rate = Some(current as f64 / elapsed);
+            if elapsed > 0.0 && current > 0 {
+                let rate = current as f64 / elapsed;
+                job.progress.rate = Some(rate);
                 if let Some(t) = total {
-                    if current > 0 {
-                        let remaining = t.saturating_sub(current);
-                        let eta = (remaining as f64 / (current as f64 / elapsed)) as u64;
-                        job.progress.eta_seconds = Some(eta);
-                    }
+                    let remaining = t.saturating_sub(current);
+                    // ETA = remaining items / rate (items per second)
+                    let eta = (remaining as f64 / rate) as u64;
+                    job.progress.eta_seconds = Some(eta);
                 }
+            } else if elapsed > 0.0 {
+                job.progress.rate = Some(0.0);
             }
         }
     }
@@ -471,10 +473,14 @@ async fn run_scrape_job(
 
             let elapsed = job.started_at.elapsed().as_secs_f64();
             if elapsed > 0.0 && current > 0 {
-                job.progress.rate = Some(current as f64 / elapsed);
+                let rate = current as f64 / elapsed;
+                job.progress.rate = Some(rate);
                 let remaining = total_urls.saturating_sub(current as usize);
-                let eta = (remaining as f64 / (current as f64 / elapsed)) as u64;
+                // ETA = remaining items / rate (items per second)
+                let eta = (remaining as f64 / rate) as u64;
                 job.progress.eta_seconds = Some(eta);
+            } else if elapsed > 0.0 {
+                job.progress.rate = Some(0.0);
             }
         }
     }
