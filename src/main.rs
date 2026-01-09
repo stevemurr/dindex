@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use daemonize::Daemonize;
 use dindex::{
     chunking::TextSplitter,
     client::{self, ClientError, DaemonClient},
@@ -25,6 +26,7 @@ use dindex::{
     },
     types::{Document, DocumentIdentity, Query},
 };
+use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -250,25 +252,11 @@ enum DaemonAction {
     Restart,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Setup logging
-    let log_level = match cli.verbose {
-        0 => Level::INFO,
-        1 => Level::DEBUG,
-        _ => Level::TRACE,
-    };
-
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .with_target(false)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
-
-    // Load or create config
-    let mut config = if cli.config.exists() {
+    // Load or create config early (needed for daemonization paths)
+    let mut config: Config = if cli.config.exists() {
         let content = std::fs::read_to_string(&cli.config)?;
         toml::from_str(&content).unwrap_or_default()
     } else {
@@ -276,21 +264,80 @@ async fn main() -> Result<()> {
     };
 
     // Override data dir if specified
-    if let Some(data_dir) = cli.data_dir {
-        config.node.data_dir = data_dir;
+    if let Some(ref data_dir) = cli.data_dir {
+        config.node.data_dir = data_dir.clone();
     }
 
     // Ensure data directory exists
     std::fs::create_dir_all(&config.node.data_dir)?;
 
+    // Check if we need to daemonize BEFORE starting tokio
+    let should_daemonize = match &cli.command {
+        Commands::Start { foreground, .. } => !foreground,
+        Commands::Daemon { action: DaemonAction::Start { foreground } } => !foreground,
+        _ => false,
+    };
+
+    if should_daemonize {
+        let log_path = config.node.data_dir.join("dindex.log");
+        let err_path = config.node.data_dir.join("dindex.err");
+
+        println!("Starting daemon in background...");
+        println!("  Logs: {}", log_path.display());
+        println!("  Note: Daemon may take a few seconds to load indexes.");
+        println!("  Run `dindex daemon status` to check when ready.");
+
+        let stdout = File::create(&log_path)
+            .with_context(|| format!("Failed to create log file: {}", log_path.display()))?;
+        let stderr = File::create(&err_path)
+            .with_context(|| format!("Failed to create error log: {}", err_path.display()))?;
+
+        let daemonize = Daemonize::new()
+            .working_directory(&config.node.data_dir)
+            .stdout(stdout)
+            .stderr(stderr);
+
+        daemonize.start()
+            .map_err(|e| anyhow::anyhow!("Failed to daemonize: {}", e))?;
+
+        // We're now in the child process - set up logging for file output
+        let subscriber = FmtSubscriber::builder()
+            .with_max_level(Level::INFO)
+            .with_target(false)
+            .with_ansi(false)
+            .finish();
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    } else {
+        // Setup logging for foreground mode
+        let log_level = match cli.verbose {
+            0 => Level::INFO,
+            1 => Level::DEBUG,
+            _ => Level::TRACE,
+        };
+
+        let subscriber = FmtSubscriber::builder()
+            .with_max_level(log_level)
+            .with_target(false)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)?;
+    }
+
+    // Now start the tokio runtime
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main(cli, config))
+}
+
+async fn async_main(cli: Cli, config: Config) -> Result<()> {
     match cli.command {
         Commands::Daemon { action } => handle_daemon(config, action).await,
         Commands::Start {
             listen,
             bootstrap,
-            foreground,
+            foreground: _, // Already handled daemonization
         } => {
-            start_node(config, listen, bootstrap, foreground).await
+            start_node_inner(config, listen, bootstrap).await
         }
         Commands::Index { path, title, url } => {
             index_document(config, path, title, url).await
@@ -354,23 +401,16 @@ async fn main() -> Result<()> {
 /// Handle daemon management commands
 async fn handle_daemon(config: Config, action: DaemonAction) -> Result<()> {
     match action {
-        DaemonAction::Start { foreground } => {
+        DaemonAction::Start { foreground: _ } => {
+            // Daemonization already handled in main() before tokio started
             if daemon::is_daemon_running(&config.node.data_dir) {
                 println!("Daemon is already running");
                 return Ok(());
             }
 
-            if foreground {
-                println!("Starting daemon in foreground...");
-                let daemon = Daemon::start(config).await?;
-                daemon.run().await?;
-            } else {
-                // For now, just start in foreground
-                // TODO: Implement true daemonization
-                println!("Starting daemon...");
-                let daemon = Daemon::start(config).await?;
-                daemon.run().await?;
-            }
+            // Start the daemon (we're either in foreground or already daemonized)
+            let daemon = Daemon::start(config).await?;
+            daemon.run().await?;
             Ok(())
         }
         DaemonAction::Stop => {
@@ -423,11 +463,10 @@ async fn handle_daemon(config: Config, action: DaemonAction) -> Result<()> {
     }
 }
 
-async fn start_node(
+async fn start_node_inner(
     mut config: Config,
     listen: Option<String>,
     bootstrap: Vec<String>,
-    _foreground: bool,
 ) -> Result<()> {
     if let Some(addr) = listen {
         config.node.listen_addr = addr;

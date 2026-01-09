@@ -93,19 +93,28 @@ impl Daemon {
         // Subscribe to shutdown signal
         let shutdown_rx = self.shutdown_tx.subscribe();
 
-        // Start IPC server
-        let server_handle = {
-            let shutdown_rx = self.shutdown_tx.subscribe();
-            let socket_path = self.server.socket_path().to_path_buf();
-            let handler = self.handler.clone();
+        // Start IPC server - run directly, not spawned, to catch errors
+        let shutdown_rx_server = self.shutdown_tx.subscribe();
+        let socket_path = self.server.socket_path().to_path_buf();
+        let handler = self.handler.clone();
 
-            let server = IpcServer::new(socket_path, handler);
-            tokio::spawn(async move {
-                if let Err(e) = server.run(shutdown_rx).await {
-                    error!("IPC server error: {}", e);
-                }
-            })
-        };
+        info!("Starting IPC server on: {}", socket_path.display());
+
+        // Ensure socket directory exists
+        if let Some(parent) = socket_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                error!("Failed to create socket directory: {}", e);
+            }
+        }
+
+        let server = IpcServer::new(socket_path.clone(), handler);
+        let server_handle = tokio::spawn(async move {
+            info!("IPC server task starting...");
+            match server.run(shutdown_rx_server).await {
+                Ok(()) => info!("IPC server shut down cleanly"),
+                Err(e) => error!("IPC server failed: {}", e),
+            }
+        });
 
         // Wait for shutdown signal (Ctrl+C or SIGTERM)
         tokio::select! {
