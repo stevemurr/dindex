@@ -5,12 +5,13 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use daemonize::Daemonize;
+use indicatif::{ProgressBar, ProgressStyle};
 use dindex::{
     chunking::TextSplitter,
     client::{self, ClientError, DaemonClient},
     config::Config,
     content::{extract_from_bytes, extract_from_path, ContentType},
-    daemon::{self, Daemon, OutputFormat},
+    daemon::{self, server::IpcServer, Daemon, OutputFormat},
     embedding::{check_model_exists, init_embedding_engine, model_not_found_error, ModelManager},
     import::{DumpFormat, ImportCheckpoint, ImportCoordinatorBuilder, WikimediaSource},
     index::{ChunkStorage, DocumentRegistry, VectorIndex},
@@ -281,11 +282,7 @@ fn main() -> Result<()> {
     if should_daemonize {
         let log_path = config.node.data_dir.join("dindex.log");
         let err_path = config.node.data_dir.join("dindex.err");
-
-        println!("Starting daemon in background...");
-        println!("  Logs: {}", log_path.display());
-        println!("  Note: Daemon may take a few seconds to load indexes.");
-        println!("  Run `dindex daemon status` to check when ready.");
+        let socket_path = IpcServer::default_socket_path();
 
         let stdout = File::create(&log_path)
             .with_context(|| format!("Failed to create log file: {}", log_path.display()))?;
@@ -297,16 +294,98 @@ fn main() -> Result<()> {
             .stdout(stdout)
             .stderr(stderr);
 
-        daemonize.start()
-            .map_err(|e| anyhow::anyhow!("Failed to daemonize: {}", e))?;
+        // Use execute() instead of start() so parent doesn't exit immediately
+        match daemonize.execute() {
+            daemonize::Outcome::Parent(Ok(_)) => {
+                // We're the parent - wait for daemon to be ready with progress feedback
+                let spinner_style = ProgressStyle::default_spinner()
+                    .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                    .template("{spinner:.cyan} {msg}")
+                    .unwrap();
 
-        // We're now in the child process - set up logging for file output
-        let subscriber = FmtSubscriber::builder()
-            .with_max_level(Level::INFO)
-            .with_target(false)
-            .with_ansi(false)
-            .finish();
-        let _ = tracing::subscriber::set_global_default(subscriber);
+                let spinner = ProgressBar::new_spinner();
+                spinner.set_style(spinner_style);
+                spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+                spinner.set_message("Starting daemon...");
+
+                // Track completed stages
+                let mut completed_stages: Vec<&str> = Vec::new();
+
+                // Wait for socket to appear (daemon is ready)
+                let start_time = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(120); // 2 min timeout
+                let poll_interval = std::time::Duration::from_millis(250);
+
+                // Define stages in order they appear in logs
+                let stages = [
+                    ("Starting DIndex", "Initializing"),
+                    ("Loading vector index", "Loading vector index"),
+                    ("BM25 index loaded", "Loading BM25 index"),
+                    ("Chunk storage loaded", "Loading chunk storage"),
+                    ("Starting IPC server", "Starting network"),
+                ];
+
+                loop {
+                    if socket_path.exists() {
+                        // Print all remaining stages as complete
+                        for (_, display_name) in &stages {
+                            if !completed_stages.contains(display_name) {
+                                spinner.println(format!("  {} {}", console::style("✓").green(), display_name));
+                            }
+                        }
+                        spinner.finish_and_clear();
+                        println!("{} Daemon ready!", console::style("✓").green().bold());
+                        println!("  Logs: {}", log_path.display());
+                        return Ok(());
+                    }
+
+                    if start_time.elapsed() > timeout {
+                        spinner.finish_and_clear();
+                        eprintln!("{} Daemon startup timed out", console::style("✗").red().bold());
+                        eprintln!("  Check logs at: {}", log_path.display());
+                        std::process::exit(1);
+                    }
+
+                    // Check log file for status updates
+                    if let Ok(content) = std::fs::read_to_string(&log_path) {
+                        for (log_marker, display_name) in &stages {
+                            if content.contains(log_marker) && !completed_stages.contains(display_name) {
+                                // Print completed stage on its own line
+                                spinner.println(format!("  {} {}", console::style("✓").green(), display_name));
+                                completed_stages.push(display_name);
+
+                                // Update spinner with next stage
+                                let next_idx = completed_stages.len();
+                                if next_idx < stages.len() {
+                                    spinner.set_message(format!("{}...", stages[next_idx].1));
+                                } else {
+                                    spinner.set_message("Finalizing...");
+                                }
+                            }
+                        }
+                    }
+
+                    std::thread::sleep(poll_interval);
+                }
+            }
+            daemonize::Outcome::Parent(Err(e)) => {
+                anyhow::bail!("Failed to daemonize: {}", e);
+            }
+            daemonize::Outcome::Child(Ok(_)) => {
+                // We're the child - continue to start the daemon
+                // Set up logging for file output
+                let subscriber = FmtSubscriber::builder()
+                    .with_max_level(Level::INFO)
+                    .with_target(false)
+                    .with_ansi(false)
+                    .finish();
+                let _ = tracing::subscriber::set_global_default(subscriber);
+            }
+            daemonize::Outcome::Child(Err(e)) => {
+                eprintln!("Daemon child process error: {}", e);
+                std::process::exit(1);
+            }
+        }
     } else {
         // Setup logging for foreground mode
         let log_level = match cli.verbose {
