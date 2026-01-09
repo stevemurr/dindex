@@ -144,8 +144,10 @@ impl HybridRetriever {
 }
 
 fn truncate_query(query: &str) -> String {
-    if query.len() > 50 {
-        format!("{}...", &query[..47])
+    let char_count = query.chars().count();
+    if char_count > 50 {
+        let truncated: String = query.chars().take(47).collect();
+        format!("{}...", truncated)
     } else {
         query.to_string()
     }
