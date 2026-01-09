@@ -643,9 +643,10 @@ mod tests {
         );
 
         // Lookup by URL
-        let entry = registry.check_url("https://example.com/page");
-        assert!(entry.is_some());
-        assert_eq!(entry.unwrap().title, Some("Test".to_string()));
+        let entry = registry
+            .check_url("https://example.com/page")
+            .expect("URL should be found in registry");
+        assert_eq!(entry.title, Some("Test".to_string()));
 
         // Non-existent URL
         let entry = registry.check_url("https://other.com/page");
@@ -713,8 +714,7 @@ mod tests {
             Some(("extra_id", "456")),
         );
 
-        assert!(updated.is_some());
-        let updated = updated.unwrap();
+        let updated = updated.expect("update_metadata should succeed");
         assert!(updated.urls.contains("https://example.com/first"));
         assert!(updated.urls.contains("https://example.com/second"));
         assert_eq!(updated.source_ids.get("extra_id"), Some(&"456".to_string()));

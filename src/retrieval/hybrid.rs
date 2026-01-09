@@ -296,9 +296,10 @@ mod tests {
         assert!(key > 0 || key == 0); // Key was assigned
 
         // Verify it's stored
-        let stored = chunk_storage.get("chunk1");
-        assert!(stored.is_some());
-        assert_eq!(stored.unwrap().chunk.content, chunk.content);
+        let stored = chunk_storage
+            .get("chunk1")
+            .expect("chunk should be stored");
+        assert_eq!(stored.chunk.content, chunk.content);
     }
 
     #[test]

@@ -395,7 +395,7 @@ mod tests {
             assert!(chunks[0].metadata.following_chunk_id.is_some());
 
             // Last chunk should have preceding but no following
-            let last = chunks.last().unwrap();
+            let last = chunks.last().expect("chunks.len() > 1 guarantees last exists");
             assert!(last.metadata.preceding_chunk_id.is_some());
             assert!(last.metadata.following_chunk_id.is_none());
         }

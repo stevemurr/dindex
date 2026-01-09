@@ -380,9 +380,10 @@ mod tests {
         dedup.register(text1, "doc1".to_string());
 
         // Check for duplicate
-        let dup_result = dedup.is_duplicate_local(text2);
-        assert!(dup_result.is_some());
-        assert_eq!(dup_result.unwrap(), "doc1");
+        let dup_result = dedup
+            .is_duplicate_local(text2)
+            .expect("similar text should be detected as duplicate");
+        assert_eq!(dup_result, "doc1");
 
         // Check different document
         let diff_result = dedup.is_duplicate_local(text3);

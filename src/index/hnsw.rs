@@ -417,9 +417,10 @@ mod tests {
             assert!(index.contains(&"chunk2".to_string()));
 
             // Verify mappings work
-            let key1 = index.get_key(&"chunk1".to_string());
-            assert!(key1.is_some());
-            let chunk_id = index.get_chunk_id(key1.unwrap());
+            let key1 = index
+                .get_key(&"chunk1".to_string())
+                .expect("chunk1 key should exist");
+            let chunk_id = index.get_chunk_id(key1);
             assert_eq!(chunk_id, Some("chunk1".to_string()));
         }
 
