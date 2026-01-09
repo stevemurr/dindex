@@ -56,13 +56,8 @@ impl IndexManager {
         let bm25_index = Arc::new(Bm25Index::new(&bm25_path)?);
         info!("BM25 index loaded");
 
-        // Load or create chunk storage
-        let chunks_path = data_dir.join("chunks.json");
-        let chunk_storage = if chunks_path.exists() {
-            Arc::new(ChunkStorage::load(data_dir)?)
-        } else {
-            Arc::new(ChunkStorage::new(data_dir)?)
-        };
+        // Load or create chunk storage (auto-migrates from JSON if needed)
+        let chunk_storage = Arc::new(ChunkStorage::load(data_dir)?);
         info!("Chunk storage loaded with {} chunks", chunk_storage.len());
 
         // Create retriever for search operations
