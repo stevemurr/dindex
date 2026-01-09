@@ -10,7 +10,7 @@ use dindex::{
     chunking::TextSplitter,
     client::{self, ClientError, DaemonClient},
     config::Config,
-    content::{extract_from_bytes, extract_from_path, ContentType},
+    content::{extract_from_bytes_with_url, extract_from_path, ContentType},
     daemon::{self, server::IpcServer, Daemon, OutputFormat},
     embedding::{check_model_exists, init_embedding_engine, model_not_found_error, ModelManager},
     import::{DumpFormat, ImportCheckpoint, ImportCoordinatorBuilder, WikimediaSource},
@@ -223,6 +223,24 @@ enum Commands {
 
     /// Show document registry statistics
     RegistryStats,
+
+    /// Development utilities
+    #[command(name = "dev")]
+    Dev {
+        #[command(subcommand)]
+        action: DevAction,
+    },
+}
+
+/// Development utility actions
+#[derive(Subcommand)]
+enum DevAction {
+    /// Reset the local index (deletes all indexed content)
+    ResetIndex {
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 /// CLI dump format enum (mirrors DumpFormat but with clap support)
@@ -473,6 +491,9 @@ async fn async_main(cli: Cli, config: Config) -> Result<()> {
         }
         Commands::RegistryStats => {
             show_registry_stats(config).await
+        }
+        Commands::Dev { action } => {
+            handle_dev(config, action).await
         }
     }
 }
@@ -740,7 +761,7 @@ async fn index_document(
             content_type
         );
 
-        let extracted = extract_from_bytes(&bytes, content_type)?;
+        let extracted = extract_from_bytes_with_url(&bytes, content_type, Some(&path_str))?;
         (extracted.content, extracted.title, Some(path_str.to_string()))
     } else if path.is_file() {
         info!("Indexing file: {}", path.display());
@@ -1078,6 +1099,10 @@ dimensions = {}
 truncated_dimensions = {}
 max_sequence_length = {}
 quantize_int8 = true
+# GPU acceleration - auto-enabled when built with cuda feature
+# Set to false to force CPU mode
+# use_gpu = true
+# gpu_device_id = 0
 
 [index]
 hnsw_m = {}
@@ -1244,6 +1269,12 @@ async fn scrape_urls(
     // Direct scraping fallback
     info!("Using direct scraping (daemon not available or not indexing)");
 
+    println!("\nScrape Configuration:");
+    println!("  Seeds: {} URLs", seeds.len());
+    println!("  Max depth: {}", max_depth);
+    println!("  Max pages: {}", max_pages);
+    println!("  Indexing: {}", if should_index { "enabled" } else { "disabled" });
+
     // Initialize embedding engine if indexing
     let embedding_engine = if should_index {
         // Check if model exists before proceeding
@@ -1252,6 +1283,7 @@ async fn scrape_urls(
             std::process::exit(1);
         }
 
+        println!("  Model: {}", config.embedding.model_name);
         Some(
             init_embedding_engine(&config)
                 .await
@@ -1260,6 +1292,7 @@ async fn scrape_urls(
     } else {
         None
     };
+    println!();
 
     // Create scraping config
     let scraping_config = ScrapingCoordConfig {
@@ -1317,8 +1350,11 @@ async fn scrape_urls(
     // Process URLs
     let mut pages_scraped = 0;
     let mut pages_indexed = 0;
+    let mut chunks_created = 0;
+    let mut embedding_errors = 0;
+    let mut index_errors = 0;
 
-    println!("\nScraping progress:");
+    println!("Scraping progress:");
     println!("==================");
 
     while pages_scraped < max_pages {
@@ -1358,6 +1394,7 @@ async fn scrape_urls(
                         if !chunks.is_empty() {
                             // Extract texts for batch embedding
                             let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+                            let num_chunks = texts.len();
 
                             // Generate real embeddings
                             match engine.embed_batch(&texts) {
@@ -1367,13 +1404,26 @@ async fn scrape_urls(
                                         .zip(embeddings.into_iter())
                                         .collect();
 
-                                    if let Ok(keys) = indexer.index_batch(&chunks_with_embeddings) {
-                                        pages_indexed += 1;
-                                        tracing::debug!("Indexed {} chunks", keys.len());
+                                    match indexer.index_batch(&chunks_with_embeddings) {
+                                        Ok(keys) => {
+                                            pages_indexed += 1;
+                                            chunks_created += keys.len();
+                                            tracing::debug!("Indexed {} chunks", keys.len());
+                                        }
+                                        Err(e) => {
+                                            index_errors += 1;
+                                            tracing::warn!("Failed to index chunks: {}", e);
+                                        }
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::warn!("Failed to generate embeddings: {}", e);
+                                    embedding_errors += 1;
+                                    tracing::warn!(
+                                        "Embedding failed for {} ({} chunks): {}",
+                                        truncate_content(result.url.as_str(), 40),
+                                        num_chunks,
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -1411,10 +1461,21 @@ async fn scrape_urls(
     println!("==================");
     println!("Pages scraped: {}", pages_scraped);
     println!("Pages indexed: {}", pages_indexed);
+    println!("Chunks created: {}", chunks_created);
     println!("URLs discovered: {}", stats.urls_discovered);
     println!("Duplicates skipped: {}", stats.duplicates_skipped);
     println!("Queue remaining: {}", stats.queue_size);
     println!("Avg processing time: {:.1}ms", stats.avg_processing_time_ms);
+
+    if embedding_errors > 0 || index_errors > 0 {
+        println!("\nErrors:");
+        if embedding_errors > 0 {
+            println!("  Embedding failures: {}", embedding_errors);
+        }
+        if index_errors > 0 {
+            println!("  Index failures: {}", index_errors);
+        }
+    }
 
     Ok(())
 }
@@ -1457,6 +1518,10 @@ async fn import_dump(
     if !path.exists() {
         anyhow::bail!("Dump file not found: {}", path.display());
     }
+
+    // Canonicalize to absolute path (daemon may run from different directory)
+    let path = path.canonicalize()
+        .with_context(|| format!("Failed to resolve path: {}", path.display()))?;
 
     // Detect or use specified format
     let detected_format = format
@@ -1851,6 +1916,78 @@ async fn show_registry_stats(config: Config) -> Result<()> {
     println!("  Dedup enabled:     {}", config.dedup.enabled);
     println!("  SimHash threshold: {}", config.dedup.simhash_distance_threshold);
     println!("  Data directory:    {}", config.node.data_dir.display());
+
+    Ok(())
+}
+
+/// Handle dev commands
+async fn handle_dev(config: Config, action: DevAction) -> Result<()> {
+    match action {
+        DevAction::ResetIndex { force } => {
+            reset_index(config, force).await
+        }
+    }
+}
+
+/// Reset the local index by deleting all index files
+async fn reset_index(config: Config, force: bool) -> Result<()> {
+    let data_dir = &config.node.data_dir;
+
+    if !force {
+        println!("This will delete all indexed content in: {}", data_dir.display());
+        println!("Are you sure? [y/N] ");
+
+        use std::io::{self, BufRead};
+        let stdin = io::stdin();
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line)?;
+
+        if !line.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // Stop daemon if running
+    if daemon::is_daemon_running(data_dir) {
+        println!("Stopping daemon...");
+        let _ = client::shutdown().await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    // Files/directories to delete
+    // Files and directories to delete for a full reset
+    let items_to_delete = [
+        "bm25",                         // BM25/Tantivy index directory
+        "chunks.json",                  // Chunk storage
+        "vector.index",                 // HNSW vector index
+        "vector.index.mappings.json",   // Vector index key mappings
+        "dindex.err",                   // Daemon error log
+        "dindex.log",                   // Daemon log
+        "dindex.pid",                   // Daemon PID file
+    ];
+
+    let mut deleted = 0;
+    for item in &items_to_delete {
+        let path = data_dir.join(item);
+        if path.exists() {
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+                    .with_context(|| format!("Failed to remove directory: {}", path.display()))?;
+            } else {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("Failed to remove file: {}", path.display()))?;
+            }
+            println!("  Removed: {}", item);
+            deleted += 1;
+        }
+    }
+
+    if deleted == 0 {
+        println!("No index files found to delete.");
+    } else {
+        println!("\nIndex reset complete. Removed {} items.", deleted);
+    }
 
     Ok(())
 }

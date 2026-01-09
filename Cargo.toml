@@ -9,6 +9,7 @@ authors = ["DIndex Contributors"]
 [features]
 default = ["onnx"]
 onnx = ["ort"]
+cuda = ["ort/cuda"]
 
 [dependencies]
 # P2P Networking
@@ -89,6 +90,7 @@ scraper = "0.21"
 robotstxt = "0.3"
 lru = "0.12"
 blake3 = "1"
+readability = "0.3"
 
 # Bulk import dependencies
 bzip2 = "0.5"

@@ -12,6 +12,7 @@ use parking_lot::RwLock;
 use tracing::{debug, info};
 
 use crate::config::Config;
+use crate::embedding::EmbeddingEngine;
 use crate::index::{ChunkStorage, VectorIndex};
 use crate::retrieval::{Bm25Index, HybridIndexer, HybridRetriever};
 use crate::types::{Chunk, Query, SearchResult};
@@ -26,6 +27,8 @@ pub struct IndexManager {
     chunk_storage: Arc<ChunkStorage>,
     retriever: Arc<HybridRetriever>,
     indexer: Arc<HybridIndexer>,
+    /// Embedding engine for generating query embeddings
+    embedding_engine: RwLock<Option<Arc<EmbeddingEngine>>>,
     /// Tracks pending chunks that haven't been committed yet
     pending_count: RwLock<usize>,
 }
@@ -85,6 +88,7 @@ impl IndexManager {
             chunk_storage,
             retriever,
             indexer,
+            embedding_engine: RwLock::new(None),
             pending_count: RwLock::new(0),
         })
     }
@@ -208,9 +212,25 @@ impl IndexManager {
             .collect()
     }
 
-    /// Generate a deterministic embedding for content
-    /// TODO: Replace with actual embedding engine
+    /// Set the embedding engine for generating query embeddings
+    pub fn set_embedding_engine(&self, engine: Arc<EmbeddingEngine>) {
+        let mut guard = self.embedding_engine.write();
+        *guard = Some(engine);
+    }
+
+    /// Generate embedding for content using real embedding engine
     fn generate_embedding(&self, content: &str) -> Vec<f32> {
+        if let Some(ref engine) = *self.embedding_engine.read() {
+            match engine.embed(content) {
+                Ok(embedding) => return embedding,
+                Err(e) => {
+                    tracing::warn!("Embedding generation failed, using fallback: {}", e);
+                }
+            }
+        }
+
+        // Fallback: generate deterministic fake embedding if no engine available
+        tracing::warn!("No embedding engine available for search, using hash-based fallback");
         let dims = self.config.embedding.dimensions;
         (0..dims)
             .map(|i| {

@@ -1,11 +1,13 @@
 //! Content extraction module
 //!
-//! Provides unified content extraction from various file formats (PDF, text, etc.)
+//! Provides unified content extraction from various file formats (PDF, text, HTML, etc.)
 //! for both local files and remote URLs.
 
+mod html;
 mod pdf;
 mod text;
 
+pub use html::HtmlExtractor;
 pub use pdf::PdfExtractor;
 pub use text::TextExtractor;
 
@@ -126,10 +128,24 @@ pub fn extract_from_path(path: &Path) -> Result<ExtractedDocument> {
 }
 
 /// Extract content from bytes with a known content type
+///
+/// For HTML content, an optional URL can be provided to help with relative link resolution.
 pub fn extract_from_bytes(bytes: &[u8], content_type: ContentType) -> Result<ExtractedDocument> {
+    extract_from_bytes_with_url(bytes, content_type, None)
+}
+
+/// Extract content from bytes with a known content type and optional source URL
+///
+/// For HTML content, the URL helps with relative link resolution and metadata extraction.
+pub fn extract_from_bytes_with_url(
+    bytes: &[u8],
+    content_type: ContentType,
+    url: Option<&str>,
+) -> Result<ExtractedDocument> {
     match content_type {
         ContentType::Pdf => PdfExtractor::extract(bytes),
-        ContentType::Text | ContentType::Html | ContentType::Unknown => {
+        ContentType::Html => HtmlExtractor::extract(bytes, url),
+        ContentType::Text | ContentType::Unknown => {
             let content = String::from_utf8_lossy(bytes).to_string();
             Ok(TextExtractor::extract(content))
         }

@@ -1,14 +1,17 @@
 //! Embedding engine implementation
 //!
 //! Requires the `onnx` feature (enabled by default) for real embeddings.
+//! Enable the `cuda` feature for GPU acceleration.
 
 use crate::config::EmbeddingConfig;
 use crate::types::Embedding;
 use anyhow::{Context, Result};
 use ort::{execution_providers::CPUExecutionProvider, session::Session, value::Tensor};
+#[cfg(feature = "cuda")]
+use ort::execution_providers::CUDAExecutionProvider;
 use parking_lot::Mutex;
 use tokenizers::Tokenizer;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Embedding engine for generating vector embeddings from text
 ///
@@ -43,12 +46,8 @@ impl EmbeddingEngine {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Tokenizer path not specified"))?;
 
-        // Load ONNX model
-        let session = Session::builder()?
-            .with_execution_providers([CPUExecutionProvider::default().build()])?
-            .with_intra_threads(config.num_threads)?
-            .commit_from_file(model_path)
-            .context("Failed to load ONNX model")?;
+        // Build session with appropriate execution provider
+        let session = Self::build_session(config, model_path)?;
 
         // Load tokenizer
         let tokenizer = Tokenizer::from_file(tokenizer_path)
@@ -64,6 +63,47 @@ impl EmbeddingEngine {
             tokenizer,
             config: config.clone(),
         })
+    }
+
+    /// Build ONNX session with configured execution provider
+    fn build_session(config: &EmbeddingConfig, model_path: &std::path::Path) -> Result<Session> {
+        #[cfg(feature = "cuda")]
+        if config.use_gpu {
+            info!("Attempting to use CUDA GPU acceleration (device {})", config.gpu_device_id);
+
+            let cuda_provider = CUDAExecutionProvider::default()
+                .with_device_id(config.gpu_device_id as i32)
+                .build();
+
+            // Try CUDA first, fall back to CPU
+            match Session::builder()?
+                .with_execution_providers([cuda_provider, CPUExecutionProvider::default().build()])?
+                .with_intra_threads(config.num_threads)?
+                .commit_from_file(model_path)
+            {
+                Ok(session) => {
+                    info!("CUDA GPU acceleration enabled");
+                    return Ok(session);
+                }
+                Err(e) => {
+                    warn!("CUDA initialization failed, falling back to CPU: {}", e);
+                }
+            }
+        }
+
+        #[cfg(not(feature = "cuda"))]
+        if config.use_gpu {
+            warn!("GPU acceleration requested but 'cuda' feature not enabled. Using CPU.");
+            warn!("Rebuild with: cargo build --features cuda");
+        }
+
+        // CPU fallback
+        info!("Using CPU execution provider");
+        Session::builder()?
+            .with_execution_providers([CPUExecutionProvider::default().build()])?
+            .with_intra_threads(config.num_threads)?
+            .commit_from_file(model_path)
+            .context("Failed to load ONNX model")
     }
 
     /// Generate embedding for a single text

@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::embedding::EmbeddingEngine;
 use crate::types::Chunk;
 
 use super::index_manager::IndexManager;
@@ -53,6 +54,7 @@ impl WritePipeline {
     /// Create and start the write pipeline with a shutdown receiver
     pub fn start(
         index_manager: Arc<IndexManager>,
+        embedding_engine: Option<Arc<EmbeddingEngine>>,
         batch_size: usize,
         commit_interval: Duration,
         shutdown: broadcast::Receiver<()>,
@@ -62,6 +64,7 @@ impl WritePipeline {
         // Spawn the background worker
         let worker = WritePipelineWorker::new(
             index_manager,
+            embedding_engine,
             ingest_rx,
             batch_size,
             commit_interval,
@@ -95,6 +98,7 @@ impl WritePipeline {
 /// Background worker that processes the write queue
 struct WritePipelineWorker {
     index_manager: Arc<IndexManager>,
+    embedding_engine: Option<Arc<EmbeddingEngine>>,
     ingest_rx: mpsc::Receiver<IngestItem>,
     batch_size: usize,
     commit_interval: Duration,
@@ -103,12 +107,14 @@ struct WritePipelineWorker {
 impl WritePipelineWorker {
     fn new(
         index_manager: Arc<IndexManager>,
+        embedding_engine: Option<Arc<EmbeddingEngine>>,
         ingest_rx: mpsc::Receiver<IngestItem>,
         batch_size: usize,
         commit_interval: Duration,
     ) -> Self {
         Self {
             index_manager,
+            embedding_engine,
             ingest_rx,
             batch_size,
             commit_interval,
@@ -212,11 +218,20 @@ impl WritePipelineWorker {
         batch.clear();
     }
 
-    /// Generate a deterministic embedding for content
-    /// TODO: Replace with actual embedding engine
+    /// Generate embedding for content using real embedding engine
     fn generate_embedding(&self, content: &str) -> Vec<f32> {
-        // Use same approach as IndexManager for consistency
-        let dims = 768; // Default dimensions
+        if let Some(ref engine) = self.embedding_engine {
+            match engine.embed(content) {
+                Ok(embedding) => return embedding,
+                Err(e) => {
+                    warn!("Embedding generation failed, using fallback: {}", e);
+                }
+            }
+        }
+
+        // Fallback: generate deterministic fake embedding if no engine available
+        warn!("No embedding engine available, using hash-based fallback");
+        let dims = 768;
         (0..dims)
             .map(|i| {
                 let hash = xxhash_rust::xxh3::xxh3_64(content.as_bytes());
@@ -258,6 +273,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
         let pipeline = WritePipeline::start(
             index_manager.clone(),
+            None, // No embedding engine in test
             10,
             Duration::from_secs(60),
             shutdown_rx,

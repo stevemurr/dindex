@@ -100,6 +100,17 @@ pub struct EmbeddingConfig {
     pub quantize_int8: bool,
     /// Number of threads for inference
     pub num_threads: usize,
+    /// Use GPU acceleration (requires cuda feature, auto-detected by default)
+    #[serde(default = "default_use_gpu")]
+    pub use_gpu: bool,
+    /// GPU device ID (for multi-GPU systems)
+    #[serde(default)]
+    pub gpu_device_id: usize,
+}
+
+/// Default for use_gpu - true when cuda feature is enabled
+fn default_use_gpu() -> bool {
+    cfg!(feature = "cuda")
 }
 
 impl Default for EmbeddingConfig {
@@ -113,6 +124,27 @@ impl Default for EmbeddingConfig {
             max_sequence_length: 8192,
             quantize_int8: true,
             num_threads: num_cpus::get().min(8),
+            use_gpu: default_use_gpu(),
+            gpu_device_id: 0,
+        }
+    }
+}
+
+impl EmbeddingConfig {
+    /// Resolve model paths from the data directory if not explicitly set.
+    /// Looks for models in `{data_dir}/models/{model_name}/`
+    pub fn resolve_paths(&mut self, data_dir: &std::path::Path) {
+        if self.model_path.is_none() || self.tokenizer_path.is_none() {
+            let model_dir = data_dir.join("models").join(&self.model_name);
+            let model_file = model_dir.join("model.onnx");
+            let tokenizer_file = model_dir.join("tokenizer.json");
+
+            if model_file.exists() && self.model_path.is_none() {
+                self.model_path = Some(model_file);
+            }
+            if tokenizer_file.exists() && self.tokenizer_path.is_none() {
+                self.tokenizer_path = Some(tokenizer_file);
+            }
         }
     }
 }

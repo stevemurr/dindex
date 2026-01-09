@@ -1,6 +1,6 @@
 //! Content extraction from HTML
 //!
-//! Implements a content extraction pipeline inspired by Mozilla Readability:
+//! Uses Mozilla's readability algorithm for content extraction:
 //! - Removes boilerplate (navigation, ads, footers)
 //! - Extracts main article content
 //! - Parses metadata (title, author, date, etc.)
@@ -8,6 +8,7 @@
 use chrono::{DateTime, Utc};
 use scraper::{Html, Selector};
 use std::collections::HashMap;
+use std::io::Cursor;
 use thiserror::Error;
 use url::Url;
 
@@ -187,18 +188,16 @@ impl ContentExtractor {
         }
     }
 
-    /// Extract content from HTML
-    pub fn extract(&self, html: &str, _url: &Url) -> Result<ExtractedContent, ExtractError> {
-        let document = Html::parse_document(html);
+    /// Extract content from HTML using readability
+    pub fn extract(&self, html: &str, url: &Url) -> Result<ExtractedContent, ExtractError> {
+        // Use readability for main content extraction
+        let mut cursor = Cursor::new(html.as_bytes());
+        let product = readability::extractor::extract(&mut cursor, url)
+            .map_err(|_| ExtractError::NoContent)?;
 
-        // Extract title
-        let title = self.extract_title(&document);
-
-        // Find main content area
-        let main_content = self.find_main_content(&document);
-
-        // Clean and extract text
-        let text_content = self.extract_text(&main_content);
+        let text_content = product.text;
+        let title = product.title;
+        let clean_html = Some(product.content);
 
         if text_content.len() < self.config.min_content_length {
             return Err(ExtractError::TooShort(text_content.len()));
@@ -212,7 +211,8 @@ impl ContentExtractor {
         let reading_time = ((word_count as f32 / self.config.words_per_minute as f32).ceil() as u8)
             .max(1);
 
-        // Extract metadata
+        // Extract additional metadata from DOM (readability doesn't provide these)
+        let document = Html::parse_document(html);
         let author = self.extract_author(&document);
         let published_date = self.extract_date(&document);
         let language = self.extract_language(&document);
@@ -221,7 +221,7 @@ impl ContentExtractor {
         Ok(ExtractedContent {
             title,
             text_content,
-            clean_html: Some(main_content),
+            clean_html,
             author,
             published_date,
             excerpt,

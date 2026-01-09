@@ -14,6 +14,7 @@ use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
+use crate::embedding::EmbeddingEngine;
 
 use super::handler::RequestHandler;
 use super::index_manager::IndexManager;
@@ -27,6 +28,7 @@ const PID_FILE_NAME: &str = "dindex.pid";
 pub struct Daemon {
     config: Config,
     index_manager: Arc<IndexManager>,
+    embedding_engine: Option<Arc<EmbeddingEngine>>,
     write_pipeline: Arc<WritePipeline>,
     handler: Arc<RequestHandler>,
     server: IpcServer,
@@ -36,17 +38,43 @@ pub struct Daemon {
 
 impl Daemon {
     /// Start the daemon
-    pub async fn start(config: Config) -> Result<Self> {
+    pub async fn start(mut config: Config) -> Result<Self> {
         info!("Starting DIndex daemon");
 
         // Acquire single-instance lock
         let pid_file_path = config.node.data_dir.join(PID_FILE_NAME);
         Self::acquire_lock(&pid_file_path)?;
 
+        // Resolve model paths from data directory
+        config.embedding.resolve_paths(&config.node.data_dir);
+
+        // Initialize embedding engine
+        let embedding_engine = match EmbeddingEngine::new(&config.embedding) {
+            Ok(engine) => {
+                info!(
+                    "Embedding engine initialized: {} ({}D, GPU: {})",
+                    config.embedding.model_name,
+                    config.embedding.dimensions,
+                    config.embedding.use_gpu
+                );
+                Some(Arc::new(engine))
+            }
+            Err(e) => {
+                warn!("Failed to initialize embedding engine: {}. Embeddings will use fallback.", e);
+                warn!("Run 'dindex download {}' to download the model.", config.embedding.model_name);
+                None
+            }
+        };
+
         // Initialize index manager
         let index_manager = Arc::new(
             IndexManager::load(&config).context("Failed to load index manager")?,
         );
+
+        // Set embedding engine on index manager for search queries
+        if let Some(ref engine) = embedding_engine {
+            index_manager.set_embedding_engine(engine.clone());
+        }
 
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = broadcast::channel(16);
@@ -54,6 +82,7 @@ impl Daemon {
         // Start write pipeline
         let write_pipeline = Arc::new(WritePipeline::start(
             index_manager.clone(),
+            embedding_engine.clone(),
             config.bulk_import.batch_size,
             Duration::from_secs(30), // Commit every 30 seconds
             shutdown_rx,
@@ -78,6 +107,7 @@ impl Daemon {
         Ok(Self {
             config,
             index_manager,
+            embedding_engine,
             write_pipeline,
             handler,
             server,

@@ -12,6 +12,7 @@ use tracing::info;
 /// Initialize embedding engine from config
 ///
 /// Downloads model if not present, then creates engine.
+/// Prints status information about the execution provider (CPU/GPU).
 pub async fn init_embedding_engine(config: &Config) -> Result<Arc<EmbeddingEngine>> {
     let cache_dir = config.node.data_dir.join("models");
     let manager = ModelManager::new(&cache_dir)?;
@@ -26,20 +27,42 @@ pub async fn init_embedding_engine(config: &Config) -> Result<Arc<EmbeddingEngin
             .context("Failed to download embedding model")?;
     }
 
-    // Create embedding config with paths
-    let embedding_config = manager.create_config(model_name).await?;
+    // Create embedding config with paths, merging with user config for GPU settings
+    let mut embedding_config = manager.create_config(model_name).await?;
+    embedding_config.use_gpu = config.embedding.use_gpu;
+    embedding_config.gpu_device_id = config.embedding.gpu_device_id;
+    embedding_config.num_threads = config.embedding.num_threads;
+
+    // Log execution provider info
+    print_embedding_status(&embedding_config);
 
     // Create engine
     let engine = EmbeddingEngine::new(&embedding_config)
         .context("Failed to initialize embedding engine")?;
 
     info!(
-        "Embedding engine initialized: {} ({} dimensions)",
+        "Embedding engine ready: {} ({} dimensions)",
         model_name,
         engine.dimensions()
     );
 
     Ok(Arc::new(engine))
+}
+
+/// Print embedding execution status
+fn print_embedding_status(config: &crate::config::EmbeddingConfig) {
+    if config.use_gpu {
+        #[cfg(feature = "cuda")]
+        {
+            println!("  Embeddings: GPU (CUDA device {})", config.gpu_device_id);
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            println!("  Embeddings: CPU (GPU requested but 'cuda' feature not enabled)");
+        }
+    } else {
+        println!("  Embeddings: CPU ({} threads)", config.num_threads);
+    }
 }
 
 /// Check if model exists without downloading

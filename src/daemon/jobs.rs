@@ -337,8 +337,9 @@ async fn run_import_job(
 
             update_progress(&jobs, job_id, "importing", 0, None);
 
-            // Process documents in batches using spawn_blocking
+            // Process documents in batches to avoid holding iterator across await points
             let min_content_length = config.bulk_import.min_content_length;
+            let batch_size = 100;
 
             loop {
                 // Check for cancellation
@@ -356,56 +357,61 @@ async fn run_import_job(
                     Err(broadcast::error::TryRecvError::Empty) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
                 }
 
-                // Get next document
-                let doc_result = {
-                    let mut iter = wiki_source.iter_documents();
-                    iter.next()
+                // Collect a batch of documents synchronously (no await while iterator is live)
+                let batch: Vec<_> = {
+                    let mut doc_iter = wiki_source.iter_documents();
+                    let mut batch = Vec::with_capacity(batch_size);
+                    for _ in 0..batch_size {
+                        match doc_iter.next() {
+                            Some(Ok(doc)) => {
+                                if doc.content.len() >= min_content_length {
+                                    batch.push(doc);
+                                }
+                            }
+                            Some(Err(e)) => {
+                                warn!("Error reading document: {}", e);
+                                errors += 1;
+                            }
+                            None => break,
+                        }
+                    }
+                    batch
                 };
 
-                match doc_result {
-                    Some(Ok(doc)) => {
-                        // Skip if too short
-                        if doc.content.len() < min_content_length {
-                            continue;
-                        }
-
-                        // Create document and chunk it
-                        let document = Document::new(doc.content)
-                            .with_title(doc.title);
-
-                        let chunks = splitter.split_document(&document);
-
-                        // Send chunks to write pipeline
-                        for chunk in chunks {
-                            let stream_id = job_id;
-                            write_pipeline
-                                .ingest(IngestItem::Chunk {
-                                    stream_id,
-                                    chunk,
-                                    embedding: None,
-                                })
-                                .await?;
-                            chunks_indexed += 1;
-                        }
-
-                        documents_processed += 1;
-
-                        // Update progress periodically
-                        if documents_processed % 100 == 0 {
-                            update_progress(&jobs, job_id, "importing", documents_processed as u64, None);
-                        }
-
-                        // Yield to allow other tasks to run
-                        if documents_processed % 10 == 0 {
-                            tokio::task::yield_now().await;
-                        }
-                    }
-                    Some(Err(e)) => {
-                        warn!("Error reading document: {}", e);
-                        errors += 1;
-                    }
-                    None => break, // End of stream
+                // If no documents in batch, we're done
+                if batch.is_empty() {
+                    break;
                 }
+
+                // Process the batch (now safe to await)
+                for doc in batch {
+                    // Create document and chunk it
+                    let document = Document::new(doc.content)
+                        .with_title(doc.title);
+
+                    let chunks = splitter.split_document(&document);
+
+                    // Send chunks to write pipeline
+                    for chunk in chunks {
+                        let stream_id = job_id;
+                        write_pipeline
+                            .ingest(IngestItem::Chunk {
+                                stream_id,
+                                chunk,
+                                embedding: None,
+                            })
+                            .await?;
+                        chunks_indexed += 1;
+                    }
+
+                    documents_processed += 1;
+                }
+
+                // Update progress after each batch
+                update_progress(&jobs, job_id, "importing", documents_processed as u64, None);
+
+                // Yield to allow other tasks to run
+                tokio::task::yield_now().await;
             }
 
             // Commit changes
