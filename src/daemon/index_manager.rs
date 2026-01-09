@@ -199,6 +199,15 @@ impl IndexManager {
         self.retriever.clone()
     }
 
+    /// Get all embeddings for advertisement generation
+    pub fn all_embeddings(&self) -> Vec<Vec<f32>> {
+        self.chunk_storage
+            .all_embeddings()
+            .into_iter()
+            .map(|(_, emb)| emb)
+            .collect()
+    }
+
     /// Generate a deterministic embedding for content
     /// TODO: Replace with actual embedding engine
     fn generate_embedding(&self, content: &str) -> Vec<f32> {

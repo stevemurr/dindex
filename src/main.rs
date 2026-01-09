@@ -18,7 +18,7 @@ use dindex::{
     network::{NetworkEvent, NetworkNode, QueryResponse},
     query::{QueryCoordinator, QueryExecutor},
     retrieval::{Bm25Index, HybridIndexer, HybridRetriever},
-    routing::QueryRouter,
+    routing::{AdvertisementBuilder, QueryRouter},
     scraping::{
         coordinator::{ScrapingConfig as ScrapingCoordConfig, ScrapingCoordinator},
         extractor::ExtractorConfig,
@@ -575,6 +575,7 @@ async fn start_node_inner(
         config.embedding.dimensions,
         &config.routing,
     ));
+    let query_router_for_events = query_router.clone();
 
     // Create QueryCoordinator for distributed search
     let query_coordinator = Arc::new(QueryCoordinator::new(
@@ -596,6 +597,29 @@ async fn start_node_inner(
             tracing::error!("Node error: {}", e);
         }
     });
+
+    // Build and broadcast our node advertisement
+    let embeddings = daemon.index_manager().all_embeddings();
+    if !embeddings.is_empty() {
+        let advertisement = AdvertisementBuilder::new(handle.local_peer_id.to_string())
+            .with_centroids(&embeddings, config.routing.num_centroids, Some(config.embedding.truncated_dimensions))
+            .build();
+        info!(
+            "Broadcasting advertisement: {} centroids, {} chunks",
+            advertisement.centroids.len(),
+            advertisement.total_chunks
+        );
+        // Delay briefly to allow connections to establish
+        let advert_handle = handle.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if let Err(e) = advert_handle.broadcast_advertisement(advertisement).await {
+                warn!("Failed to broadcast advertisement: {}", e);
+            }
+        });
+    } else {
+        info!("No indexed content, skipping advertisement broadcast");
+    }
 
     // Spawn network event handler for incoming queries
     let network_handle = handle.clone();
@@ -648,10 +672,13 @@ async fn start_node_inner(
                     info!("Peer disconnected: {}", peer_id);
                 }
                 NetworkEvent::AdvertisementReceived(advert) => {
-                    tracing::debug!(
-                        "Received advertisement from node with {} centroids",
-                        advert.centroids.len()
+                    info!(
+                        "Received advertisement from node {} with {} centroids, {} chunks",
+                        advert.node_id,
+                        advert.centroids.len(),
+                        advert.total_chunks
                     );
+                    query_router_for_events.register_node(advert);
                 }
             }
         }
