@@ -214,7 +214,6 @@ impl WikiTextParser {
 
                 if !found_close {
                     // No closing tag found, skip to end of opening tag
-                    let end = i + 4;
                     while i < chars.len() && chars[i] != '>' {
                         i += 1;
                     }

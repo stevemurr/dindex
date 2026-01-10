@@ -25,8 +25,6 @@ pub enum FetchDecision {
 /// Cached robots.txt data for a domain
 #[derive(Debug, Clone)]
 pub struct CachedRobots {
-    /// Raw robots.txt content
-    content: String,
     /// Parsed disallow patterns for our user agent
     disallow_patterns: Vec<String>,
     /// Parsed allow patterns for our user agent
@@ -46,7 +44,6 @@ impl CachedRobots {
             Self::parse_robots(&content, user_agent);
 
         Self {
-            content,
             disallow_patterns,
             allow_patterns,
             crawl_delay,
@@ -58,7 +55,6 @@ impl CachedRobots {
     /// Create an empty (allow-all) robots.txt for when fetch fails
     pub fn allow_all() -> Self {
         Self {
-            content: String::new(),
             disallow_patterns: Vec::new(),
             allow_patterns: Vec::new(),
             crawl_delay: None,

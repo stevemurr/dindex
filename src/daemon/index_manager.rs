@@ -23,6 +23,10 @@ use super::protocol::IndexStats;
 pub struct IndexManager {
     config: Config,
     vector_index: Arc<VectorIndex>,
+    /// BM25 index - held for ownership. Accessed indirectly via `retriever` and `indexer`
+    /// which hold their own Arc references. Stored here to ensure the index outlives
+    /// any potential future direct access needs.
+    #[allow(dead_code)]
     bm25_index: Arc<Bm25Index>,
     chunk_storage: Arc<ChunkStorage>,
     retriever: Arc<HybridRetriever>,
@@ -93,8 +97,7 @@ impl IndexManager {
         let start = Instant::now();
         debug!("Searching for: {} (top_k={})", query_text, top_k);
 
-        // Generate query embedding
-        // TODO: Use actual embedding engine when available
+        // Generate query embedding (uses real engine if available, hash-based fallback otherwise)
         let query_embedding = self.generate_embedding(query_text);
 
         // Create query
@@ -130,8 +133,7 @@ impl IndexManager {
 
     /// Index chunks without embeddings (will generate them)
     pub fn index_chunks(&self, chunks: Vec<Chunk>) -> Result<Vec<u64>> {
-        // Generate embeddings for each chunk
-        // TODO: Use actual embedding engine when available
+        // Generate embeddings for each chunk (uses real engine if available, hash-based fallback otherwise)
         let chunks_with_embeddings: Vec<_> = chunks
             .into_iter()
             .map(|c| {

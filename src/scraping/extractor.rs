@@ -132,9 +132,8 @@ impl Default for ExtractorConfig {
 /// Content extractor
 pub struct ContentExtractor {
     config: ExtractorConfig,
-    // Pre-compiled selectors
+    /// Pre-compiled selectors for finding main content
     content_selectors: Vec<Selector>,
-    remove_selectors: Vec<Selector>,
 }
 
 impl ContentExtractor {
@@ -157,34 +156,12 @@ impl ContentExtractor {
         .filter_map(|s| Selector::parse(s).ok())
         .collect();
 
-        // Selectors for elements to remove
-        let remove_selectors: Vec<Selector> = [
-            "script",
-            "style",
-            "nav",
-            "header",
-            "footer",
-            "aside",
-            ".sidebar",
-            ".navigation",
-            ".menu",
-            ".comments",
-            ".advertisement",
-            ".ad",
-            "[role='navigation']",
-            "[role='banner']",
-            "[role='complementary']",
-            ".social-share",
-            ".related-posts",
-        ]
-        .iter()
-        .filter_map(|s| Selector::parse(s).ok())
-        .collect();
+        // Note: We don't need remove_selectors because the `readability` library
+        // handles boilerplate removal (scripts, styles, nav, etc.) internally
 
         Self {
             config,
             content_selectors,
-            remove_selectors,
         }
     }
 

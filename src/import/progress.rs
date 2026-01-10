@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 /// Progress tracker for import operations
 pub struct ImportProgress {
-    /// Progress bar
+    /// Progress bar (None if running in quiet mode)
     progress_bar: Option<ProgressBar>,
     /// Start time
     start_time: Instant,
@@ -24,8 +24,6 @@ pub struct ImportProgress {
     chunks_created: AtomicUsize,
     /// Bytes processed
     bytes_processed: AtomicU64,
-    /// Total expected documents (if known)
-    total_expected: Option<u64>,
     /// Last checkpoint time
     last_checkpoint: std::sync::Mutex<Instant>,
     /// Checkpoint interval (documents)
@@ -34,8 +32,6 @@ pub struct ImportProgress {
     checkpoint_path: Option<PathBuf>,
     /// Source path for checkpoint
     source_path: PathBuf,
-    /// Whether we're running in quiet mode
-    quiet: bool,
     /// Cancelled flag
     cancelled: AtomicBool,
 }
@@ -77,12 +73,10 @@ impl ImportProgress {
             docs_errored: AtomicUsize::new(0),
             chunks_created: AtomicUsize::new(0),
             bytes_processed: AtomicU64::new(0),
-            total_expected,
             last_checkpoint: std::sync::Mutex::new(Instant::now()),
             checkpoint_interval,
             checkpoint_path,
             source_path,
-            quiet,
             cancelled: AtomicBool::new(false),
         }
     }

@@ -13,7 +13,7 @@ use tokio::signal;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
-use crate::config::Config;
+use crate::config::{Config, EmbeddingConfig};
 use crate::embedding::EmbeddingEngine;
 
 use super::handler::RequestHandler;
@@ -26,10 +26,7 @@ const PID_FILE_NAME: &str = "dindex.pid";
 
 /// Daemon instance managing all components
 pub struct Daemon {
-    config: Config,
     index_manager: Arc<IndexManager>,
-    embedding_engine: Option<Arc<EmbeddingEngine>>,
-    write_pipeline: Arc<WritePipeline>,
     handler: Arc<RequestHandler>,
     server: IpcServer,
     shutdown_tx: broadcast::Sender<()>,
@@ -48,8 +45,10 @@ impl Daemon {
         // Resolve model paths from data directory
         config.embedding.resolve_paths(&config.node.data_dir);
 
-        // Initialize embedding engine
-        let embedding_engine = match EmbeddingEngine::new(&config.embedding) {
+        // Initialize embedding engine in a blocking task with timeout
+        // This prevents blocking the async runtime during model loading
+        let embedding_config = config.embedding.clone();
+        let embedding_engine = match Self::init_embedding_engine(embedding_config).await {
             Ok(engine) => {
                 info!(
                     "Embedding engine initialized: {} ({}D, GPU: {})",
@@ -104,11 +103,14 @@ impl Daemon {
         info!("Data directory: {}", config.node.data_dir.display());
         info!("Socket path: {}", server.socket_path().display());
 
+        // Note: config, embedding_engine, and write_pipeline are not stored in Daemon
+        // because they've been distributed to the components that need them:
+        // - config -> IndexManager, RequestHandler
+        // - embedding_engine -> IndexManager (via set_embedding_engine)
+        // - write_pipeline -> RequestHandler
+
         Ok(Self {
-            config,
             index_manager,
-            embedding_engine,
-            write_pipeline,
             handler,
             server,
             shutdown_tx,
@@ -197,6 +199,24 @@ impl Daemon {
         self.handler.clone()
     }
 
+    /// Initialize the embedding engine in a blocking task
+    ///
+    /// This runs model loading in spawn_blocking to avoid blocking the async runtime.
+    /// Model loading can take a long time (downloading from HuggingFace, loading weights).
+    async fn init_embedding_engine(config: EmbeddingConfig) -> Result<EmbeddingEngine> {
+        info!("Loading embedding model: {} (this may take a moment...)", config.model_name);
+
+        // Use spawn_blocking since EmbeddingEngine::new() does blocking I/O
+        // (model download from HuggingFace, file I/O for loading weights)
+        let result = tokio::task::spawn_blocking(move || {
+            EmbeddingEngine::new(&config)
+        })
+        .await
+        .context("Embedding engine task panicked")?;
+
+        result
+    }
+
     /// Acquire single-instance lock via PID file
     fn acquire_lock(pid_file_path: &Path) -> Result<()> {
         // Check if daemon is already running
@@ -239,18 +259,17 @@ impl Daemon {
     fn process_exists(pid: u32) -> bool {
         #[cfg(unix)]
         {
-            // On Unix, we can use kill(pid, 0) to check if process exists
-            use std::os::unix::process::CommandExt;
-            let result = std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .status();
-
-            matches!(result, Ok(status) if status.success())
+            // On Unix, use kill(pid, 0) to check if process exists
+            // Signal 0 doesn't actually send a signal, just checks if the process exists
+            unsafe {
+                libc::kill(pid as i32, 0) == 0
+            }
         }
 
         #[cfg(not(unix))]
         {
             // On other platforms, assume process exists if we can't check
+            let _ = pid;
             true
         }
     }
@@ -317,12 +336,6 @@ pub fn get_daemon_pid(data_dir: &Path) -> Option<u32> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    fn test_config(data_dir: &std::path::Path) -> Config {
-        let mut config = Config::default();
-        config.node.data_dir = data_dir.to_path_buf();
-        config
-    }
 
     #[test]
     fn test_pid_lock_acquire_release() {

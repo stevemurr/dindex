@@ -11,7 +11,9 @@ pub struct PdfExtractor;
 impl PdfExtractor {
     /// Extract text content from PDF bytes
     pub fn extract(bytes: &[u8]) -> Result<ExtractedDocument> {
-        let text = pdf_extract::extract_text_from_mem(bytes)
+        // Suppress noisy stderr output from pdf-extract library
+        // (Unicode mismatch warnings, unknown glyph names, etc.)
+        let text = Self::extract_with_suppressed_stderr(bytes)
             .context("Failed to extract text from PDF")?;
 
         // Clean up the extracted text
@@ -29,6 +31,55 @@ impl PdfExtractor {
         }
 
         Ok(doc)
+    }
+
+    /// Extract text while suppressing stdout/stderr noise from pdf-extract
+    fn extract_with_suppressed_stderr(bytes: &[u8]) -> Result<String, pdf_extract::OutputError> {
+        // pdf-extract uses println! for warnings about Unicode mismatches,
+        // unknown glyphs, missing chars, etc. These are not actionable by users
+        // and clutter the output. We redirect both stdout and stderr to /dev/null.
+
+        #[cfg(unix)]
+        {
+            use std::fs::File;
+            use std::os::unix::io::IntoRawFd;
+
+            const STDOUT_FD: i32 = 1;
+            const STDERR_FD: i32 = 2;
+
+            // Save original stdout and stderr
+            let saved_stdout = unsafe { libc::dup(STDOUT_FD) };
+            let saved_stderr = unsafe { libc::dup(STDERR_FD) };
+
+            // Open /dev/null and redirect both stdout and stderr to it
+            if let Ok(dev_null) = File::open("/dev/null") {
+                let null_fd = dev_null.into_raw_fd();
+                unsafe { libc::dup2(null_fd, STDOUT_FD) };
+                unsafe { libc::dup2(null_fd, STDERR_FD) };
+                unsafe { libc::close(null_fd) };
+            }
+
+            // Perform the extraction
+            let result = pdf_extract::extract_text_from_mem(bytes);
+
+            // Restore original stdout and stderr
+            if saved_stdout >= 0 {
+                unsafe { libc::dup2(saved_stdout, STDOUT_FD) };
+                unsafe { libc::close(saved_stdout) };
+            }
+            if saved_stderr >= 0 {
+                unsafe { libc::dup2(saved_stderr, STDERR_FD) };
+                unsafe { libc::close(saved_stderr) };
+            }
+
+            result
+        }
+
+        #[cfg(not(unix))]
+        {
+            // On non-Unix platforms, just run without suppression
+            pdf_extract::extract_text_from_mem(bytes)
+        }
     }
 
     /// Clean up common PDF extraction artifacts

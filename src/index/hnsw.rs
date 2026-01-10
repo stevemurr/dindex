@@ -95,6 +95,14 @@ impl VectorIndex {
 
         let dimensions = index.dimensions();
 
+        // Reserve additional capacity for new vectors
+        // The loaded index only has capacity for existing vectors
+        let current_size = index.size();
+        let target_capacity = config.max_capacity.max(current_size + 100_000);
+        index
+            .reserve(target_capacity)
+            .context("Failed to reserve additional capacity after loading")?;
+
         // Open sled database for mappings
         let mappings_db_path = path.with_extension("mappings.sled");
         let json_mappings_path = path.with_extension("mappings.json");

@@ -84,23 +84,27 @@ impl Default for NodeConfig {
 /// Embedding model configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
-    /// Model name (e.g., "nomic-embed-text-v1.5", "e5-small-v2")
+    /// Model name (e.g., "bge-m3", "bge-base-en-v1.5", "all-MiniLM-L6-v2")
+    /// Can also be a HuggingFace model ID (e.g., "BAAI/bge-m3")
     pub model_name: String,
-    /// Path to ONNX model file
+    /// Path to model files (optional, embed_anything downloads automatically)
+    #[serde(default)]
     pub model_path: Option<PathBuf>,
-    /// Path to tokenizer files
+    /// Path to tokenizer files (optional, embed_anything handles internally)
+    #[serde(default)]
     pub tokenizer_path: Option<PathBuf>,
-    /// Embedding dimensions
+    /// Embedding dimensions (1024 for bge-m3, 768 for bge-base, 384 for MiniLM)
     pub dimensions: usize,
     /// Truncated dimensions for Matryoshka (routing)
     pub truncated_dimensions: usize,
     /// Maximum sequence length
     pub max_sequence_length: usize,
-    /// Enable INT8 quantization
+    /// Enable INT8 quantization (deprecated, handled by backend)
+    #[serde(default)]
     pub quantize_int8: bool,
     /// Number of threads for inference
     pub num_threads: usize,
-    /// Use GPU acceleration (requires cuda feature, auto-detected by default)
+    /// Use GPU acceleration (CUDA or Metal based on platform)
     #[serde(default = "default_use_gpu")]
     pub use_gpu: bool,
     /// GPU device ID (for multi-GPU systems)
@@ -108,21 +112,21 @@ pub struct EmbeddingConfig {
     pub gpu_device_id: usize,
 }
 
-/// Default for use_gpu - true when cuda feature is enabled
+/// Default for use_gpu - true when cuda or metal feature is enabled
 fn default_use_gpu() -> bool {
-    cfg!(feature = "cuda")
+    cfg!(feature = "cuda") || cfg!(feature = "metal")
 }
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            model_name: "nomic-embed-text-v1.5".to_string(),
+            model_name: "bge-m3".to_string(),
             model_path: None,
             tokenizer_path: None,
-            dimensions: 768,
+            dimensions: 1024,
             truncated_dimensions: 256,
             max_sequence_length: 8192,
-            quantize_int8: true,
+            quantize_int8: false,
             num_threads: num_cpus::get().min(8),
             use_gpu: default_use_gpu(),
             gpu_device_id: 0,
@@ -132,8 +136,11 @@ impl Default for EmbeddingConfig {
 
 impl EmbeddingConfig {
     /// Resolve model paths from the data directory if not explicitly set.
-    /// Looks for models in `{data_dir}/models/{model_name}/`
+    /// Note: embed_anything handles model downloading automatically,
+    /// so this is primarily for backward compatibility.
     pub fn resolve_paths(&mut self, data_dir: &std::path::Path) {
+        // embed_anything handles model caching in ~/.cache/huggingface/
+        // This method is kept for backward compatibility but is no longer required
         if self.model_path.is_none() || self.tokenizer_path.is_none() {
             let model_dir = data_dir.join("models").join(&self.model_name);
             let model_file = model_dir.join("model.onnx");

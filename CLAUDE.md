@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-DIndex is a decentralized semantic search index for LLM consumption. It combines P2P networking (libp2p), CPU-efficient embeddings (ONNX Runtime), and hybrid retrieval (dense vectors + BM25) into a federated search system.
+DIndex is a decentralized semantic search index for LLM consumption. It combines P2P networking (libp2p), CPU/GPU-efficient embeddings (embed_anything + candle), and hybrid retrieval (dense vectors + BM25) into a federated search system.
 
 ## Build & Run
 
@@ -21,7 +21,7 @@ cargo test integration_test
 
 ```bash
 dindex init                                    # Initialize config
-dindex download nomic-embed-text-v1.5          # Download embedding model
+dindex download bge-m3                         # Download embedding model (optional, auto-downloads)
 dindex index ./documents/ --title "Docs"       # Index documents
 dindex search "query" --format json --top-k 10 # Search
 dindex start --listen /ip4/0.0.0.0/udp/4001/quic-v1  # Start P2P node
@@ -37,7 +37,7 @@ src/
 ├── main.rs              # CLI entry point
 ├── types.rs             # Core data types (Chunk, Query, SearchResult)
 ├── config.rs            # TOML configuration
-├── embedding/           # ONNX embedding inference (nomic, e5-small)
+├── embedding/           # Embedding inference via embed_anything (bge-m3, etc.)
 ├── index/               # USearch HNSW vector index
 ├── retrieval/           # Hybrid search (dense + BM25 + RRF fusion)
 ├── chunking/            # Document → chunks (512 tokens, 15% overlap)
@@ -50,7 +50,7 @@ src/
 ## Architecture Highlights
 
 - **Hybrid Retrieval**: Dense vectors (HNSW) + BM25 lexical search, combined via Reciprocal Rank Fusion (k=60)
-- **CPU-First**: ONNX Runtime with INT8 quantization, no GPU required
+- **GPU/CPU Flexible**: Uses embed_anything (candle backend) with CUDA/Metal support, falls back to CPU
 - **P2P Network**: Kademlia DHT for peer discovery, GossipSub for messaging, QUIC transport
 - **Semantic Routing**: Nodes advertise content centroids + LSH signatures; queries route to relevant nodes
 - **Scraping**: Multi-tier fetching (HTTP first, headless browser fallback), consistent hashing for domain assignment
@@ -61,7 +61,7 @@ src/
 |-------|---------|
 | libp2p | P2P networking |
 | usearch | HNSW vector index |
-| ort | ONNX Runtime for embeddings |
+| embed_anything | Embedding inference (candle backend) |
 | tantivy | BM25 full-text search |
 | tokio | Async runtime |
 | reqwest | HTTP client |
@@ -78,7 +78,8 @@ docker compose up -d                                 # Start node
 ## Configuration
 
 Config lives in `dindex.toml`. Key settings:
-- Embedding: `nomic-embed-text-v1.5`, 768 dims, INT8 quantized
+- Embedding: `bge-m3` (default), 1024 dims, multilingual, Matryoshka support
+- GPU: Auto-detected (CUDA/Metal), build with `--features cuda` or `--features metal`
 - Index: HNSW M=16, EF=200/100 (construction/search)
 - Chunking: 512 tokens, 15% overlap
 - Routing: 100 centroids, 128-bit LSH, 5 candidate nodes

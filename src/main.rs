@@ -8,11 +8,11 @@ use daemonize::Daemonize;
 use indicatif::{ProgressBar, ProgressStyle};
 use dindex::{
     chunking::TextSplitter,
-    client::{self, ClientError, DaemonClient},
+    client::{self, ClientError},
     config::Config,
     content::{extract_from_bytes_with_url, extract_from_path, ContentType},
     daemon::{self, server::IpcServer, Daemon, OutputFormat},
-    embedding::{check_model_exists, init_embedding_engine, model_not_found_error, ModelManager},
+    embedding::init_embedding_engine,
     import::{DumpFormat, ImportCheckpoint, ImportCoordinatorBuilder, WikimediaSource},
     index::{ChunkStorage, DocumentRegistry, VectorIndex},
     network::{NetworkEvent, NetworkNode, QueryResponse},
@@ -113,8 +113,8 @@ enum Commands {
 
     /// Download embedding model
     Download {
-        /// Model name
-        #[arg(default_value = "nomic-embed-text-v1.5")]
+        /// Model name (default: bge-m3, 1024 dimensions, multilingual)
+        #[arg(default_value = "bge-m3")]
         model: String,
     },
 
@@ -833,15 +833,8 @@ async fn index_document(
     // Direct access fallback
     info!("Using direct index access (daemon not available)");
 
-    // Check if model exists before proceeding
-    if !check_model_exists(&config)? {
-        model_not_found_error(&config);
-        std::process::exit(1);
-    }
-
-    // Initialize embedding engine
+    // Initialize embedding engine (model is downloaded automatically by embed_anything)
     let engine = init_embedding_engine(&config)
-        .await
         .context("Failed to initialize embedding engine")?;
 
     let index_path = config.node.data_dir.join("vector.index");
@@ -919,15 +912,8 @@ async fn search_index(
     }
 
     // Direct access fallback
-    // Check if model exists before proceeding
-    if !check_model_exists(&config)? {
-        model_not_found_error(&config);
-        std::process::exit(1);
-    }
-
-    // Initialize embedding engine
+    // Initialize embedding engine (model is downloaded automatically by embed_anything)
     let engine = init_embedding_engine(&config)
-        .await
         .context("Failed to initialize embedding engine")?;
 
     let index_path = config.node.data_dir.join("vector.index");
@@ -1026,17 +1012,33 @@ async fn show_stats(config: Config) -> Result<()> {
     Ok(())
 }
 
-async fn download_model(config: Config, model: String) -> Result<()> {
+async fn download_model(mut config: Config, model: String) -> Result<()> {
+    use dindex::embedding::model::ModelRegistry;
+
     info!("Downloading model: {}", model);
 
-    let cache_dir = config.node.data_dir.join("models");
-    let manager = ModelManager::new(&cache_dir)?;
+    // Validate model name
+    if ModelRegistry::get(&model).is_none() {
+        println!("Unknown model: {}", model);
+        println!("\nAvailable models:");
+        for name in ModelRegistry::list() {
+            println!("  - {}", name);
+        }
+        println!("\nYou can also use any HuggingFace model ID directly (e.g., BAAI/bge-m3)");
+        std::process::exit(1);
+    }
 
-    let (model_path, tokenizer_path) = manager.ensure_model(&model).await?;
+    // Update config with the requested model
+    config.embedding.model_name = model.clone();
 
-    println!("\nModel downloaded successfully!");
-    println!("Model path: {}", model_path.display());
-    println!("Tokenizer path: {}", tokenizer_path.display());
+    // Initialize the embedding engine - this triggers the download
+    println!("Downloading model from HuggingFace Hub...");
+    println!("(Models are cached in ~/.cache/huggingface/hub)");
+
+    let _engine = init_embedding_engine(&config)
+        .context("Failed to download/initialize model")?;
+
+    println!("\nModel '{}' downloaded and ready!", model);
 
     Ok(())
 }
@@ -1277,16 +1279,9 @@ async fn scrape_urls(
 
     // Initialize embedding engine if indexing
     let embedding_engine = if should_index {
-        // Check if model exists before proceeding
-        if !check_model_exists(&config)? {
-            model_not_found_error(&config);
-            std::process::exit(1);
-        }
-
         println!("  Model: {}", config.embedding.model_name);
         Some(
             init_embedding_engine(&config)
-                .await
                 .context("Failed to initialize embedding engine")?,
         )
     } else {
@@ -1334,7 +1329,6 @@ async fn scrape_urls(
 
     // Initialize indexing components if needed
     let (indexer, vector_index, chunk_storage) = if should_index {
-        let index_path = config.node.data_dir.join("vector.index");
         let vi = Arc::new(VectorIndex::new(config.embedding.dimensions, &config.index)?);
         let bm25_path = config.node.data_dir.join("bm25");
         let bm25_index = Arc::new(Bm25Index::new(&bm25_path)?);
@@ -1449,7 +1443,7 @@ async fn scrape_urls(
     }
 
     // Save index if we indexed content
-    if let (Some(vi), Some(cs)) = (vector_index, chunk_storage) {
+    if let (Some(vi), Some(_cs)) = (vector_index, chunk_storage) {
         let index_path = config.node.data_dir.join("vector.index");
         vi.save(&index_path)?;
         info!("Saved vector index to {}", index_path.display());
@@ -1565,14 +1559,30 @@ async fn import_dump(
 
                 // Poll for progress
                 loop {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
 
                     match client::job_progress(job_id).await {
                         Ok(progress) => {
                             if !quiet {
-                                let rate_str = progress.rate.map(|r| format!("{:.1} docs/s", r)).unwrap_or_default();
-                                let eta_str = progress.eta_seconds.map(|e| format!("ETA: {}s", e)).unwrap_or_default();
-                                print!("\r{}: {} processed {} {}",
+                                let rate_str = progress.rate
+                                    .filter(|&r| r > 0.0)
+                                    .map(|r| format!(" ({:.1} docs/s)", r))
+                                    .unwrap_or_default();
+                                let eta_str = progress.eta_seconds
+                                    .filter(|&e| e > 0)
+                                    .map(|e| {
+                                        if e > 3600 {
+                                            format!(" ETA: {}h {}m", e / 3600, (e % 3600) / 60)
+                                        } else if e > 60 {
+                                            format!(" ETA: {}m {}s", e / 60, e % 60)
+                                        } else {
+                                            format!(" ETA: {}s", e)
+                                        }
+                                    })
+                                    .unwrap_or_default();
+
+                                // Clear line and show progress
+                                print!("\r\x1b[K{}: {} docs{}{}",
                                     progress.stage,
                                     progress.current,
                                     rate_str,
@@ -1646,15 +1656,8 @@ async fn import_dump(
         );
     }
 
-    // Check if model exists before proceeding
-    if !check_model_exists(&config)? {
-        model_not_found_error(&config);
-        std::process::exit(1);
-    }
-
-    // Initialize embedding engine
+    // Initialize embedding engine (model is downloaded automatically by embed_anything)
     let engine = init_embedding_engine(&config)
-        .await
         .context("Failed to initialize embedding engine")?;
 
     // Create import coordinator
@@ -1955,13 +1958,17 @@ async fn reset_index(config: Config, force: bool) -> Result<()> {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    // Files/directories to delete
     // Files and directories to delete for a full reset
     let items_to_delete = [
+        // Index data
         "bm25",                         // BM25/Tantivy index directory
-        "chunks.json",                  // Chunk storage
+        "chunks.sled",                  // Chunk storage (sled database)
+        "document_registry.sled",       // Document registry (sled database)
         "vector.index",                 // HNSW vector index
         "vector.index.mappings.json",   // Vector index key mappings
+        // Legacy storage (for migration cleanup)
+        "chunks.json",                  // Old chunk storage format
+        // Daemon files
         "dindex.err",                   // Daemon error log
         "dindex.log",                   // Daemon log
         "dindex.pid",                   // Daemon PID file

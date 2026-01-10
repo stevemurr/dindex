@@ -337,11 +337,13 @@ async fn run_import_job(
             // Create wikimedia source - needs to be mutable for iter_documents
             let mut wiki_source = WikimediaSource::open(&path)?;
 
-            update_progress(&jobs, job_id, "importing", 0, None);
+            update_progress(&jobs, job_id, "parsing", 0, None);
 
             // Process documents in batches to avoid holding iterator across await points
             let min_content_length = config.bulk_import.min_content_length;
             let batch_size = 100;
+            let mut docs_parsed = 0usize;
+            let mut last_progress_update = Instant::now();
 
             loop {
                 // Check for cancellation
@@ -366,6 +368,7 @@ async fn run_import_job(
                     for _ in 0..batch_size {
                         match doc_iter.next() {
                             Some(Ok(doc)) => {
+                                docs_parsed += 1;
                                 if doc.content.len() >= min_content_length {
                                     batch.push(doc);
                                 }
@@ -373,12 +376,18 @@ async fn run_import_job(
                             Some(Err(e)) => {
                                 warn!("Error reading document: {}", e);
                                 errors += 1;
+                                docs_parsed += 1;
                             }
                             None => break,
                         }
                     }
                     batch
                 };
+
+                // Update parsing progress if we haven't started processing yet
+                if documents_processed == 0 && docs_parsed > 0 {
+                    update_progress(&jobs, job_id, "parsing", docs_parsed as u64, None);
+                }
 
                 // If no documents in batch, we're done
                 if batch.is_empty() {
@@ -407,10 +416,13 @@ async fn run_import_job(
                     }
 
                     documents_processed += 1;
-                }
 
-                // Update progress after each batch
-                update_progress(&jobs, job_id, "importing", documents_processed as u64, None);
+                    // Update progress more frequently (every 500ms or every 10 docs)
+                    if documents_processed % 10 == 0 || last_progress_update.elapsed() > Duration::from_millis(500) {
+                        update_progress(&jobs, job_id, "importing", documents_processed as u64, None);
+                        last_progress_update = Instant::now();
+                    }
+                }
 
                 // Yield to allow other tasks to run
                 tokio::task::yield_now().await;

@@ -1,26 +1,22 @@
 //! Embedding engine implementation
 //!
-//! Requires the `onnx` feature (enabled by default) for real embeddings.
-//! Enable the `cuda` feature for GPU acceleration.
+//! Uses embed_anything with candle backend for text embeddings.
+//! Supports CPU, CUDA (--features cuda), and Metal (--features metal).
 
 use crate::config::EmbeddingConfig;
 use crate::types::Embedding;
 use anyhow::{Context, Result};
-use ort::{execution_providers::CPUExecutionProvider, session::Session, value::Tensor};
-#[cfg(feature = "cuda")]
-use ort::execution_providers::CUDAExecutionProvider;
-use parking_lot::Mutex;
-use tokenizers::Tokenizer;
-use tracing::{debug, info, warn};
+use embed_anything::embeddings::embed::{Embedder, EmbedderBuilder, EmbeddingResult};
+use std::sync::Arc;
+use tracing::{debug, info};
 
 /// Embedding engine for generating vector embeddings from text
 ///
-/// Uses ONNX Runtime for CPU-optimized inference.
+/// Uses embed_anything with candle backend for efficient inference.
+/// Supports CPU, CUDA, and Metal acceleration.
 pub struct EmbeddingEngine {
-    /// ONNX session for inference (wrapped in Mutex for interior mutability)
-    session: Mutex<Session>,
-    /// Tokenizer for text preprocessing
-    tokenizer: Tokenizer,
+    /// The embedder from embed_anything
+    embedder: Arc<Embedder>,
     /// Model configuration
     config: EmbeddingConfig,
 }
@@ -28,30 +24,24 @@ pub struct EmbeddingEngine {
 impl EmbeddingEngine {
     /// Create a new embedding engine
     ///
-    /// Requires the model and tokenizer files to be downloaded first.
-    /// Use `dindex download <model-name>` to download the required files.
+    /// Downloads the model automatically if not cached.
     pub fn new(config: &EmbeddingConfig) -> Result<Self> {
         info!(
             "Initializing embedding engine with model: {}",
             config.model_name
         );
 
-        // Get model and tokenizer paths
-        let model_path = config
-            .model_path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Model path not specified"))?;
-        let tokenizer_path = config
-            .tokenizer_path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Tokenizer path not specified"))?;
+        // Map model name to HuggingFace model ID and architecture
+        let (architecture, model_id) = Self::resolve_model(&config.model_name)?;
 
-        // Build session with appropriate execution provider
-        let session = Self::build_session(config, model_path)?;
+        info!("Loading model: {} (architecture: {})", model_id, architecture);
 
-        // Load tokenizer
-        let tokenizer = Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+        // Build the embedder
+        let embedder = EmbedderBuilder::new()
+            .model_architecture(&architecture)
+            .model_id(Some(&model_id))
+            .from_pretrained_hf()
+            .context("Failed to load embedding model")?;
 
         info!(
             "Embedding engine initialized: {} dimensions, max {} tokens",
@@ -59,51 +49,49 @@ impl EmbeddingEngine {
         );
 
         Ok(Self {
-            session: Mutex::new(session),
-            tokenizer,
+            embedder: Arc::new(embedder),
             config: config.clone(),
         })
     }
 
-    /// Build ONNX session with configured execution provider
-    fn build_session(config: &EmbeddingConfig, model_path: &std::path::Path) -> Result<Session> {
-        #[cfg(feature = "cuda")]
-        if config.use_gpu {
-            info!("Attempting to use CUDA GPU acceleration (device {})", config.gpu_device_id);
+    /// Resolve model name to (architecture, huggingface_id)
+    fn resolve_model(model_name: &str) -> Result<(String, String)> {
+        match model_name {
+            // BGE models (use BertModel architecture)
+            "bge-m3" => Ok(("BertModel".to_string(), "BAAI/bge-m3".to_string())),
+            "bge-base-en-v1.5" => Ok(("BertModel".to_string(), "BAAI/bge-base-en-v1.5".to_string())),
+            "bge-large-en-v1.5" => Ok(("BertModel".to_string(), "BAAI/bge-large-en-v1.5".to_string())),
+            "bge-small-en-v1.5" => Ok(("BertModel".to_string(), "BAAI/bge-small-en-v1.5".to_string())),
 
-            let cuda_provider = CUDAExecutionProvider::default()
-                .with_device_id(config.gpu_device_id as i32)
-                .build();
+            // E5 models
+            "e5-small-v2" => Ok(("BertModel".to_string(), "intfloat/e5-small-v2".to_string())),
+            "e5-base-v2" => Ok(("BertModel".to_string(), "intfloat/e5-base-v2".to_string())),
+            "e5-large-v2" => Ok(("BertModel".to_string(), "intfloat/e5-large-v2".to_string())),
 
-            // Try CUDA first, fall back to CPU
-            match Session::builder()?
-                .with_execution_providers([cuda_provider, CPUExecutionProvider::default().build()])?
-                .with_intra_threads(config.num_threads)?
-                .commit_from_file(model_path)
-            {
-                Ok(session) => {
-                    info!("CUDA GPU acceleration enabled");
-                    return Ok(session);
-                }
-                Err(e) => {
-                    warn!("CUDA initialization failed, falling back to CPU: {}", e);
-                }
+            // Sentence transformers
+            "all-MiniLM-L6-v2" => Ok(("BertModel".to_string(), "sentence-transformers/all-MiniLM-L6-v2".to_string())),
+            "all-MiniLM-L12-v2" => Ok(("BertModel".to_string(), "sentence-transformers/all-MiniLM-L12-v2".to_string())),
+
+            // Jina models
+            "jina-embeddings-v2-small-en" => Ok(("JinaBertForMaskedLM".to_string(), "jinaai/jina-embeddings-v2-small-en".to_string())),
+            "jina-embeddings-v2-base-en" => Ok(("JinaBertForMaskedLM".to_string(), "jinaai/jina-embeddings-v2-base-en".to_string())),
+
+            // Legacy nomic model (may not be fully supported)
+            "nomic-embed-text-v1.5" => Ok(("BertModel".to_string(), "nomic-ai/nomic-embed-text-v1.5".to_string())),
+
+            // Allow direct HuggingFace model IDs
+            name if name.contains('/') => {
+                // Assume BertModel architecture for direct HF IDs
+                Ok(("BertModel".to_string(), name.to_string()))
             }
-        }
 
-        #[cfg(not(feature = "cuda"))]
-        if config.use_gpu {
-            warn!("GPU acceleration requested but 'cuda' feature not enabled. Using CPU.");
-            warn!("Rebuild with: cargo build --features cuda");
+            _ => Err(anyhow::anyhow!(
+                "Unknown model: {}. Supported models: bge-m3, bge-base-en-v1.5, bge-large-en-v1.5, \
+                 e5-small-v2, e5-base-v2, e5-large-v2, all-MiniLM-L6-v2, jina-embeddings-v2-small-en, \
+                 or provide a HuggingFace model ID (e.g., 'BAAI/bge-m3')",
+                model_name
+            ))
         }
-
-        // CPU fallback
-        info!("Using CPU execution provider");
-        Session::builder()?
-            .with_execution_providers([CPUExecutionProvider::default().build()])?
-            .with_intra_threads(config.num_threads)?
-            .commit_from_file(model_path)
-            .context("Failed to load ONNX model")
     }
 
     /// Generate embedding for a single text
@@ -123,136 +111,61 @@ impl EmbeddingEngine {
 
         debug!("Embedding batch of {} texts", texts.len());
 
-        // Tokenize all texts
-        let encodings = self
-            .tokenizer
-            .encode_batch(texts.to_vec(), true)
-            .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
+        // Clone texts for the async block (needed for spawn_blocking)
+        let texts_owned: Vec<String> = texts.to_vec();
+        let embedder = self.embedder.clone();
+        let batch_size = texts.len().min(32);
 
-        // Find max length for padding
-        let max_len = encodings
-            .iter()
-            .map(|e| e.get_ids().len())
-            .max()
-            .unwrap_or(0)
-            .min(self.config.max_sequence_length);
+        // Run the embedding operation
+        // We need to handle both cases: called from async context (daemon) or sync context (CLI)
+        let results = if tokio::runtime::Handle::try_current().is_ok() {
+            // We're in a tokio runtime - use spawn_blocking to run in a separate thread pool
+            // This avoids any potential issues with blocking the async runtime
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let text_refs: Vec<&str> = texts_owned.iter().map(|s| s.as_str()).collect();
+                    futures::executor::block_on(async {
+                        embedder.embed(&text_refs, Some(batch_size), None).await
+                    })
+                }).join().expect("Embedding thread panicked")
+            })
+        } else {
+            // Not in a tokio runtime - use futures executor directly
+            let text_refs: Vec<&str> = texts_owned.iter().map(|s| s.as_str()).collect();
+            futures::executor::block_on(async {
+                embedder.embed(&text_refs, Some(batch_size), None).await
+            })
+        }.context("Embedding failed")?;
 
-        // Prepare input tensors
-        let batch_size = texts.len();
-        let mut input_ids: Vec<i64> = Vec::with_capacity(batch_size * max_len);
-        let mut attention_mask: Vec<i64> = Vec::with_capacity(batch_size * max_len);
-        let mut token_type_ids: Vec<i64> = Vec::with_capacity(batch_size * max_len);
-
-        for encoding in &encodings {
-            let ids = encoding.get_ids();
-            let len = ids.len().min(max_len);
-
-            // Add IDs with padding
-            for i in 0..max_len {
-                if i < len {
-                    input_ids.push(ids[i] as i64);
-                    attention_mask.push(1);
-                    token_type_ids.push(0);
-                } else {
-                    input_ids.push(0); // Padding token
-                    attention_mask.push(0);
-                    token_type_ids.push(0);
-                }
-            }
-        }
-
-        // Create input tensors using (shape, data) tuple format
-        let shape = [batch_size, max_len];
-
-        // Run inference and extract output data (copy to owned)
-        let (output_shape, output_data): (Vec<usize>, Vec<f32>) = {
-            let mut session = self.session.lock();
-            let outputs = session.run(ort::inputs![
-                "input_ids" => Tensor::from_array((shape, input_ids))?,
-                "attention_mask" => Tensor::from_array((shape, attention_mask))?,
-                "token_type_ids" => Tensor::from_array((shape, token_type_ids))?,
-            ])?;
-
-            // Extract embeddings from output - convert to owned data
-            if let Some(t) = outputs.get("last_hidden_state") {
-                let arr = t.try_extract_array::<f32>()?;
-                (arr.shape().to_vec(), arr.iter().copied().collect())
-            } else if let Some(t) = outputs.get("sentence_embedding") {
-                let arr = t.try_extract_array::<f32>()?;
-                (arr.shape().to_vec(), arr.iter().copied().collect())
-            } else {
-                let (_, v) = outputs
-                    .iter()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("No output tensor found"))?;
-                let arr = v.try_extract_array::<f32>()?;
-                (arr.shape().to_vec(), arr.iter().copied().collect())
-            }
-        };
-
-        // Reconstruct as ndarray view from owned data
-        let output_view =
-            ndarray::ArrayViewD::from_shape(output_shape.as_slice(), output_data.as_slice())?;
-
-        let embeddings = match output_view.ndim() {
-            3 => {
-                // [batch, seq_len, hidden] - need pooling
-                self.mean_pool(&output_view, &encodings, max_len)?
-            }
-            2 => {
-                // [batch, hidden] - already pooled
-                (0..batch_size)
-                    .map(|i| output_view.slice(ndarray::s![i, ..]).to_vec())
-                    .collect()
-            }
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Unexpected output shape: {:?}",
-                    output_view.shape()
-                ))
-            }
-        };
-
-        // Normalize embeddings
-        let normalized: Vec<Embedding> = embeddings
+        // Convert EmbeddingResult to Vec<f32> and normalize
+        let embeddings: Vec<Embedding> = results
             .into_iter()
-            .map(|e| normalize_embedding(&e))
+            .map(|result| {
+                let embedding = match result {
+                    EmbeddingResult::DenseVector(v) => v,
+                    EmbeddingResult::MultiVector(vecs) => {
+                        // For multi-vector, take the mean
+                        if vecs.is_empty() {
+                            vec![0.0; self.config.dimensions]
+                        } else {
+                            let dim = vecs[0].len();
+                            let mut mean = vec![0.0f32; dim];
+                            for v in &vecs {
+                                for (i, val) in v.iter().enumerate() {
+                                    mean[i] += val;
+                                }
+                            }
+                            let count = vecs.len() as f32;
+                            for val in &mut mean {
+                                *val /= count;
+                            }
+                            mean
+                        }
+                    }
+                };
+                normalize_embedding(&embedding)
+            })
             .collect();
-
-        Ok(normalized)
-    }
-
-    /// Mean pooling with attention mask
-    fn mean_pool(
-        &self,
-        output: &ndarray::ArrayViewD<f32>,
-        encodings: &[tokenizers::Encoding],
-        max_len: usize,
-    ) -> Result<Vec<Embedding>> {
-        let batch_size = output.shape()[0];
-        let hidden_size = output.shape()[2];
-
-        let mut embeddings = Vec::with_capacity(batch_size);
-
-        for (i, encoding) in encodings.iter().enumerate() {
-            let seq_len = encoding.get_ids().len().min(max_len);
-            let mut pooled = vec![0.0f32; hidden_size];
-
-            // Sum over valid tokens (with attention)
-            for j in 0..seq_len {
-                for k in 0..hidden_size {
-                    pooled[k] += output[[i, j, k]];
-                }
-            }
-
-            // Average
-            let count = seq_len as f32;
-            for val in &mut pooled {
-                *val /= count;
-            }
-
-            embeddings.push(pooled);
-        }
 
         Ok(embeddings)
     }
@@ -329,8 +242,25 @@ mod tests {
 
     #[test]
     fn test_truncate_matryoshka() {
-        let embedding: Vec<f32> = (0..768).map(|i| i as f32).collect();
+        // Use 1024 dimensions to match the new default (bge-m3)
+        let embedding: Vec<f32> = (0..1024).map(|i| i as f32).collect();
         let truncated = truncate_matryoshka(&embedding, 256);
         assert_eq!(truncated.len(), 256);
+    }
+
+    #[test]
+    fn test_resolve_model() {
+        // Test known models
+        let (arch, id) = EmbeddingEngine::resolve_model("bge-m3").unwrap();
+        assert_eq!(arch, "BertModel");
+        assert_eq!(id, "BAAI/bge-m3");
+
+        // Test direct HF ID
+        let (arch, id) = EmbeddingEngine::resolve_model("BAAI/bge-m3").unwrap();
+        assert_eq!(arch, "BertModel");
+        assert_eq!(id, "BAAI/bge-m3");
+
+        // Test unknown model
+        assert!(EmbeddingEngine::resolve_model("unknown-model").is_err());
     }
 }

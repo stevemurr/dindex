@@ -115,7 +115,9 @@ pub struct ScrapingStats {
 pub struct ScrapingCoordinator {
     /// Configuration
     config: ScrapingConfig,
-    /// Local peer ID
+    /// Local peer ID - stored for potential future distributed coordination.
+    /// Currently passed to sub-components during initialization.
+    #[allow(dead_code)]
     local_peer_id: PeerId,
     /// Domain assignment
     domain_assignment: Arc<RwLock<DomainAssignment>>,

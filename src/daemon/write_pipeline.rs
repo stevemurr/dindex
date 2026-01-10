@@ -39,8 +39,8 @@ pub struct WritePipeline {
 
 impl WritePipeline {
     /// Create a new write pipeline
-    pub fn new(index_manager: Arc<IndexManager>, batch_size: usize) -> Self {
-        let (ingest_tx, ingest_rx) = mpsc::channel(1000);
+    pub fn new(_index_manager: Arc<IndexManager>, batch_size: usize) -> Self {
+        let (ingest_tx, _ingest_rx) = mpsc::channel(1000);
 
         // Note: The worker task is started separately via start()
         // to allow for proper shutdown handling

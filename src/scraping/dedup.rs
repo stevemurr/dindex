@@ -198,20 +198,17 @@ pub struct ContentDeduplicator {
     local_cache: LruCache<u64, DocumentId>,
     /// Maximum Hamming distance for near-duplicate detection
     max_distance: u32,
-    /// Local document ID (for new content registration)
-    local_node_id: String,
 }
 
 impl ContentDeduplicator {
     /// Create a new content deduplicator
-    pub fn new(cache_size: usize, max_distance: u32, local_node_id: String) -> Self {
+    pub fn new(cache_size: usize, max_distance: u32, _local_node_id: String) -> Self {
         // Use max(1) to ensure cache_size is at least 1
         let cache_capacity = NonZeroUsize::new(cache_size.max(1))
             .expect("max(1) guarantees non-zero");
         Self {
             local_cache: LruCache::new(cache_capacity),
             max_distance,
-            local_node_id,
         }
     }
 

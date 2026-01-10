@@ -6,7 +6,7 @@
 use super::registry::{DocumentRegistry, DuplicateCheckResult};
 use crate::chunking::TextSplitter;
 use crate::retrieval::HybridIndexer;
-use crate::types::{Chunk, ChunkId, ChunkMetadata, DocumentIdentity, Embedding};
+use crate::types::{Chunk, DocumentIdentity, Embedding};
 use anyhow::Result;
 use std::sync::Arc;
 use tracing::{debug, info};
