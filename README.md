@@ -1,5 +1,7 @@
 # DIndex
 
+> **Experimental**: This project is a work in progress and not ready for production use.
+
 **Decentralized Semantic Search Index for LLM Consumption**
 
 A federated semantic search system designed for LLM consumption, featuring CPU-efficient embeddings, lightweight vector indices, P2P networking resilient to node churn, and intelligent semantic routing.
