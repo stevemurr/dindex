@@ -29,11 +29,25 @@ public struct SearchFilters: Codable, Sendable {
     /// Filter by source URL prefix
     public let sourceUrlPrefix: String?
 
+    /// Filter where metadata key exactly equals value
+    public let metadataEquals: [String: String]?
+
+    /// Filter where metadata key's value is in the provided list
+    public let metadataContains: [String: [String]]?
+
     enum CodingKeys: String, CodingKey {
         case sourceUrlPrefix = "source_url_prefix"
+        case metadataEquals = "metadata_equals"
+        case metadataContains = "metadata_contains"
     }
 
-    public init(sourceUrlPrefix: String? = nil) {
+    public init(
+        sourceUrlPrefix: String? = nil,
+        metadataEquals: [String: String]? = nil,
+        metadataContains: [String: [String]]? = nil
+    ) {
         self.sourceUrlPrefix = sourceUrlPrefix
+        self.metadataEquals = metadataEquals
+        self.metadataContains = metadataContains
     }
 }

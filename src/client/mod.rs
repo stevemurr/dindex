@@ -64,6 +64,7 @@ pub async fn search(
             query: query.to_string(),
             top_k,
             format,
+            filters: None,
         })
         .await?;
 

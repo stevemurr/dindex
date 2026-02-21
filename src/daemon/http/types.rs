@@ -28,6 +28,10 @@ fn default_top_k() -> usize {
 pub struct SearchFilters {
     /// Filter by source URL prefix
     pub source_url_prefix: Option<String>,
+    /// Filter where metadata key exactly equals value
+    pub metadata_equals: Option<std::collections::HashMap<String, String>>,
+    /// Filter where metadata key's value is in the provided list
+    pub metadata_contains: Option<std::collections::HashMap<String, Vec<String>>>,
 }
 
 /// A single search result
@@ -152,6 +156,8 @@ pub struct DocumentJson {
     pub title: Option<String>,
     /// Optional source URL
     pub url: Option<String>,
+    /// Optional custom metadata (key-value pairs)
+    pub metadata: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Index response

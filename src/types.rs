@@ -323,6 +323,10 @@ pub struct QueryFilters {
     pub min_timestamp: Option<DateTime<Utc>>,
     pub max_timestamp: Option<DateTime<Utc>>,
     pub document_ids: Option<Vec<DocumentId>>,
+    /// Filter where metadata key exactly equals value
+    pub metadata_equals: Option<HashMap<String, String>>,
+    /// Filter where metadata key's value is in the provided list
+    pub metadata_contains: Option<HashMap<String, Vec<String>>>,
 }
 
 /// Node centroid for semantic routing

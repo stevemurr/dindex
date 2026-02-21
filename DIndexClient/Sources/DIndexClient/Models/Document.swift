@@ -11,10 +11,19 @@ public struct Document: Codable, Sendable {
     /// Optional source URL
     public let url: String?
 
-    public init(content: String, title: String? = nil, url: String? = nil) {
+    /// Optional custom metadata (key-value pairs)
+    public let metadata: [String: String]?
+
+    public init(
+        content: String,
+        title: String? = nil,
+        url: String? = nil,
+        metadata: [String: String]? = nil
+    ) {
         self.content = content
         self.title = title
         self.url = url
+        self.metadata = metadata
     }
 }
 

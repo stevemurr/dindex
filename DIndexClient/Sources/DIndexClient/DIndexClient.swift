@@ -147,3 +147,63 @@ extension DIndexClient {
         return try await index(document: document)
     }
 }
+
+// MARK: - Category-based Convenience Extensions
+
+extension DIndexClient {
+    /// Index content with category tags
+    ///
+    /// Categories are stored as a comma-separated string in the "categories" metadata key.
+    /// This allows filtering during search using metadata_contains filter.
+    ///
+    /// - Parameters:
+    ///   - content: Document content
+    ///   - title: Optional title
+    ///   - url: Optional source URL
+    ///   - categories: Array of category tags (e.g., ["history", "web"])
+    /// - Returns: Indexing result
+    public func index(
+        content: String,
+        title: String? = nil,
+        url: String? = nil,
+        categories: [String]
+    ) async throws -> IndexResponse {
+        let metadata = ["categories": categories.joined(separator: ",")]
+        let document = Document(content: content, title: title, url: url, metadata: metadata)
+        return try await index(document: document)
+    }
+
+    /// Search with category filter
+    ///
+    /// Filters results to only include documents that have at least one of the specified categories.
+    ///
+    /// - Parameters:
+    ///   - query: The search query text
+    ///   - categories: Array of category tags to filter by (results must have at least one)
+    ///   - topK: Number of results to return (default: 10)
+    /// - Returns: Search response with filtered results
+    public func search(
+        query: String,
+        categories: [String],
+        topK: Int = 10
+    ) async throws -> SearchResponse {
+        let filters = SearchFilters(metadataContains: ["categories": categories])
+        return try await search(query: query, topK: topK, filters: filters)
+    }
+
+    /// Search with category filter and return just the results
+    ///
+    /// - Parameters:
+    ///   - query: The search query text
+    ///   - categories: Array of category tags to filter by
+    ///   - topK: Number of results to return (default: 10)
+    /// - Returns: Array of search results
+    public func searchResults(
+        query: String,
+        categories: [String],
+        topK: Int = 10
+    ) async throws -> [SearchResult] {
+        let response = try await search(query: query, categories: categories, topK: topK)
+        return response.results
+    }
+}

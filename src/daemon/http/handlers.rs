@@ -40,10 +40,19 @@ pub async fn search(
 ) -> impl IntoResponse {
     debug!("HTTP search request: query={}, top_k={}", request.query, request.top_k);
 
+    // Convert HTTP filters to QueryFilters
+    let filters = request.filters.map(|f| crate::types::QueryFilters {
+        source_url_prefix: f.source_url_prefix,
+        metadata_equals: f.metadata_equals,
+        metadata_contains: f.metadata_contains,
+        ..Default::default()
+    });
+
     let ipc_request = Request::Search {
         query: request.query,
         top_k: request.top_k,
         format: OutputFormat::Json,
+        filters,
     };
 
     match state.handler.handle(ipc_request).await {
@@ -169,9 +178,14 @@ pub async fn index_documents(
     // Note: In a real implementation, we'd chunk the documents properly.
     // For now, we send each document as a single chunk.
     for doc in &request.documents {
-        let document = Document::new(&doc.content)
+        let mut document = Document::new(&doc.content)
             .with_title(doc.title.clone().unwrap_or_default())
             .with_url(doc.url.clone().unwrap_or_default());
+
+        // Copy metadata from document request
+        if let Some(ref metadata) = doc.metadata {
+            document.metadata = metadata.clone();
+        }
 
         let chunk = crate::types::Chunk {
             metadata: crate::types::ChunkMetadata::new(
@@ -186,6 +200,8 @@ pub async fn index_documents(
         let mut chunk = chunk;
         chunk.metadata.source_title = doc.title.clone();
         chunk.metadata.source_url = doc.url.clone();
+        // Copy extra metadata from document
+        chunk.metadata.extra = document.metadata.clone();
 
         let payload = protocol::ChunkPayload {
             content: chunk.content.clone(),

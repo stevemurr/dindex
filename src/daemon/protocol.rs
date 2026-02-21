@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::types::{Chunk, ChunkMetadata, SearchResult};
+use crate::types::{Chunk, ChunkMetadata, QueryFilters, SearchResult};
 
 /// Output format for search results
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -92,6 +92,7 @@ pub enum Request {
         query: String,
         top_k: usize,
         format: OutputFormat,
+        filters: Option<QueryFilters>,
     },
 
     // ============ Write Operations ============
@@ -292,6 +293,7 @@ mod tests {
             query: "test query".to_string(),
             top_k: 10,
             format: OutputFormat::Json,
+            filters: None,
         };
 
         let encoded = encode_message(&req).unwrap();

@@ -82,7 +82,8 @@ impl RequestHandler {
                 query,
                 top_k,
                 format: _,
-            } => self.handle_search(query, top_k).await,
+                filters,
+            } => self.handle_search(query, top_k, filters).await,
 
             // Write operations
             Request::IndexDocuments { stream_id } => self.handle_index_documents(stream_id).await,
@@ -115,13 +116,19 @@ impl RequestHandler {
 
     // ============ Query Handlers ============
 
-    async fn handle_search(&self, query: String, top_k: usize) -> Response {
+    async fn handle_search(
+        &self,
+        query: String,
+        top_k: usize,
+        filters: Option<crate::types::QueryFilters>,
+    ) -> Response {
         // Check if we have a query coordinator for distributed search
         let coordinator = self.query_coordinator.read().clone();
 
         if let Some(coordinator) = coordinator {
             // Distributed search via QueryCoordinator
-            let query_obj = crate::types::Query::new(query, top_k);
+            let mut query_obj = crate::types::Query::new(query, top_k);
+            query_obj.filters = filters;
             match coordinator.execute(&query_obj).await {
                 Ok(aggregated) => {
                     info!(
@@ -142,7 +149,7 @@ impl RequestHandler {
             }
         } else {
             // Local-only search
-            match self.index_manager.search(&query, top_k) {
+            match self.index_manager.search_with_filters(&query, top_k, filters.as_ref()) {
                 Ok((results, query_time_ms)) => Response::SearchResults {
                     results,
                     query_time_ms,

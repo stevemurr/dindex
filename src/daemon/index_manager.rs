@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::embedding::{hash_based_embedding, EmbeddingEngine};
 use crate::index::{ChunkStorage, VectorIndex};
 use crate::retrieval::{Bm25Index, HybridIndexer, HybridRetriever};
-use crate::types::{Chunk, Query, SearchResult};
+use crate::types::{Chunk, Query, QueryFilters, SearchResult};
 
 use super::protocol::IndexStats;
 
@@ -94,17 +94,40 @@ impl IndexManager {
 
     /// Search the index with a query
     pub fn search(&self, query_text: &str, top_k: usize) -> Result<(Vec<SearchResult>, u64)> {
+        self.search_with_filters(query_text, top_k, None)
+    }
+
+    /// Search the index with a query and optional filters
+    pub fn search_with_filters(
+        &self,
+        query_text: &str,
+        top_k: usize,
+        filters: Option<&QueryFilters>,
+    ) -> Result<(Vec<SearchResult>, u64)> {
         let start = Instant::now();
-        debug!("Searching for: {} (top_k={})", query_text, top_k);
+        debug!("Searching for: {} (top_k={}, filters={:?})", query_text, top_k, filters.is_some());
 
         // Generate query embedding (uses real engine if available, hash-based fallback otherwise)
         let query_embedding = self.generate_embedding(query_text);
 
-        // Create query
-        let query = Query::new(query_text, top_k);
+        // Create query with filters
+        let mut query = Query::new(query_text, top_k);
+        query.filters = filters.cloned();
 
-        // Execute search
-        let results = self.retriever.search(&query, Some(&query_embedding))?;
+        // Execute search - request more results if filtering
+        let fetch_k = if filters.is_some() { top_k * 3 } else { top_k };
+        let search_query = Query {
+            top_k: fetch_k,
+            ..query.clone()
+        };
+
+        let mut results = self.retriever.search(&search_query, Some(&query_embedding))?;
+
+        // Apply metadata filtering if specified
+        if let Some(filters) = filters {
+            results = Self::filter_by_metadata(results, filters);
+            results.truncate(top_k);
+        }
 
         let query_time_ms = start.elapsed().as_millis() as u64;
         debug!(
@@ -114,6 +137,55 @@ impl IndexManager {
         );
 
         Ok((results, query_time_ms))
+    }
+
+    /// Filter search results by metadata constraints
+    fn filter_by_metadata(results: Vec<SearchResult>, filters: &QueryFilters) -> Vec<SearchResult> {
+        results
+            .into_iter()
+            .filter(|result| {
+                let extra = &result.chunk.metadata.extra;
+
+                // Check source_url_prefix
+                if let Some(ref prefix) = filters.source_url_prefix {
+                    if let Some(ref url) = result.chunk.metadata.source_url {
+                        if !url.starts_with(prefix) {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+
+                // Check metadata_equals (all must match)
+                if let Some(ref equals) = filters.metadata_equals {
+                    for (key, value) in equals {
+                        if extra.get(key) != Some(value) {
+                            return false;
+                        }
+                    }
+                }
+
+                // Check metadata_contains (value must be in allowed list)
+                if let Some(ref contains) = filters.metadata_contains {
+                    for (key, allowed_values) in contains {
+                        if let Some(actual) = extra.get(key) {
+                            // For comma-separated category values, check if any allowed value is present
+                            let actual_values: std::collections::HashSet<&str> =
+                                actual.split(',').map(|s| s.trim()).collect();
+                            let has_match = allowed_values.iter().any(|v| actual_values.contains(v.as_str()));
+                            if !has_match {
+                                return false;
+                            }
+                        } else {
+                            return false;
+                        }
+                    }
+                }
+
+                true
+            })
+            .collect()
     }
 
     /// Index a batch of chunks with their embeddings
