@@ -12,7 +12,7 @@ A federated semantic search system designed for LLM consumption, featuring CPU-e
 - **Vector Search**: USearch HNSW index with INT8 scalar quantization
 - **Hybrid Retrieval**: Combines dense vector search + BM25 lexical search with RRF fusion
 - **Semantic Routing**: Content centroids and LSH signatures for efficient query routing
-- **CPU-Optimized**: Designed for nodes without GPU access, using ONNX Runtime for inference
+- **CPU/GPU Flexible**: Uses candle backend with CUDA/Metal support, falls back to CPU
 - **LLM-Ready**: Rich metadata structure for retrieved chunks
 
 ## Architecture
@@ -22,8 +22,8 @@ A federated semantic search system designed for LLM consumption, featuring CPU-e
 │                         DECENTRALIZED NODE                               │
 │  ┌─────────────────┐  ┌──────────────────┐  ┌───────────────────────┐  │
 │  │  rust-libp2p    │  │ Embedding Engine │  │  Vector Index         │  │
-│  │  - Kademlia DHT │  │ (ort + ONNX)     │  │  (USearch HNSW)       │  │
-│  │  - GossipSub    │  │ - nomic-embed    │  │  - INT8 quantized     │  │
+│  │  - Kademlia DHT │  │ (candle)         │  │  (USearch HNSW)       │  │
+│  │  - GossipSub    │  │ - bge-m3         │  │  - INT8 quantized     │  │
 │  │  - QUIC         │  │ - INT8 inference │  │  - Memory-mapped      │  │
 │  │  - AutoNAT      │  └────────┬─────────┘  │  - 50-200 centroids   │  │
 │  └────────┬────────┘           │            └───────────┬───────────┘  │
@@ -41,14 +41,34 @@ A federated semantic search system designed for LLM consumption, featuring CPU-e
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/dindex
+git clone https://github.com/stevemurr/dindex
 cd dindex
 
-# Build
+# Build (CPU only)
 cargo build --release
 
 # Or install directly
 cargo install --path .
+```
+
+### macOS (Apple Silicon)
+
+For GPU acceleration on Apple Silicon Macs, build with Metal support:
+
+```bash
+# Build with Metal GPU acceleration
+cargo build --release --features metal
+```
+
+Metal provides significant speedups for embedding generation. The binary will automatically use the GPU when available and fall back to CPU otherwise.
+
+### Linux with CUDA
+
+For NVIDIA GPU acceleration:
+
+```bash
+# Build with CUDA support
+cargo build --release --features cuda
 ```
 
 ### Docker Installation
@@ -69,8 +89,8 @@ docker compose build
 # Initialize configuration
 docker run --rm -v dindex-data:/data dindex init --data-dir /data
 
-# Download embedding model
-docker run --rm -v dindex-data:/data dindex download nomic-embed-text-v1.5
+# Download embedding model (optional - auto-downloads on first use)
+docker run --rm -v dindex-data:/data dindex download bge-m3
 
 # Start P2P node
 docker run -d --name dindex \
@@ -139,8 +159,8 @@ docker build --build-arg FEATURES="onnx" -t dindex:onnx .
 # Initialize configuration
 dindex init
 
-# Download embedding model
-dindex download nomic-embed-text-v1.5
+# Download embedding model (optional - auto-downloads on first use)
+dindex download bge-m3
 
 # Index a document
 dindex index ./document.txt --title "My Document"
@@ -151,6 +171,8 @@ dindex search "your query here" --top-k 10
 # Start P2P node
 dindex start --listen /ip4/0.0.0.0/udp/4001/quic-v1
 ```
+
+> **Note**: The first embedding operation will download the BGE-M3 model (~2GB) from HuggingFace.
 
 ## Usage
 
@@ -216,11 +238,11 @@ replication_factor = 3
 query_timeout_secs = 10
 
 [embedding]
-model_name = "nomic-embed-text-v1.5"
-dimensions = 768
+model_name = "bge-m3"
+dimensions = 1024
 truncated_dimensions = 256
 max_sequence_length = 8192
-quantize_int8 = true
+use_gpu = true  # Auto-detected (CUDA/Metal)
 
 [index]
 hnsw_m = 16
@@ -252,12 +274,15 @@ candidate_nodes = 5
 
 ## Supported Embedding Models
 
-| Model | Parameters | Dimensions | CPU Latency | Best For |
-|-------|------------|------------|-------------|----------|
-| nomic-embed-text-v1.5 | 137M | 768 | ~105ms | Matryoshka support |
-| e5-small-v2 | 33M | 384 | ~16ms | Speed-critical |
-| bge-base-en-v1.5 | 109M | 768 | ~82ms | General-purpose |
-| all-MiniLM-L6-v2 | 22.7M | 384 | ~10ms | Lightweight |
+| Model | Dimensions | Best For |
+|-------|------------|----------|
+| bge-m3 (default) | 1024 | Multilingual, Matryoshka support |
+| bge-base-en-v1.5 | 768 | English general-purpose |
+| bge-large-en-v1.5 | 1024 | High quality English |
+| e5-small-v2 | 384 | Speed-critical |
+| e5-base-v2 | 768 | Balanced |
+| all-MiniLM-L6-v2 | 384 | Lightweight |
+| jina-embeddings-v2-base-en | 768 | Long context (8K tokens) |
 
 ## Output Format for LLM Consumption
 

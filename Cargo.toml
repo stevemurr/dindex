@@ -38,8 +38,8 @@ futures = "0.3"
 # Vector index
 usearch = "2"
 
-# Embedding inference
-embed_anything = { path = "/home/murr/Code/EmbedAnything/rust" }
+# Embedding inference (from git - crates.io 0.6.7 has candle compatibility bug)
+embed_anything = { git = "https://github.com/StarlightSearch/EmbedAnything", branch = "main" }
 ndarray = "0.17"
 
 # Serialization
@@ -122,9 +122,8 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
+# Pin candle to 0.9.1 for embed_anything compatibility
 [patch.crates-io]
-cudarc = { git = "https://github.com/coreylowman/cudarc", branch = "main" }
-candle-core = { git = "https://github.com/huggingface/candle", branch = "main" }
-candle-nn = { git = "https://github.com/huggingface/candle", branch = "main" }
-candle-transformers = { git = "https://github.com/huggingface/candle", branch = "main" }
-candle-kernels = { git = "https://github.com/huggingface/candle", branch = "main" }
+candle-core = { git = "https://github.com/huggingface/candle", tag = "0.9.1" }
+candle-nn = { git = "https://github.com/huggingface/candle", tag = "0.9.1" }
+candle-transformers = { git = "https://github.com/huggingface/candle", tag = "0.9.1" }
