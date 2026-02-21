@@ -194,6 +194,106 @@ pub fn create_config(model_name: &str) -> Result<EmbeddingConfig> {
     })
 }
 
+/// Check if a model is cached in HuggingFace hub
+///
+/// Returns (cache_path, is_complete) if found
+/// A model is considered complete if it has model weights (safetensors or pytorch)
+pub fn check_model_cached(model_name: &str) -> Option<std::path::PathBuf> {
+    let (path, complete) = check_model_cached_detailed(model_name)?;
+    if complete {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Detailed check for model cache status
+///
+/// Returns (cache_path, is_complete)
+pub fn check_model_cached_detailed(model_name: &str) -> Option<(std::path::PathBuf, bool)> {
+    let model_info = ModelRegistry::get(model_name)?;
+    let hf_id = &model_info.huggingface_id;
+
+    // HuggingFace cache structure: ~/.cache/huggingface/hub/models--{org}--{model}
+    let home = std::env::var("HOME").ok()?;
+    let cache_dir = std::path::PathBuf::from(home).join(".cache/huggingface/hub");
+
+    // Convert "BAAI/bge-m3" to "models--BAAI--bge-m3"
+    let model_dir_name = format!("models--{}", hf_id.replace('/', "--"));
+    let model_path = cache_dir.join(&model_dir_name);
+
+    if !model_path.exists() {
+        return None;
+    }
+
+    // Check blobs directory for model weights
+    let blobs_dir = model_path.join("blobs");
+    let mut has_weights = false;
+
+    if let Ok(entries) = std::fs::read_dir(&blobs_dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                let size = meta.len();
+                // Model weights are typically > 100MB
+                if size > 100_000_000 {
+                    has_weights = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Also check if snapshots exist
+    let snapshots_dir = model_path.join("snapshots");
+    let has_snapshots = snapshots_dir.exists()
+        && snapshots_dir.read_dir().ok()?.next().is_some();
+
+    if has_snapshots {
+        Some((model_path, has_weights))
+    } else {
+        None
+    }
+}
+
+/// Get the size of cached model files
+pub fn get_cached_model_size(model_name: &str) -> Option<u64> {
+    let cache_path = check_model_cached(model_name)?;
+
+    fn dir_size(path: &std::path::Path) -> u64 {
+        let mut size = 0;
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    size += dir_size(&path);
+                } else if let Ok(meta) = path.metadata() {
+                    size += meta.len();
+                }
+            }
+        }
+        size
+    }
+
+    Some(dir_size(&cache_path))
+}
+
+/// Format bytes as human-readable size
+pub fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} bytes", bytes)
+    }
+}
+
 /// Print information about available models
 pub fn print_models() {
     println!("Available embedding models:\n");
