@@ -114,14 +114,14 @@ enum Commands {
     /// Download embedding model
     Download {
         /// Model name (default: bge-m3, 1024 dimensions, multilingual)
-        #[arg(default_value = "bge-m3")]
+        #[arg(default_value = "all-MiniLM-L6-v2")]
         model: String,
     },
 
     /// Check if embedding model is downloaded, download if needed
     CheckModel {
         /// Model name (default: bge-m3)
-        #[arg(default_value = "bge-m3")]
+        #[arg(default_value = "all-MiniLM-L6-v2")]
         model: String,
 
         /// Only check, don't download if missing

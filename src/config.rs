@@ -120,12 +120,12 @@ fn default_use_gpu() -> bool {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            model_name: "bge-m3".to_string(),
+            model_name: "all-MiniLM-L6-v2".to_string(),
             model_path: None,
             tokenizer_path: None,
-            dimensions: 1024,
-            truncated_dimensions: 256,
-            max_sequence_length: 8192,
+            dimensions: 384,  // all-MiniLM-L6-v2 dimensions
+            truncated_dimensions: 384,  // No truncation for this model
+            max_sequence_length: 256,  // all-MiniLM-L6-v2 max sequence
             quantize_int8: false,
             num_threads: num_cpus::get().min(8),
             use_gpu: default_use_gpu(),

@@ -29,14 +29,8 @@ impl ModelRegistry {
     /// Get info for a known model
     pub fn get(model_name: &str) -> Option<ModelInfo> {
         match model_name {
-            // BGE-M3 - Default model, excellent multilingual support
-            "bge-m3" => Some(ModelInfo {
-                name: "bge-m3".to_string(),
-                huggingface_id: "BAAI/bge-m3".to_string(),
-                dimensions: 1024,
-                max_sequence_length: 8192,
-                supports_matryoshka: true,
-            }),
+            // BGE-M3 - NOTE: Currently unsupported (uses XLMRobertaModel architecture)
+            // "bge-m3" => unsupported - use bge-base-en-v1.5 instead
             // BGE models - English optimized
             "bge-large-en-v1.5" => Some(ModelInfo {
                 name: "bge-large-en-v1.5".to_string(),
@@ -138,30 +132,26 @@ impl ModelRegistry {
     /// List all known models
     pub fn list() -> Vec<&'static str> {
         vec![
-            "bge-m3",
-            "bge-large-en-v1.5",
-            "bge-base-en-v1.5",
-            "bge-small-en-v1.5",
-            "e5-large-v2",
-            "e5-base-v2",
-            "e5-small-v2",
-            "all-MiniLM-L6-v2",
+            "all-MiniLM-L6-v2",  // Default - fast and reliable
             "all-MiniLM-L12-v2",
-            "jina-embeddings-v2-small-en",
-            "jina-embeddings-v2-base-en",
-            "nomic-embed-text-v1.5",
+            "bge-base-en-v1.5",
+            "bge-large-en-v1.5",
+            "bge-small-en-v1.5",
+            "e5-base-v2",
+            "e5-large-v2",
+            "e5-small-v2",
+            // Note: bge-m3 not supported (uses XLMRobertaModel)
+            // Note: jina models may have compatibility issues
         ]
     }
 
     /// Get recommended model for a use case
     pub fn recommended(use_case: &str) -> &'static str {
         match use_case {
-            "multilingual" => "bge-m3",
             "english" => "bge-base-en-v1.5",
             "fast" | "small" => "all-MiniLM-L6-v2",
-            "quality" | "best" => "bge-m3",
-            "long-context" => "bge-m3",
-            _ => "bge-m3",
+            "quality" | "best" => "bge-large-en-v1.5",
+            _ => "all-MiniLM-L6-v2",
         }
     }
 }
@@ -304,8 +294,8 @@ pub fn print_models() {
         if let Some(info) = ModelRegistry::get(name) {
             let notes = if info.supports_matryoshka {
                 "Matryoshka"
-            } else if name.contains("bge-m3") {
-                "Multilingual, recommended"
+            } else if name == "all-MiniLM-L6-v2" {
+                "Default, fast"
             } else {
                 ""
             };
@@ -316,7 +306,8 @@ pub fn print_models() {
         }
     }
 
-    println!("\nDefault: bge-m3 (1024 dimensions, multilingual, best quality)");
-    println!("\nYou can also use any HuggingFace model ID directly, e.g.:");
-    println!("  model_name = \"BAAI/bge-m3\"");
+    println!("\nDefault: all-MiniLM-L6-v2 (384 dimensions, fast, English)");
+    println!("\nYou can also use any HuggingFace model ID with BertModel architecture, e.g.:");
+    println!("  model_name = \"BAAI/bge-base-en-v1.5\"");
+    println!("\nNote: bge-m3 is NOT supported (uses XLMRobertaModel architecture)");
 }

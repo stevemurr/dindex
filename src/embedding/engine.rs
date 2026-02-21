@@ -6,7 +6,7 @@
 use crate::config::EmbeddingConfig;
 use crate::types::Embedding;
 use anyhow::{Context, Result};
-use embed_anything::embeddings::embed::{Embedder, EmbedderBuilder, EmbeddingResult};
+use embed_anything::embeddings::embed::{Embedder, EmbeddingResult};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -31,16 +31,13 @@ impl EmbeddingEngine {
             config.model_name
         );
 
-        // Map model name to HuggingFace model ID and architecture
-        let (architecture, model_id) = Self::resolve_model(&config.model_name)?;
+        // Resolve model name to HuggingFace model ID
+        let model_id = Self::resolve_model_id(&config.model_name)?;
 
-        info!("Loading model: {} (architecture: {})", model_id, architecture);
+        info!("Loading model: {}", model_id);
 
-        // Build the embedder
-        let embedder = EmbedderBuilder::new()
-            .model_architecture(&architecture)
-            .model_id(Some(&model_id))
-            .from_pretrained_hf()
+        // Use Embedder::from_pretrained_hf which auto-detects architecture from config.json
+        let embedder = Embedder::from_pretrained_hf(&model_id, None, None, None)
             .context("Failed to load embedding model")?;
 
         info!(
@@ -54,41 +51,36 @@ impl EmbeddingEngine {
         })
     }
 
-    /// Resolve model name to (architecture, huggingface_id)
-    fn resolve_model(model_name: &str) -> Result<(String, String)> {
+    /// Resolve model name to HuggingFace model ID
+    fn resolve_model_id(model_name: &str) -> Result<String> {
         match model_name {
-            // BGE models (use BertModel architecture)
-            "bge-m3" => Ok(("BertModel".to_string(), "BAAI/bge-m3".to_string())),
-            "bge-base-en-v1.5" => Ok(("BertModel".to_string(), "BAAI/bge-base-en-v1.5".to_string())),
-            "bge-large-en-v1.5" => Ok(("BertModel".to_string(), "BAAI/bge-large-en-v1.5".to_string())),
-            "bge-small-en-v1.5" => Ok(("BertModel".to_string(), "BAAI/bge-small-en-v1.5".to_string())),
+            // Sentence transformers (default, fast)
+            "all-MiniLM-L6-v2" => Ok("sentence-transformers/all-MiniLM-L6-v2".to_string()),
+            "all-MiniLM-L12-v2" => Ok("sentence-transformers/all-MiniLM-L12-v2".to_string()),
+
+            // BGE models (English, BertModel architecture)
+            "bge-base-en-v1.5" => Ok("BAAI/bge-base-en-v1.5".to_string()),
+            "bge-large-en-v1.5" => Ok("BAAI/bge-large-en-v1.5".to_string()),
+            "bge-small-en-v1.5" => Ok("BAAI/bge-small-en-v1.5".to_string()),
 
             // E5 models
-            "e5-small-v2" => Ok(("BertModel".to_string(), "intfloat/e5-small-v2".to_string())),
-            "e5-base-v2" => Ok(("BertModel".to_string(), "intfloat/e5-base-v2".to_string())),
-            "e5-large-v2" => Ok(("BertModel".to_string(), "intfloat/e5-large-v2".to_string())),
+            "e5-small-v2" => Ok("intfloat/e5-small-v2".to_string()),
+            "e5-base-v2" => Ok("intfloat/e5-base-v2".to_string()),
+            "e5-large-v2" => Ok("intfloat/e5-large-v2".to_string()),
 
-            // Sentence transformers
-            "all-MiniLM-L6-v2" => Ok(("BertModel".to_string(), "sentence-transformers/all-MiniLM-L6-v2".to_string())),
-            "all-MiniLM-L12-v2" => Ok(("BertModel".to_string(), "sentence-transformers/all-MiniLM-L12-v2".to_string())),
+            // Note: bge-m3 uses XLMRobertaModel which is not supported by embed_anything
+            "bge-m3" => Err(anyhow::anyhow!(
+                "bge-m3 is not supported (uses XLMRobertaModel architecture). \
+                 Use bge-base-en-v1.5 or all-MiniLM-L6-v2 instead."
+            )),
 
-            // Jina models
-            "jina-embeddings-v2-small-en" => Ok(("JinaBertForMaskedLM".to_string(), "jinaai/jina-embeddings-v2-small-en".to_string())),
-            "jina-embeddings-v2-base-en" => Ok(("JinaBertForMaskedLM".to_string(), "jinaai/jina-embeddings-v2-base-en".to_string())),
-
-            // Legacy nomic model (may not be fully supported)
-            "nomic-embed-text-v1.5" => Ok(("BertModel".to_string(), "nomic-ai/nomic-embed-text-v1.5".to_string())),
-
-            // Allow direct HuggingFace model IDs
-            name if name.contains('/') => {
-                // Assume BertModel architecture for direct HF IDs
-                Ok(("BertModel".to_string(), name.to_string()))
-            }
+            // Allow direct HuggingFace model IDs (must use BertModel architecture)
+            name if name.contains('/') => Ok(name.to_string()),
 
             _ => Err(anyhow::anyhow!(
-                "Unknown model: {}. Supported models: bge-m3, bge-base-en-v1.5, bge-large-en-v1.5, \
-                 e5-small-v2, e5-base-v2, e5-large-v2, all-MiniLM-L6-v2, jina-embeddings-v2-small-en, \
-                 or provide a HuggingFace model ID (e.g., 'BAAI/bge-m3')",
+                "Unknown model: {}. Supported models: all-MiniLM-L6-v2, bge-base-en-v1.5, \
+                 bge-large-en-v1.5, e5-base-v2, e5-large-v2, or a HuggingFace model ID \
+                 with BertModel architecture",
                 model_name
             ))
         }
@@ -249,18 +241,22 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_model() {
+    fn test_resolve_model_id() {
         // Test known models
-        let (arch, id) = EmbeddingEngine::resolve_model("bge-m3").unwrap();
-        assert_eq!(arch, "BertModel");
-        assert_eq!(id, "BAAI/bge-m3");
+        let id = EmbeddingEngine::resolve_model_id("all-MiniLM-L6-v2").unwrap();
+        assert_eq!(id, "sentence-transformers/all-MiniLM-L6-v2");
+
+        let id = EmbeddingEngine::resolve_model_id("bge-base-en-v1.5").unwrap();
+        assert_eq!(id, "BAAI/bge-base-en-v1.5");
 
         // Test direct HF ID
-        let (arch, id) = EmbeddingEngine::resolve_model("BAAI/bge-m3").unwrap();
-        assert_eq!(arch, "BertModel");
-        assert_eq!(id, "BAAI/bge-m3");
+        let id = EmbeddingEngine::resolve_model_id("BAAI/bge-base-en-v1.5").unwrap();
+        assert_eq!(id, "BAAI/bge-base-en-v1.5");
+
+        // Test unsupported model (bge-m3 uses XLMRobertaModel)
+        assert!(EmbeddingEngine::resolve_model_id("bge-m3").is_err());
 
         // Test unknown model
-        assert!(EmbeddingEngine::resolve_model("unknown-model").is_err());
+        assert!(EmbeddingEngine::resolve_model_id("unknown-model").is_err());
     }
 }
