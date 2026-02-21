@@ -104,6 +104,11 @@ quick-xml = "0.37"
 # PDF extraction
 pdf-extract = "0.7"
 
+# HTTP API server
+axum = { version = "0.7", features = ["tokio", "json"] }
+tower = { version = "0.4", features = ["timeout", "limit"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
 # Optional: ONNX reranking (enable with --features onnx)
 # Note: ort version must match embed_anything's requirement (2.0.0-rc.9)
 ort = { version = "=2.0.0-rc.10", optional = true }

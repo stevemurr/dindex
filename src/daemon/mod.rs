@@ -50,6 +50,7 @@
 //! ```
 
 pub mod handler;
+pub mod http;
 pub mod index_manager;
 pub mod jobs;
 pub mod lifecycle;
@@ -71,3 +72,4 @@ pub use protocol::{
 pub use recovery::{RecoveryManager, RecoveryResult, RecoveryState};
 pub use server::IpcServer;
 pub use write_pipeline::WritePipeline;
+pub use http::HttpServer;

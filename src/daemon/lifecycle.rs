@@ -17,6 +17,7 @@ use crate::config::{Config, EmbeddingConfig};
 use crate::embedding::EmbeddingEngine;
 
 use super::handler::RequestHandler;
+use super::http::HttpServer;
 use super::index_manager::IndexManager;
 use super::server::IpcServer;
 use super::write_pipeline::WritePipeline;
@@ -26,6 +27,7 @@ const PID_FILE_NAME: &str = "dindex.pid";
 
 /// Daemon instance managing all components
 pub struct Daemon {
+    config: Config,
     index_manager: Arc<IndexManager>,
     handler: Arc<RequestHandler>,
     server: IpcServer,
@@ -103,13 +105,8 @@ impl Daemon {
         info!("Data directory: {}", config.node.data_dir.display());
         info!("Socket path: {}", server.socket_path().display());
 
-        // Note: config, embedding_engine, and write_pipeline are not stored in Daemon
-        // because they've been distributed to the components that need them:
-        // - config -> IndexManager, RequestHandler
-        // - embedding_engine -> IndexManager (via set_embedding_engine)
-        // - write_pipeline -> RequestHandler
-
         Ok(Self {
+            config,
             index_manager,
             handler,
             server,
@@ -139,7 +136,7 @@ impl Daemon {
             }
         }
 
-        let server = IpcServer::new(socket_path.clone(), handler);
+        let server = IpcServer::new(socket_path.clone(), handler.clone());
         let server_handle = tokio::spawn(async move {
             info!("IPC server task starting...");
             match server.run(shutdown_rx_server).await {
@@ -147,6 +144,26 @@ impl Daemon {
                 Err(e) => error!("IPC server failed: {}", e),
             }
         });
+
+        // Start HTTP server if enabled
+        let http_handle = if self.config.http.enabled {
+            let http_config = self.config.http.clone();
+            let http_handler = self.handler.clone();
+            let shutdown_rx_http = self.shutdown_tx.subscribe();
+
+            info!("Starting HTTP API server on: {}", http_config.listen_addr);
+
+            let http_server = HttpServer::new(http_config, http_handler);
+            Some(tokio::spawn(async move {
+                info!("HTTP server task starting...");
+                match http_server.run(shutdown_rx_http).await {
+                    Ok(()) => info!("HTTP server shut down cleanly"),
+                    Err(e) => error!("HTTP server failed: {}", e),
+                }
+            }))
+        } else {
+            None
+        };
 
         // Wait for shutdown signal (Ctrl+C or SIGTERM)
         tokio::select! {
@@ -164,8 +181,11 @@ impl Daemon {
         // Trigger shutdown
         let _ = self.shutdown_tx.send(());
 
-        // Wait for server to stop
+        // Wait for servers to stop
         let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+        if let Some(http_handle) = http_handle {
+            let _ = tokio::time::timeout(Duration::from_secs(5), http_handle).await;
+        }
 
         // Final cleanup
         self.shutdown().await?;

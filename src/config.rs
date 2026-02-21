@@ -96,6 +96,9 @@ pub struct Config {
     /// Daemon configuration
     #[serde(default)]
     pub daemon: DaemonConfig,
+    /// HTTP API server configuration
+    #[serde(default)]
+    pub http: HttpConfig,
 }
 
 impl Default for Config {
@@ -111,6 +114,7 @@ impl Default for Config {
             bulk_import: BulkImportConfig::default(),
             dedup: DedupConfig::default(),
             daemon: DaemonConfig::default(),
+            http: HttpConfig::default(),
         }
     }
 }
@@ -523,6 +527,30 @@ impl Default for DaemonConfig {
             batch_size: 100,
             commit_interval_secs: 30,
             max_pending_writes: 10000,
+        }
+    }
+}
+
+/// HTTP API server configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpConfig {
+    /// Enable HTTP API server
+    pub enabled: bool,
+    /// Listen address for HTTP server (e.g., "0.0.0.0:8080")
+    pub listen_addr: String,
+    /// API keys for authentication (empty = no auth required)
+    pub api_keys: Vec<String>,
+    /// Enable CORS (useful for browser-based clients)
+    pub cors_enabled: bool,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addr: "127.0.0.1:8080".to_string(),
+            api_keys: Vec::new(),
+            cors_enabled: false,
         }
     }
 }

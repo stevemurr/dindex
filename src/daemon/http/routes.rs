@@ -1,0 +1,34 @@
+//! HTTP API Route Definitions
+//!
+//! Defines the REST API routes for dindex.
+
+use axum::{
+    middleware,
+    routing::{get, post},
+    Router,
+};
+
+use super::auth::{auth_middleware, AuthState};
+use super::handlers::{self, AppState};
+
+/// Create the API router with all routes
+pub fn create_router(app_state: AppState, auth_state: AuthState) -> Router {
+    // API v1 routes
+    let api_v1 = Router::new()
+        // Health check (no auth required)
+        .route("/health", get(handlers::health))
+        // Protected routes
+        .route("/search", post(handlers::search))
+        .route("/status", get(handlers::status))
+        .route("/stats", get(handlers::stats))
+        .route("/index", post(handlers::index_documents))
+        .route("/index/commit", post(handlers::commit))
+        .layer(middleware::from_fn_with_state(
+            auth_state.clone(),
+            auth_middleware,
+        ))
+        .with_state(app_state);
+
+    // Mount under /api/v1
+    Router::new().nest("/api/v1", api_v1)
+}
