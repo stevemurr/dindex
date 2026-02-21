@@ -3,6 +3,72 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+// ============================================================================
+// Embedding Backend Configuration
+// ============================================================================
+
+/// Default timeout for HTTP backend requests
+fn default_timeout() -> u64 {
+    30
+}
+
+/// Default batch size for HTTP backend requests
+fn default_batch_size() -> usize {
+    100
+}
+
+/// Default max sequence length for local backend
+fn default_max_sequence_length() -> usize {
+    512
+}
+
+/// Backend configuration for embedding providers
+///
+/// Supports two backend types:
+/// - `http`: OpenAI-compatible HTTP endpoints (OpenAI, Azure, LM Studio, vLLM, etc.)
+/// - `local`: Local inference using embed_anything (CPU/CUDA/Metal)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+pub enum BackendConfig {
+    /// OpenAI-compatible HTTP endpoint
+    ///
+    /// Works with: OpenAI API, Azure OpenAI, LM Studio, vLLM,
+    /// Ollama (OpenAI compat mode), text-embeddings-inference
+    Http {
+        /// API endpoint URL (e.g., "https://api.openai.com/v1/embeddings")
+        endpoint: String,
+        /// API key (optional, can also use OPENAI_API_KEY env var)
+        #[serde(default)]
+        api_key: Option<String>,
+        /// Model name (e.g., "text-embedding-3-small")
+        model: String,
+        /// Embedding dimensions
+        dimensions: usize,
+        /// Request timeout in seconds
+        #[serde(default = "default_timeout")]
+        timeout_secs: u64,
+        /// Maximum batch size for requests
+        #[serde(default = "default_batch_size")]
+        max_batch_size: usize,
+    },
+    /// Local inference using embed_anything (legacy)
+    ///
+    /// Uses embed_anything with candle backend for local inference.
+    /// Supports CPU, CUDA (--features cuda), and Metal (--features metal).
+    Local {
+        /// Model name (e.g., "all-MiniLM-L6-v2", "bge-base-en-v1.5")
+        model_name: String,
+        /// Embedding dimensions
+        dimensions: usize,
+        /// Truncated dimensions for Matryoshka routing (optional)
+        #[serde(default)]
+        truncated_dimensions: Option<usize>,
+        /// Maximum sequence length
+        #[serde(default = "default_max_sequence_length")]
+        max_sequence_length: usize,
+    },
+}
+
 /// Main configuration for the DIndex node
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -82,10 +148,35 @@ impl Default for NodeConfig {
 }
 
 /// Embedding model configuration
+///
+/// Supports two configuration styles:
+///
+/// 1. **New style** (recommended): Use the `backend` field with `BackendConfig`
+/// ```toml
+/// [embedding]
+/// backend = "http"
+/// endpoint = "https://api.openai.com/v1/embeddings"
+/// model = "text-embedding-3-small"
+/// dimensions = 1536
+/// ```
+///
+/// 2. **Legacy style**: Use the flat fields (backward compatible)
+/// ```toml
+/// [embedding]
+/// model_name = "all-MiniLM-L6-v2"
+/// dimensions = 384
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
+    /// New-style backend configuration (takes precedence if set)
+    #[serde(flatten)]
+    pub backend: Option<BackendConfig>,
+
+    // ---- Legacy fields (for backward compatibility) ----
+
     /// Model name (e.g., "bge-m3", "bge-base-en-v1.5", "all-MiniLM-L6-v2")
     /// Can also be a HuggingFace model ID (e.g., "BAAI/bge-m3")
+    #[serde(default = "default_model_name")]
     pub model_name: String,
     /// Path to model files (optional, embed_anything downloads automatically)
     #[serde(default)]
@@ -94,15 +185,19 @@ pub struct EmbeddingConfig {
     #[serde(default)]
     pub tokenizer_path: Option<PathBuf>,
     /// Embedding dimensions (1024 for bge-m3, 768 for bge-base, 384 for MiniLM)
+    #[serde(default = "default_dimensions")]
     pub dimensions: usize,
     /// Truncated dimensions for Matryoshka (routing)
+    #[serde(default = "default_dimensions")]
     pub truncated_dimensions: usize,
     /// Maximum sequence length
+    #[serde(default = "default_max_seq_length")]
     pub max_sequence_length: usize,
     /// Enable INT8 quantization (deprecated, handled by backend)
     #[serde(default)]
     pub quantize_int8: bool,
     /// Number of threads for inference
+    #[serde(default = "default_num_threads")]
     pub num_threads: usize,
     /// Use GPU acceleration (CUDA or Metal based on platform)
     #[serde(default = "default_use_gpu")]
@@ -110,6 +205,22 @@ pub struct EmbeddingConfig {
     /// GPU device ID (for multi-GPU systems)
     #[serde(default)]
     pub gpu_device_id: usize,
+}
+
+fn default_model_name() -> String {
+    "all-MiniLM-L6-v2".to_string()
+}
+
+fn default_dimensions() -> usize {
+    384
+}
+
+fn default_max_seq_length() -> usize {
+    256
+}
+
+fn default_num_threads() -> usize {
+    num_cpus::get().min(8)
 }
 
 /// Default for use_gpu - true when cuda or metal feature is enabled
@@ -120,6 +231,7 @@ fn default_use_gpu() -> bool {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
+            backend: None, // Use legacy fields by default for backward compatibility
             model_name: "all-MiniLM-L6-v2".to_string(),
             model_path: None,
             tokenizer_path: None,

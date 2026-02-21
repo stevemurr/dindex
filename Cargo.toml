@@ -76,8 +76,8 @@ sha2 = "0.10"
 daemonize = "0.5"
 libc = "0.2"
 
-# HTTP client (for downloading models and scraping)
-reqwest = { version = "0.12", features = ["stream", "json", "gzip", "brotli"] }
+# HTTP client (for downloading models, scraping, and HTTP embedding backends)
+reqwest = { version = "0.12", features = ["stream", "json", "gzip", "brotli", "blocking"] }
 indicatif = "0.17"
 console = "0.15"
 

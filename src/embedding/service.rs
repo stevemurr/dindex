@@ -3,10 +3,11 @@
 //! Provides a consistent way to initialize the embedding engine
 //! across all commands (index, search, import, scrape).
 //!
-//! With embed_anything, model downloading is handled automatically
-//! by the HuggingFace hub on first use.
+//! Supports both the new pluggable backend system and legacy configuration
+//! for backward compatibility.
 
 use crate::config::Config;
+use crate::embedding::backend::{create_backend, create_backend_from_legacy, EmbeddingBackend};
 use crate::embedding::EmbeddingEngine;
 use crate::embedding::model::ModelRegistry;
 use anyhow::{Context, Result};
@@ -15,32 +16,73 @@ use tracing::info;
 
 /// Initialize embedding engine from config
 ///
-/// Creates the embedding engine with the configured model.
-/// The model is downloaded automatically on first use via HuggingFace hub.
+/// Creates the embedding engine with the configured backend.
+/// Supports both new-style backend configuration and legacy fields.
 pub fn init_embedding_engine(config: &Config) -> Result<Arc<EmbeddingEngine>> {
-    let model_name = &config.embedding.model_name;
-
     // Log what we're doing
-    info!("Initializing embedding engine with model: {}", model_name);
+    if let Some(ref backend_config) = config.embedding.backend {
+        match backend_config {
+            crate::config::BackendConfig::Http { endpoint, model, .. } => {
+                info!("Initializing HTTP embedding backend: {} ({})", endpoint, model);
+            }
+            crate::config::BackendConfig::Local { model_name, .. } => {
+                info!("Initializing local embedding backend: {}", model_name);
+            }
+        }
+    } else {
+        info!(
+            "Initializing embedding engine with model: {}",
+            config.embedding.model_name
+        );
+    }
 
     // Print execution provider info
     print_embedding_status(&config.embedding);
 
-    // Create engine - embed_anything handles model downloading
+    // Create engine using the backend factory
     let engine = EmbeddingEngine::new(&config.embedding)
         .context("Failed to initialize embedding engine")?;
 
     info!(
         "Embedding engine ready: {} ({} dimensions)",
-        model_name,
+        engine.backend_name(),
         engine.dimensions()
     );
 
     Ok(Arc::new(engine))
 }
 
+/// Initialize embedding backend directly (without engine wrapper)
+///
+/// Use this when you need direct access to the backend trait.
+pub fn init_embedding_backend(config: &Config) -> Result<Arc<dyn EmbeddingBackend>> {
+    if let Some(ref backend_config) = config.embedding.backend {
+        create_backend(backend_config)
+            .map_err(|e| anyhow::anyhow!("{}", e))
+            .context("Failed to create embedding backend")
+    } else {
+        create_backend_from_legacy(&config.embedding)
+            .map_err(|e| anyhow::anyhow!("{}", e))
+            .context("Failed to create embedding backend from legacy config")
+    }
+}
+
 /// Print embedding execution status
 fn print_embedding_status(config: &crate::config::EmbeddingConfig) {
+    // Check if using HTTP backend
+    if let Some(ref backend_config) = config.backend {
+        match backend_config {
+            crate::config::BackendConfig::Http { endpoint, .. } => {
+                println!("  Embeddings: HTTP ({})", endpoint);
+                return;
+            }
+            crate::config::BackendConfig::Local { .. } => {
+                // Fall through to local status
+            }
+        }
+    }
+
+    // Local backend status
     #[cfg(feature = "metal")]
     if config.use_gpu {
         println!("  Embeddings: GPU (Metal)");
@@ -63,6 +105,14 @@ fn print_embedding_status(config: &crate::config::EmbeddingConfig) {
 
 /// Check if a model is known in the registry
 pub fn check_model_exists(config: &Config) -> Result<bool> {
+    // If using HTTP backend, we can't check model existence locally
+    if let Some(ref backend_config) = config.embedding.backend {
+        if matches!(backend_config, crate::config::BackendConfig::Http { .. }) {
+            // For HTTP backends, we assume the model exists on the server
+            return Ok(true);
+        }
+    }
+
     // With embed_anything, models are downloaded on demand
     // We just check if the model is in our registry or looks like a valid HF ID
     let model_name = &config.embedding.model_name;

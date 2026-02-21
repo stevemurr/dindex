@@ -1,165 +1,101 @@
 //! Embedding engine implementation
 //!
-//! Uses embed_anything with candle backend for text embeddings.
-//! Supports CPU, CUDA (--features cuda), and Metal (--features metal).
+//! This module provides a backward-compatible wrapper around the pluggable
+//! embedding backend system. It maintains the same public API as before
+//! while delegating to the configured backend.
 
 use crate::config::EmbeddingConfig;
+use crate::embedding::backend::{create_backend_from_legacy, EmbeddingBackend, EmbeddingError};
 use crate::types::Embedding;
 use anyhow::{Context, Result};
-use embed_anything::embeddings::embed::{Embedder, EmbeddingResult};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::info;
 
 /// Embedding engine for generating vector embeddings from text
 ///
-/// Uses embed_anything with candle backend for efficient inference.
-/// Supports CPU, CUDA, and Metal acceleration.
+/// This is a backward-compatible wrapper around the new pluggable backend system.
+/// It maintains the same public API while delegating to the configured backend.
 pub struct EmbeddingEngine {
-    /// The embedder from embed_anything
-    embedder: Arc<Embedder>,
-    /// Model configuration
-    config: EmbeddingConfig,
+    /// The underlying embedding backend
+    backend: Arc<dyn EmbeddingBackend>,
+    /// Truncated dimensions for routing (Matryoshka support)
+    truncated_dimensions: usize,
 }
 
 impl EmbeddingEngine {
-    /// Create a new embedding engine
+    /// Create a new embedding engine from config
     ///
-    /// Downloads the model automatically if not cached.
+    /// Uses the new backend system internally while maintaining backward compatibility.
     pub fn new(config: &EmbeddingConfig) -> Result<Self> {
         info!(
             "Initializing embedding engine with model: {}",
             config.model_name
         );
 
-        // Resolve model name to HuggingFace model ID
-        let model_id = Self::resolve_model_id(&config.model_name)?;
+        // Create backend using the factory
+        let backend = create_backend_from_legacy(config).map_err(|e| match e {
+            EmbeddingError::ModelNotFound(msg) => anyhow::anyhow!("Model not found: {}", msg),
+            EmbeddingError::Config(msg) => anyhow::anyhow!("Configuration error: {}", msg),
+            EmbeddingError::Other(e) => e,
+            e => anyhow::anyhow!("{}", e),
+        })?;
 
-        info!("Loading model: {}", model_id);
-
-        // Use Embedder::from_pretrained_hf which auto-detects architecture from config.json
-        let embedder = Embedder::from_pretrained_hf(&model_id, None, None, None)
-            .context("Failed to load embedding model")?;
+        // Get truncated dimensions from config or backend
+        let truncated_dimensions = if config.truncated_dimensions > 0 {
+            config.truncated_dimensions
+        } else {
+            backend.truncated_dimensions()
+        };
 
         info!(
-            "Embedding engine initialized: {} dimensions, max {} tokens",
-            config.dimensions, config.max_sequence_length
+            "Embedding engine initialized: {} ({} dimensions, {} truncated)",
+            backend.name(),
+            backend.dimensions(),
+            truncated_dimensions
         );
 
         Ok(Self {
-            embedder: Arc::new(embedder),
-            config: config.clone(),
+            backend,
+            truncated_dimensions,
         })
     }
 
-    /// Resolve model name to HuggingFace model ID
-    fn resolve_model_id(model_name: &str) -> Result<String> {
-        match model_name {
-            // Sentence transformers (default, fast)
-            "all-MiniLM-L6-v2" => Ok("sentence-transformers/all-MiniLM-L6-v2".to_string()),
-            "all-MiniLM-L12-v2" => Ok("sentence-transformers/all-MiniLM-L12-v2".to_string()),
+    /// Create an embedding engine from an existing backend
+    ///
+    /// This allows direct construction with a pre-configured backend.
+    pub fn from_backend(backend: Arc<dyn EmbeddingBackend>) -> Self {
+        let truncated_dimensions = backend.truncated_dimensions();
+        Self {
+            backend,
+            truncated_dimensions,
+        }
+    }
 
-            // BGE models (English, BertModel architecture)
-            "bge-base-en-v1.5" => Ok("BAAI/bge-base-en-v1.5".to_string()),
-            "bge-large-en-v1.5" => Ok("BAAI/bge-large-en-v1.5".to_string()),
-            "bge-small-en-v1.5" => Ok("BAAI/bge-small-en-v1.5".to_string()),
-
-            // E5 models
-            "e5-small-v2" => Ok("intfloat/e5-small-v2".to_string()),
-            "e5-base-v2" => Ok("intfloat/e5-base-v2".to_string()),
-            "e5-large-v2" => Ok("intfloat/e5-large-v2".to_string()),
-
-            // Note: bge-m3 uses XLMRobertaModel which is not supported by embed_anything
-            "bge-m3" => Err(anyhow::anyhow!(
-                "bge-m3 is not supported (uses XLMRobertaModel architecture). \
-                 Use bge-base-en-v1.5 or all-MiniLM-L6-v2 instead."
-            )),
-
-            // Allow direct HuggingFace model IDs (must use BertModel architecture)
-            name if name.contains('/') => Ok(name.to_string()),
-
-            _ => Err(anyhow::anyhow!(
-                "Unknown model: {}. Supported models: all-MiniLM-L6-v2, bge-base-en-v1.5, \
-                 bge-large-en-v1.5, e5-base-v2, e5-large-v2, or a HuggingFace model ID \
-                 with BertModel architecture",
-                model_name
-            ))
+    /// Create an embedding engine with custom truncated dimensions
+    pub fn from_backend_with_truncation(
+        backend: Arc<dyn EmbeddingBackend>,
+        truncated_dimensions: usize,
+    ) -> Self {
+        Self {
+            backend,
+            truncated_dimensions,
         }
     }
 
     /// Generate embedding for a single text
     pub fn embed(&self, text: &str) -> Result<Embedding> {
-        let embeddings = self.embed_batch(&[text.to_string()])?;
-        embeddings
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No embedding generated"))
+        self.backend
+            .embed(text)
+            .map_err(|e| anyhow::anyhow!("{}", e))
+            .context("Failed to generate embedding")
     }
 
     /// Generate embeddings for a batch of texts
     pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        debug!("Embedding batch of {} texts", texts.len());
-
-        // Clone texts for the async block (needed for spawn_blocking)
-        let texts_owned: Vec<String> = texts.to_vec();
-        let embedder = self.embedder.clone();
-        let batch_size = texts.len().min(32);
-
-        // Run the embedding operation
-        // We need to handle both cases: called from async context (daemon) or sync context (CLI)
-        let results = if tokio::runtime::Handle::try_current().is_ok() {
-            // We're in a tokio runtime - use spawn_blocking to run in a separate thread pool
-            // This avoids any potential issues with blocking the async runtime
-            std::thread::scope(|s| {
-                s.spawn(|| {
-                    let text_refs: Vec<&str> = texts_owned.iter().map(|s| s.as_str()).collect();
-                    futures::executor::block_on(async {
-                        embedder.embed(&text_refs, Some(batch_size), None).await
-                    })
-                }).join().expect("Embedding thread panicked")
-            })
-        } else {
-            // Not in a tokio runtime - use futures executor directly
-            let text_refs: Vec<&str> = texts_owned.iter().map(|s| s.as_str()).collect();
-            futures::executor::block_on(async {
-                embedder.embed(&text_refs, Some(batch_size), None).await
-            })
-        }.context("Embedding failed")?;
-
-        // Convert EmbeddingResult to Vec<f32> and normalize
-        let embeddings: Vec<Embedding> = results
-            .into_iter()
-            .map(|result| {
-                let embedding = match result {
-                    EmbeddingResult::DenseVector(v) => v,
-                    EmbeddingResult::MultiVector(vecs) => {
-                        // For multi-vector, take the mean
-                        if vecs.is_empty() {
-                            vec![0.0; self.config.dimensions]
-                        } else {
-                            let dim = vecs[0].len();
-                            let mut mean = vec![0.0f32; dim];
-                            for v in &vecs {
-                                for (i, val) in v.iter().enumerate() {
-                                    mean[i] += val;
-                                }
-                            }
-                            let count = vecs.len() as f32;
-                            for val in &mut mean {
-                                *val /= count;
-                            }
-                            mean
-                        }
-                    }
-                };
-                normalize_embedding(&embedding)
-            })
-            .collect();
-
-        Ok(embeddings)
+        self.backend
+            .embed_batch(texts)
+            .map_err(|e| anyhow::anyhow!("{}", e))
+            .context("Failed to generate batch embeddings")
     }
 
     /// Truncate embedding for Matryoshka (variable dimension)
@@ -169,12 +105,22 @@ impl EmbeddingEngine {
 
     /// Get the full embedding dimensions
     pub fn dimensions(&self) -> usize {
-        self.config.dimensions
+        self.backend.dimensions()
     }
 
     /// Get the truncated dimensions for routing
     pub fn truncated_dimensions(&self) -> usize {
-        self.config.truncated_dimensions
+        self.truncated_dimensions
+    }
+
+    /// Get the backend name
+    pub fn backend_name(&self) -> &str {
+        self.backend.name()
+    }
+
+    /// Get a reference to the underlying backend
+    pub fn backend(&self) -> &Arc<dyn EmbeddingBackend> {
+        &self.backend
     }
 }
 
@@ -238,25 +184,5 @@ mod tests {
         let embedding: Vec<f32> = (0..1024).map(|i| i as f32).collect();
         let truncated = truncate_matryoshka(&embedding, 256);
         assert_eq!(truncated.len(), 256);
-    }
-
-    #[test]
-    fn test_resolve_model_id() {
-        // Test known models
-        let id = EmbeddingEngine::resolve_model_id("all-MiniLM-L6-v2").unwrap();
-        assert_eq!(id, "sentence-transformers/all-MiniLM-L6-v2");
-
-        let id = EmbeddingEngine::resolve_model_id("bge-base-en-v1.5").unwrap();
-        assert_eq!(id, "BAAI/bge-base-en-v1.5");
-
-        // Test direct HF ID
-        let id = EmbeddingEngine::resolve_model_id("BAAI/bge-base-en-v1.5").unwrap();
-        assert_eq!(id, "BAAI/bge-base-en-v1.5");
-
-        // Test unsupported model (bge-m3 uses XLMRobertaModel)
-        assert!(EmbeddingEngine::resolve_model_id("bge-m3").is_err());
-
-        // Test unknown model
-        assert!(EmbeddingEngine::resolve_model_id("unknown-model").is_err());
     }
 }
