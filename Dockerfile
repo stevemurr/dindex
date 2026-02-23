@@ -4,7 +4,7 @@
 # =============================================================================
 # Stage 1: Builder
 # =============================================================================
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.93-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -41,6 +41,7 @@ FROM debian:bookworm-slim AS runtime
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    curl \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -69,13 +70,15 @@ ENV DINDEX_DATA_DIR=/data
 EXPOSE 4001/udp
 # Expose TCP fallback port
 EXPOSE 4001/tcp
+# Expose HTTP API port
+EXPOSE 8080/tcp
 
 # Data volume for persistence
 VOLUME ["/data"]
 
-# Health check (verify binary works)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD dindex stats 2>/dev/null || exit 0
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/api/v1/health || exit 1
 
 # Default entrypoint
 ENTRYPOINT ["dindex"]

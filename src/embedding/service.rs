@@ -20,7 +20,7 @@ use tracing::info;
 /// Supports both new-style backend configuration and legacy fields.
 pub fn init_embedding_engine(config: &Config) -> Result<Arc<EmbeddingEngine>> {
     // Log what we're doing
-    if let Some(ref backend_config) = config.embedding.backend {
+    if let Some(ref backend_config) = config.embedding.resolve_backend() {
         match backend_config {
             crate::config::BackendConfig::Http { endpoint, model, .. } => {
                 info!("Initializing HTTP embedding backend: {} ({})", endpoint, model);
@@ -56,7 +56,7 @@ pub fn init_embedding_engine(config: &Config) -> Result<Arc<EmbeddingEngine>> {
 ///
 /// Use this when you need direct access to the backend trait.
 pub fn init_embedding_backend(config: &Config) -> Result<Arc<dyn EmbeddingBackend>> {
-    if let Some(ref backend_config) = config.embedding.backend {
+    if let Some(ref backend_config) = config.embedding.resolve_backend() {
         create_backend(backend_config)
             .map_err(|e| anyhow::anyhow!("{}", e))
             .context("Failed to create embedding backend")
@@ -70,7 +70,7 @@ pub fn init_embedding_backend(config: &Config) -> Result<Arc<dyn EmbeddingBacken
 /// Print embedding execution status
 fn print_embedding_status(config: &crate::config::EmbeddingConfig) {
     // Check if using HTTP backend
-    if let Some(ref backend_config) = config.backend {
+    if let Some(ref backend_config) = config.resolve_backend() {
         match backend_config {
             crate::config::BackendConfig::Http { endpoint, .. } => {
                 println!("  Embeddings: HTTP ({})", endpoint);
@@ -106,7 +106,7 @@ fn print_embedding_status(config: &crate::config::EmbeddingConfig) {
 /// Check if a model is known in the registry
 pub fn check_model_exists(config: &Config) -> Result<bool> {
     // If using HTTP backend, we can't check model existence locally
-    if let Some(ref backend_config) = config.embedding.backend {
+    if let Some(ref backend_config) = config.embedding.resolve_backend() {
         if matches!(backend_config, crate::config::BackendConfig::Http { .. }) {
             // For HTTP backends, we assume the model exists on the server
             return Ok(true);

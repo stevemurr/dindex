@@ -25,3 +25,9 @@ Thumbs.db
 # Test artifacts
 /tmp/
 dataset
+
+# Secrets
+.env
+
+# Local dev config
+config.toml

@@ -1,0 +1,48 @@
+# DIndex Configuration (Docker)
+
+[node]
+listen_addr = "/ip4/0.0.0.0/udp/0/quic-v1"
+data_dir = "/data"
+bootstrap_peers = []
+enable_mdns = true
+replication_factor = 3
+query_timeout_secs = 10
+
+[embedding]
+backend = "http"
+endpoint = "http://embeddings:8000/v1/embeddings"
+model = "bge-m3"
+dimensions = 1024
+
+[index]
+hnsw_m = 16
+hnsw_ef_construction = 200
+hnsw_ef_search = 100
+memory_mapped = true
+max_capacity = 1000000
+
+[chunking]
+chunk_size = 512
+overlap_fraction = 0.15
+min_chunk_size = 50
+max_chunk_size = 2048
+
+[retrieval]
+enable_dense = true
+enable_bm25 = true
+rrf_k = 60
+candidate_count = 100
+enable_reranking = true
+
+[routing]
+num_centroids = 100
+lsh_bits = 128
+lsh_num_hashes = 8
+bloom_bits_per_item = 10
+candidate_nodes = 5
+
+[http]
+enabled = true
+listen_addr = "0.0.0.0:8080"
+api_keys = []
+cors_enabled = true

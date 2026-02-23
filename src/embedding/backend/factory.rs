@@ -3,6 +3,7 @@
 //! Provides a unified way to create embedding backends based on configuration.
 
 use super::http::{HttpBackend, HttpConfig};
+#[cfg(feature = "local")]
 use super::local::{LocalBackend, LocalConfig};
 use super::traits::{EmbeddingBackend, EmbeddingResult};
 use crate::config::BackendConfig;
@@ -37,6 +38,7 @@ pub fn create_backend(config: &BackendConfig) -> EmbeddingResult<Arc<dyn Embeddi
             Ok(Arc::new(backend))
         }
 
+        #[cfg(feature = "local")]
         BackendConfig::Local {
             model_name,
             dimensions,
@@ -55,6 +57,16 @@ pub fn create_backend(config: &BackendConfig) -> EmbeddingResult<Arc<dyn Embeddi
             let backend = LocalBackend::new(local_config)?;
             Ok(Arc::new(backend))
         }
+
+        #[cfg(not(feature = "local"))]
+        BackendConfig::Local { .. } => {
+            Err(super::traits::EmbeddingError::Config(
+                "Local embedding backend requires the 'local' feature. \
+                 Build with: cargo build --features local\n\
+                 Or use an HTTP backend instead (recommended)."
+                    .to_string(),
+            ))
+        }
     }
 }
 
@@ -66,25 +78,45 @@ pub fn create_backend_from_legacy(
     config: &crate::config::EmbeddingConfig,
 ) -> EmbeddingResult<Arc<dyn EmbeddingBackend>> {
     // Check if a backend config is specified
-    if let Some(backend_config) = &config.backend {
-        return create_backend(backend_config);
+    if let Some(backend_config) = config.resolve_backend() {
+        return create_backend(&backend_config);
     }
 
     // Fall back to local backend using legacy fields
-    info!(
-        "Creating local embedding backend from legacy config: model={}",
-        config.model_name
-    );
+    #[cfg(feature = "local")]
+    {
+        info!(
+            "Creating local embedding backend from legacy config: model={}",
+            config.model_name
+        );
 
-    let local_config = LocalConfig {
-        model_name: config.model_name.clone(),
-        dimensions: config.dimensions,
-        truncated_dimensions: config.truncated_dimensions,
-        max_sequence_length: config.max_sequence_length,
-    };
+        let local_config = LocalConfig {
+            model_name: config.model_name.clone(),
+            dimensions: config.dimensions,
+            truncated_dimensions: config.truncated_dimensions,
+            max_sequence_length: config.max_sequence_length,
+        };
 
-    let backend = LocalBackend::new(local_config)?;
-    Ok(Arc::new(backend))
+        let backend = LocalBackend::new(local_config)?;
+        Ok(Arc::new(backend))
+    }
+
+    #[cfg(not(feature = "local"))]
+    {
+        Err(super::traits::EmbeddingError::Config(
+            format!(
+                "Local embedding backend for model '{}' requires the 'local' feature. \
+                 Build with: cargo build --features local\n\
+                 Or configure an HTTP backend in your config.toml:\n\
+                 [embedding]\n\
+                 backend = \"http\"\n\
+                 endpoint = \"http://localhost:8002/v1/embeddings\"\n\
+                 model = \"bge-m3\"\n\
+                 dimensions = 1024",
+                config.model_name
+            ),
+        ))
+    }
 }
 
 #[cfg(test)]

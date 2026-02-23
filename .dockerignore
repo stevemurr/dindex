@@ -46,3 +46,7 @@ docs/
 # Development
 .env
 .env.*
+
+# Config files (bind-mounted, not needed in build)
+config.toml
+config.docker.toml

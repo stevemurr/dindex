@@ -163,11 +163,24 @@ impl HttpBackend {
             texts.len()
         );
 
-        let response = self
-            .client
-            .post(&self.config.endpoint)
-            .json(&request)
-            .send()?;
+        // Serialize request body upfront so we can send it from a scoped thread.
+        // reqwest::blocking::Client panics when called from within a tokio runtime,
+        // so we run the actual HTTP call on a separate thread.
+        let body = serde_json::to_vec(&request)
+            .map_err(|e| EmbeddingError::EmbeddingFailed(format!("Failed to serialize request: {}", e)))?;
+
+        let response = std::thread::scope(|s| {
+            s.spawn(|| {
+                self.client
+                    .post(&self.config.endpoint)
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .send()
+            })
+            .join()
+        })
+        .map_err(|_| EmbeddingError::EmbeddingFailed("HTTP request thread panicked".to_string()))?
+        .map_err(|e| EmbeddingError::EmbeddingFailed(format!("HTTP request failed: {}", e)))?;
 
         let status = response.status();
 

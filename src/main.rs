@@ -288,7 +288,14 @@ fn main() -> Result<()> {
     // Load or create config early (needed for daemonization paths)
     let mut config: Config = if cli.config.exists() {
         let content = std::fs::read_to_string(&cli.config)?;
-        toml::from_str(&content).unwrap_or_default()
+        match toml::from_str(&content) {
+            Ok(config) => config,
+            Err(e) => {
+                eprintln!("Warning: Failed to parse config file '{}': {}", cli.config.display(), e);
+                eprintln!("Using default configuration.");
+                Config::default()
+            }
+        }
     } else {
         Config::default()
     };

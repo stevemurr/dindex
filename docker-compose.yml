@@ -1,99 +1,74 @@
 services:
+  embeddings:
+    image: nvcr.io/nvidia/vllm:25.11-py3
+    container_name: dindex-embeddings
+    command:
+      - vllm
+      - serve
+      - BAAI/bge-m3
+      - --task
+      - embedding
+      - --gpu-memory-utilization
+      - "0.1"
+    ports:
+      - "8002:8000"
+    volumes:
+      - ~/.cache:/root/.cache
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    ipc: host
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   dindex:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        # Enable ONNX support for embedding inference
-        # Uncomment to enable: FEATURES: "onnx"
-        FEATURES: ""
     image: dindex:latest
     container_name: dindex
-
-    # Run as daemon + P2P node (single process architecture)
-    # The daemon handles all index operations via Unix socket IPC
-    # CLI commands connect to the daemon for search/index/import/scrape
-    command: ["start", "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1", "--foreground"]
-
+    command:
+      - --config
+      - /etc/dindex/config.toml
+      - start
+      - --listen
+      - /ip4/0.0.0.0/udp/4001/quic-v1
+      - --foreground
     ports:
-      # P2P QUIC port
+      - "8080:8080"
       - "4001:4001/udp"
-      # P2P TCP fallback
       - "4001:4001/tcp"
-
+    tmpfs:
+      - /run/dindex:uid=1000,gid=1000
     volumes:
-      # Persistent data storage
+      - ./config.docker.toml:/etc/dindex/config.toml:ro
       - dindex-data:/data
-      # Unix socket for IPC (optional: expose for host CLI access)
-      - dindex-socket:/run/dindex
-      # Optional: mount local documents for indexing
-      # - ./documents:/documents:ro
-
     environment:
       - RUST_LOG=info
       - DINDEX_DATA_DIR=/data
       - XDG_RUNTIME_DIR=/run/dindex
-
+    depends_on:
+      embeddings:
+        condition: service_healthy
     restart: unless-stopped
-
-    # Health check
     healthcheck:
-      test: ["CMD", "dindex", "daemon", "status"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
-
-    # Resource limits (adjust based on your needs)
-    deploy:
-      resources:
-        limits:
-          memory: 4G
-        reservations:
-          memory: 512M
-
-  # Optional: Initialize and download models
-  dindex-init:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: dindex:latest
-    container_name: dindex-init
-
-    command: ["init", "--data-dir", "/data"]
-
-    volumes:
-      - dindex-data:/data
-
-    environment:
-      - RUST_LOG=info
-      - DINDEX_DATA_DIR=/data
-
-    profiles:
-      - init
-
-  # Optional: Download embedding model
-  dindex-download-model:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: dindex:latest
-    container_name: dindex-download-model
-
-    command: ["download", "nomic-embed-text-v1.5"]
-
-    volumes:
-      - dindex-data:/data
-
-    environment:
-      - RUST_LOG=info
-      - DINDEX_DATA_DIR=/data
-
-    profiles:
-      - setup
+      start_period: 30s
 
 volumes:
   dindex-data:
-    driver: local
-  dindex-socket:
     driver: local

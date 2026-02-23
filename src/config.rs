@@ -125,6 +125,7 @@ pub struct NodeConfig {
     /// Listen address for P2P connections
     pub listen_addr: String,
     /// Bootstrap peers to connect to
+    #[serde(default)]
     pub bootstrap_peers: Vec<String>,
     /// Data directory for persistence
     pub data_dir: PathBuf,
@@ -155,7 +156,7 @@ impl Default for NodeConfig {
 ///
 /// Supports two configuration styles:
 ///
-/// 1. **New style** (recommended): Use the `backend` field with `BackendConfig`
+/// 1. **New style** (recommended): Use `backend = "http"` with endpoint fields
 /// ```toml
 /// [embedding]
 /// backend = "http"
@@ -172,23 +173,38 @@ impl Default for NodeConfig {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
-    /// New-style backend configuration (takes precedence if set)
-    #[serde(flatten)]
-    pub backend: Option<BackendConfig>,
+    /// Backend type: "http" or "local" (default: "local" for legacy compat)
+    #[serde(default)]
+    pub backend: Option<String>,
 
-    // ---- Legacy fields (for backward compatibility) ----
+    /// HTTP backend: API endpoint URL
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// HTTP backend: API key (optional, can also use OPENAI_API_KEY env var)
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// HTTP backend: Model name for API requests (e.g., "bge-m3")
+    #[serde(default)]
+    pub model: Option<String>,
+    /// HTTP backend: Request timeout in seconds
+    #[serde(default = "default_timeout")]
+    pub timeout_secs: u64,
+    /// HTTP backend: Maximum batch size for requests
+    #[serde(default = "default_batch_size")]
+    pub max_batch_size: usize,
 
-    /// Model name (e.g., "bge-m3", "bge-base-en-v1.5", "all-MiniLM-L6-v2")
-    /// Can also be a HuggingFace model ID (e.g., "BAAI/bge-m3")
+    // ---- Legacy/local fields ----
+
+    /// Model name for local backend (e.g., "all-MiniLM-L6-v2")
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    /// Path to model files (optional, embed_anything downloads automatically)
+    /// Path to model files (optional)
     #[serde(default)]
     pub model_path: Option<PathBuf>,
-    /// Path to tokenizer files (optional, embed_anything handles internally)
+    /// Path to tokenizer files (optional)
     #[serde(default)]
     pub tokenizer_path: Option<PathBuf>,
-    /// Embedding dimensions (1024 for bge-m3, 768 for bge-base, 384 for MiniLM)
+    /// Embedding dimensions
     #[serde(default = "default_dimensions")]
     pub dimensions: usize,
     /// Truncated dimensions for Matryoshka (routing)
@@ -197,16 +213,16 @@ pub struct EmbeddingConfig {
     /// Maximum sequence length
     #[serde(default = "default_max_seq_length")]
     pub max_sequence_length: usize,
-    /// Enable INT8 quantization (deprecated, handled by backend)
+    /// Enable INT8 quantization (deprecated)
     #[serde(default)]
     pub quantize_int8: bool,
     /// Number of threads for inference
     #[serde(default = "default_num_threads")]
     pub num_threads: usize,
-    /// Use GPU acceleration (CUDA or Metal based on platform)
+    /// Use GPU acceleration
     #[serde(default = "default_use_gpu")]
     pub use_gpu: bool,
-    /// GPU device ID (for multi-GPU systems)
+    /// GPU device ID
     #[serde(default)]
     pub gpu_device_id: usize,
 }
@@ -232,16 +248,48 @@ fn default_use_gpu() -> bool {
     cfg!(feature = "cuda") || cfg!(feature = "metal")
 }
 
+impl EmbeddingConfig {
+    /// Resolve the backend configuration from flat fields
+    pub fn resolve_backend(&self) -> Option<BackendConfig> {
+        match self.backend.as_deref() {
+            Some("http") => {
+                let endpoint = self.endpoint.clone()?;
+                let model = self.model.clone().unwrap_or_else(|| self.model_name.clone());
+                Some(BackendConfig::Http {
+                    endpoint,
+                    api_key: self.api_key.clone(),
+                    model,
+                    dimensions: self.dimensions,
+                    timeout_secs: self.timeout_secs,
+                    max_batch_size: self.max_batch_size,
+                })
+            }
+            Some("local") => Some(BackendConfig::Local {
+                model_name: self.model_name.clone(),
+                dimensions: self.dimensions,
+                truncated_dimensions: Some(self.truncated_dimensions),
+                max_sequence_length: self.max_sequence_length,
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            backend: None, // Use legacy fields by default for backward compatibility
+            backend: None,
+            endpoint: None,
+            api_key: None,
+            model: None,
+            timeout_secs: 30,
+            max_batch_size: 100,
             model_name: "all-MiniLM-L6-v2".to_string(),
             model_path: None,
             tokenizer_path: None,
-            dimensions: 384,  // all-MiniLM-L6-v2 dimensions
-            truncated_dimensions: 384,  // No truncation for this model
-            max_sequence_length: 256,  // all-MiniLM-L6-v2 max sequence
+            dimensions: 384,
+            truncated_dimensions: 384,
+            max_sequence_length: 256,
             quantize_int8: false,
             num_threads: num_cpus::get().min(8),
             use_gpu: default_use_gpu(),
@@ -539,6 +587,7 @@ pub struct HttpConfig {
     /// Listen address for HTTP server (e.g., "0.0.0.0:8080")
     pub listen_addr: String,
     /// API keys for authentication (empty = no auth required)
+    #[serde(default)]
     pub api_keys: Vec<String>,
     /// Enable CORS (useful for browser-based clients)
     pub cors_enabled: bool,
