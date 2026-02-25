@@ -74,7 +74,42 @@ cargo build --release --features metal
 cargo build --release --features cuda
 ```
 
-## Quick Start
+## Quick Start (Docker Compose)
+
+The fastest way to get running. Requires Docker and an NVIDIA GPU for the embedding server:
+
+```bash
+# Clone and start the stack (vLLM embeddings + DIndex)
+git clone https://github.com/stevemurr/dindex
+cd dindex
+docker compose up -d
+
+# Wait for services to be healthy (~2 min for vLLM to load the model)
+docker compose logs -f
+
+# Index documents via the HTTP API
+curl -X POST http://localhost:8080/api/v1/index \
+  -H "Content-Type: application/json" \
+  -d '{
+    "documents": [{
+      "content": "Your document text here...",
+      "title": "My Document",
+      "metadata": {"category": "example"}
+    }]
+  }'
+
+# Search
+curl -s http://localhost:8080/api/v1/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "your search query", "top_k": 10}' | jq
+
+# Stop
+docker compose down
+```
+
+The API is available at `http://localhost:8080` and P2P at port `4001`.
+
+## Quick Start (Local Binary)
 
 ```bash
 # Initialize configuration
