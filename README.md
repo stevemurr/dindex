@@ -4,7 +4,7 @@
 
 **Decentralized Semantic Search Index for LLM Consumption**
 
-A federated semantic search system designed for LLM consumption, featuring CPU-efficient embeddings, lightweight vector indices, P2P networking resilient to node churn, and intelligent semantic routing.
+A federated semantic search system designed for LLM consumption, featuring pluggable embedding backends, lightweight vector indices, P2P networking resilient to node churn, and intelligent semantic routing.
 
 ## Features
 
@@ -12,7 +12,11 @@ A federated semantic search system designed for LLM consumption, featuring CPU-e
 - **Vector Search**: USearch HNSW index with INT8 scalar quantization
 - **Hybrid Retrieval**: Combines dense vector search + BM25 lexical search with RRF fusion
 - **Semantic Routing**: Content centroids and LSH signatures for efficient query routing
-- **CPU/GPU Flexible**: Uses candle backend with CUDA/Metal support, falls back to CPU
+- **Pluggable Embeddings**: HTTP backends (OpenAI, vLLM, Ollama, LM Studio) or local inference (candle)
+- **HTTP API**: REST API server for programmatic access with optional auth and CORS
+- **Metadata Filtering**: Category-based search with exact match and contains filters
+- **Bulk Import**: Wikipedia dumps, ZIM files, WARC archives with resumable checkpointing
+- **Web Scraping**: Multi-URL crawling with depth control and domain restriction
 - **LLM-Ready**: Rich metadata structure for retrieved chunks
 
 ## Architecture
@@ -22,18 +26,24 @@ A federated semantic search system designed for LLM consumption, featuring CPU-e
 │                         DECENTRALIZED NODE                               │
 │  ┌─────────────────┐  ┌──────────────────┐  ┌───────────────────────┐  │
 │  │  rust-libp2p    │  │ Embedding Engine │  │  Vector Index         │  │
-│  │  - Kademlia DHT │  │ (candle)         │  │  (USearch HNSW)       │  │
-│  │  - GossipSub    │  │ - bge-m3         │  │  - INT8 quantized     │  │
-│  │  - QUIC         │  │ - INT8 inference │  │  - Memory-mapped      │  │
+│  │  - Kademlia DHT │  │ (pluggable)      │  │  (USearch HNSW)       │  │
+│  │  - GossipSub    │  │ - HTTP backends  │  │  - INT8 quantized     │  │
+│  │  - QUIC         │  │ - Local (candle) │  │  - Memory-mapped      │  │
 │  │  - AutoNAT      │  └────────┬─────────┘  │  - 50-200 centroids   │  │
 │  └────────┬────────┘           │            └───────────┬───────────┘  │
 │           │                    │                        │              │
-│           └────────────────────┼────────────────────────┘              │
-│                                │                                        │
-│  ┌─────────────────────────────┼─────────────────────────────────────┐ │
+│  ┌────────┴────────┐          │            ┌───────────┴───────────┐  │
+│  │  HTTP API       │          │            │  Metadata Filtering   │  │
+│  │  (Axum)         │          │            │  - Exact match        │  │
+│  │  - REST /api/v1 │          │            │  - Contains           │  │
+│  │  - Auth / CORS  │          │            │  - URL prefix         │  │
+│  └────────┬────────┘          │            └───────────┬───────────┘  │
+│           └───────────────────┼────────────────────────┘              │
+│                               │                                        │
+│  ┌────────────────────────────┼──────────────────────────────────────┐ │
 │  │                     Hybrid Retrieval Engine                        │ │
 │  │  Dense (HNSW) + BM25 → RRF Fusion                                  │ │
-│  └────────────────────────────────────────────────────────────────────┘ │
+│  └───────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -44,123 +54,31 @@ A federated semantic search system designed for LLM consumption, featuring CPU-e
 git clone https://github.com/stevemurr/dindex
 cd dindex
 
-# Build (CPU only)
+# Build (HTTP embedding backend only — no local model needed)
 cargo build --release
 
-# Or install directly
+# Or build with local embedding support
+cargo build --release --features local
+
+# Install directly
 cargo install --path .
 ```
 
-### macOS (Apple Silicon)
-
-For GPU acceleration on Apple Silicon Macs, build with Metal support:
+### GPU Acceleration (Local Embeddings)
 
 ```bash
-# Build with Metal GPU acceleration
+# macOS (Apple Silicon) — Metal
 cargo build --release --features metal
-```
 
-Metal provides significant speedups for embedding generation. The binary will automatically use the GPU when available and fall back to CPU otherwise.
-
-### Linux with CUDA
-
-For NVIDIA GPU acceleration:
-
-```bash
-# Build with CUDA support
+# Linux — CUDA
 cargo build --release --features cuda
 ```
-
-### Docker Installation
-
-```bash
-# Build the Docker image
-docker build -t dindex .
-
-# Or use docker-compose
-docker compose build
-```
-
-## Docker Usage
-
-### Quick Start with Docker
-
-```bash
-# Initialize configuration
-docker run --rm -v dindex-data:/data dindex init --data-dir /data
-
-# Download embedding model (optional - auto-downloads on first use)
-docker run --rm -v dindex-data:/data dindex download bge-m3
-
-# Start P2P node
-docker run -d --name dindex \
-  -p 4001:4001/udp \
-  -p 4001:4001/tcp \
-  -v dindex-data:/data \
-  dindex start --listen /ip4/0.0.0.0/udp/4001/quic-v1
-
-# Search
-docker run --rm -v dindex-data:/data dindex search "your query" --top-k 10
-
-# Index local documents
-docker run --rm \
-  -v dindex-data:/data \
-  -v ./documents:/documents:ro \
-  dindex index /documents --title "My Documents"
-```
-
-### Docker Compose
-
-```bash
-# Initialize (one-time setup)
-docker compose --profile init run --rm dindex-init
-
-# Download embedding model (one-time setup)
-docker compose --profile setup run --rm dindex-download-model
-
-# Start P2P node
-docker compose up -d
-
-# View logs
-docker compose logs -f
-
-# Stop
-docker compose down
-```
-
-### Building with ONNX Support
-
-To enable ONNX Runtime for embedding inference:
-
-```bash
-# Build with ONNX feature
-docker build --build-arg FEATURES="onnx" -t dindex:onnx .
-
-# Or edit docker-compose.yml and uncomment FEATURES: "onnx"
-```
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RUST_LOG` | `info` | Log level (trace, debug, info, warn, error) |
-| `DINDEX_DATA_DIR` | `/data` | Data directory inside container |
-
-### Exposed Ports
-
-| Port | Protocol | Description |
-|------|----------|-------------|
-| 4001 | UDP | P2P QUIC transport (primary) |
-| 4001 | TCP | P2P TCP fallback |
 
 ## Quick Start
 
 ```bash
 # Initialize configuration
 dindex init
-
-# Download embedding model (optional - auto-downloads on first use)
-dindex download bge-m3
 
 # Index a document
 dindex index ./document.txt --title "My Document"
@@ -171,8 +89,6 @@ dindex search "your query here" --top-k 10
 # Start P2P node
 dindex start --listen /ip4/0.0.0.0/udp/4001/quic-v1
 ```
-
-> **Note**: The first embedding operation will download the BGE-M3 model (~2GB) from HuggingFace.
 
 ## Usage
 
@@ -202,17 +118,57 @@ dindex search "semantic search" --format json --top-k 20
 dindex search "query" --format json > results.json
 ```
 
+### Web Scraping
+
+```bash
+# Scrape a site with depth control
+dindex scrape https://example.com --depth 2 --stay-on-domain
+
+# Scrape multiple seeds with rate limiting
+dindex scrape https://site1.com https://site2.com --max-pages 1000 --delay-ms 1000
+
+# View scraping statistics
+dindex scrape-stats
+```
+
+### Bulk Import
+
+```bash
+# Import Wikipedia dump (auto-detects format)
+dindex import ./wiki.xml.bz2 --batch-size 100
+
+# Import ZIM file (Kiwix)
+dindex import ./file.zim --format zim
+
+# Import WARC web archive
+dindex import ./archive.warc --format warc
+
+# Resume an interrupted import
+dindex import ./wiki.xml.bz2 --resume --checkpoint ./checkpoint.json
+
+# Check import progress
+dindex import-status ./checkpoint.json
+```
+
 ### P2P Network
 
 ```bash
-# Start node with default settings
+# Start node (daemonizes by default)
 dindex start
+
+# Start in foreground
+dindex start --foreground
 
 # Start with custom listen address
 dindex start --listen /ip4/0.0.0.0/udp/4001/quic-v1
 
 # Connect to bootstrap peers
 dindex start --bootstrap /ip4/1.2.3.4/udp/4001/quic-v1/p2p/QmPeerId
+
+# Daemon management
+dindex daemon status
+dindex daemon stop
+dindex daemon restart
 ```
 
 ### Statistics & Export
@@ -221,9 +177,215 @@ dindex start --bootstrap /ip4/1.2.3.4/udp/4001/quic-v1/p2p/QmPeerId
 # Show index statistics
 dindex stats
 
+# Show document registry statistics
+dindex registry-stats
+
 # Export for LLM consumption
 dindex export ./output.jsonl --format jsonl
 ```
+
+## HTTP API
+
+DIndex includes a REST API server for programmatic access. Enable it in your config:
+
+```toml
+[http]
+enabled = true
+listen_addr = "0.0.0.0:8080"
+api_keys = []       # Empty = no auth required; add keys to require Bearer token
+cors_enabled = true
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/health` | Health check |
+| `GET` | `/api/v1/status` | Daemon status |
+| `GET` | `/api/v1/stats` | Index statistics |
+| `POST` | `/api/v1/search` | Search with optional filters |
+| `POST` | `/api/v1/index` | Index documents |
+| `POST` | `/api/v1/index/commit` | Force commit pending writes |
+
+### Search with Metadata Filtering
+
+```bash
+curl -X POST http://localhost:8080/api/v1/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "machine learning",
+    "top_k": 10,
+    "filters": {
+      "source_url_prefix": "https://arxiv.org",
+      "metadata_equals": {"source": "arxiv"},
+      "metadata_contains": {"category": ["ml", "ai"]}
+    }
+  }'
+```
+
+- **`metadata_equals`**: All specified key-value pairs must match exactly
+- **`metadata_contains`**: Value must appear in the metadata field (supports comma-separated values in stored metadata)
+
+### Index Documents via API
+
+```bash
+curl -X POST http://localhost:8080/api/v1/index \
+  -H "Content-Type: application/json" \
+  -d '{
+    "documents": [{
+      "content": "Document text here...",
+      "title": "My Document",
+      "url": "https://example.com/doc",
+      "metadata": {"category": "tech", "author": "Jane"}
+    }]
+  }'
+```
+
+## Embedding Backends
+
+DIndex supports pluggable embedding backends. The HTTP backend is the default and works with any OpenAI-compatible API.
+
+### HTTP Backend (Default)
+
+Works with OpenAI, vLLM, Ollama, LM Studio, text-embeddings-inference, and more:
+
+```toml
+[embedding]
+backend = "http"
+endpoint = "http://localhost:8000/v1/embeddings"
+model = "BAAI/bge-m3"
+dimensions = 1024
+timeout_secs = 30
+max_batch_size = 100
+# api_key = "sk-..."  # Or set OPENAI_API_KEY env var
+```
+
+**Provider examples:**
+
+| Provider | Endpoint |
+|----------|----------|
+| OpenAI | `https://api.openai.com/v1/embeddings` |
+| vLLM | `http://localhost:8000/v1/embeddings` |
+| Ollama | `http://localhost:11434/v1/embeddings` |
+| LM Studio | `http://localhost:1234/v1/embeddings` |
+
+### Local Backend
+
+Requires building with `--features local` (or `metal`/`cuda`):
+
+```toml
+[embedding]
+backend = "local"
+model_name = "all-MiniLM-L6-v2"
+dimensions = 384
+truncated_dimensions = 256
+max_sequence_length = 512
+use_gpu = true  # Auto-detected (CUDA/Metal)
+```
+
+## Swift Client
+
+A native Swift client library is available for iOS, macOS, and visionOS apps.
+
+**Add to your `Package.swift`:**
+
+```swift
+dependencies: [
+    .package(path: "../DIndexClient")  // or use a URL
+]
+```
+
+**Usage:**
+
+```swift
+import DIndexClient
+
+let client = DIndexClient(transport: HTTPTransport(baseURL: "http://localhost:8080"))
+
+// Search
+let results = try await client.search(query: "machine learning", topK: 10)
+
+// Search with filters
+let filters = SearchFilters(
+    metadataEquals: ["source": "arxiv"],
+    metadataContains: ["category": ["ml"]]
+)
+let filtered = try await client.search(query: "transformers", topK: 5, filters: filters)
+
+// Index a document
+try await client.index(content: "Document text...", title: "My Doc", url: "https://example.com")
+
+// Health check
+let healthy = try await client.health()
+```
+
+## Docker
+
+### Quick Start with Docker Compose
+
+The default `docker-compose.yml` runs DIndex with a vLLM embedding server (requires NVIDIA GPU):
+
+```bash
+# Start the full stack (vLLM embeddings + DIndex)
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Stop
+docker compose down
+```
+
+This starts:
+- **vLLM** serving BGE-M3 embeddings on port 8002 (GPU-accelerated)
+- **DIndex** with HTTP API on port 8080 and P2P on port 4001
+
+### Building the Image
+
+```bash
+# Build the Docker image
+docker build -t dindex .
+```
+
+### Standalone Docker Usage
+
+```bash
+# Initialize configuration
+docker run --rm -v dindex-data:/data dindex init --data-dir /data
+
+# Start P2P node
+docker run -d --name dindex \
+  -p 4001:4001/udp \
+  -p 4001:4001/tcp \
+  -p 8080:8080 \
+  -v dindex-data:/data \
+  dindex start --listen /ip4/0.0.0.0/udp/4001/quic-v1
+
+# Search
+docker run --rm -v dindex-data:/data dindex search "your query" --top-k 10
+
+# Index local documents
+docker run --rm \
+  -v dindex-data:/data \
+  -v ./documents:/documents:ro \
+  dindex index /documents --title "My Documents"
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUST_LOG` | `info` | Log level (trace, debug, info, warn, error) |
+| `DINDEX_DATA_DIR` | `/data` | Data directory inside container |
+| `HF_TOKEN` | — | HuggingFace token (for gated models) |
+
+### Exposed Ports
+
+| Port | Protocol | Description |
+|------|----------|-------------|
+| 4001 | UDP | P2P QUIC transport (primary) |
+| 4001 | TCP | P2P TCP fallback |
+| 8080 | TCP | HTTP API |
 
 ## Configuration
 
@@ -238,11 +400,10 @@ replication_factor = 3
 query_timeout_secs = 10
 
 [embedding]
-model_name = "bge-m3"
+backend = "http"
+endpoint = "http://localhost:8000/v1/embeddings"
+model = "BAAI/bge-m3"
 dimensions = 1024
-truncated_dimensions = 256
-max_sequence_length = 8192
-use_gpu = true  # Auto-detected (CUDA/Metal)
 
 [index]
 hnsw_m = 16
@@ -255,7 +416,7 @@ max_capacity = 1000000
 chunk_size = 512
 overlap_fraction = 0.15
 min_chunk_size = 50
-max_chunk_size = 1024
+max_chunk_size = 2048
 
 [retrieval]
 enable_dense = true
@@ -270,19 +431,13 @@ lsh_bits = 128
 lsh_num_hashes = 8
 bloom_bits_per_item = 10
 candidate_nodes = 5
+
+[http]
+enabled = true
+listen_addr = "0.0.0.0:8080"
+api_keys = []
+cors_enabled = true
 ```
-
-## Supported Embedding Models
-
-| Model | Dimensions | Best For |
-|-------|------------|----------|
-| bge-m3 (default) | 1024 | Multilingual, Matryoshka support |
-| bge-base-en-v1.5 | 768 | English general-purpose |
-| bge-large-en-v1.5 | 1024 | High quality English |
-| e5-small-v2 | 384 | Speed-critical |
-| e5-base-v2 | 768 | Balanced |
-| all-MiniLM-L6-v2 | 384 | Lightweight |
-| jina-embeddings-v2-base-en | 768 | Long context (8K tokens) |
 
 ## Output Format for LLM Consumption
 
@@ -310,7 +465,7 @@ Retrieved chunks include rich metadata:
 ### Hybrid Retrieval
 
 DIndex uses three-way hybrid retrieval:
-1. **Dense vectors** (nomic/e5 embeddings) for semantic similarity
+1. **Dense vectors** (BGE-M3/custom embeddings) for semantic similarity
 2. **BM25** (Tantivy) for exact lexical matching
 3. **RRF fusion** (k=60) to combine rankings without score calibration
 
