@@ -26,6 +26,7 @@ use dindex::{
         politeness::PolitenessConfig,
     },
     types::{Document, DocumentIdentity, Query},
+    util::truncate_str,
 };
 use std::fs::File;
 use std::path::PathBuf;
@@ -674,7 +675,7 @@ async fn start_node_inner(
                     info!(
                         "Received query from {}: '{}'",
                         peer_id,
-                        truncate_query(&request.query.text, 50)
+                        truncate_str(&request.query.text, 50)
                     );
 
                     // Execute the query locally
@@ -730,14 +731,6 @@ async fn start_node_inner(
     daemon.run().await?;
 
     Ok(())
-}
-
-fn truncate_query(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len - 3])
-    } else {
-        s.to_string()
-    }
 }
 
 async fn index_document(

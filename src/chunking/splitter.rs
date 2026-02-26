@@ -73,9 +73,7 @@ impl TextSplitter {
         let mut sections = Vec::new();
         let mut current_hierarchy: Vec<String> = Vec::new();
         let mut current_content = String::new();
-        let mut section_start = 0;
-
-        for (i, line) in lines.iter().enumerate() {
+        for line in &lines {
             // Check for markdown headings
             if let Some(heading) = self.parse_heading(line) {
                 // Save previous section if it has content
@@ -83,7 +81,6 @@ impl TextSplitter {
                     sections.push(Section {
                         hierarchy: current_hierarchy.clone(),
                         content: current_content.trim().to_string(),
-                        start_line: section_start,
                     });
                 }
 
@@ -95,7 +92,6 @@ impl TextSplitter {
                 current_hierarchy.push(heading.text.clone());
 
                 current_content = String::new();
-                section_start = i;
             } else {
                 if !current_content.is_empty() {
                     current_content.push('\n');
@@ -109,7 +105,6 @@ impl TextSplitter {
             sections.push(Section {
                 hierarchy: current_hierarchy,
                 content: current_content.trim().to_string(),
-                start_line: section_start,
             });
         }
 
@@ -118,7 +113,6 @@ impl TextSplitter {
             sections.push(Section {
                 hierarchy: Vec::new(),
                 content: content.to_string(),
-                start_line: 0,
             });
         }
 
@@ -291,37 +285,12 @@ impl TextSplitter {
 struct Section {
     hierarchy: Vec<String>,
     content: String,
-    #[allow(dead_code)]
-    start_line: usize,
 }
 
 /// Detected heading
 struct Heading {
     level: usize,
     text: String,
-}
-
-/// Semantic chunker that uses embeddings to find optimal split points
-pub struct SemanticChunker {
-    base_splitter: TextSplitter,
-}
-
-impl SemanticChunker {
-    pub fn new(config: ChunkingConfig) -> Self {
-        Self {
-            base_splitter: TextSplitter::new(config),
-        }
-    }
-
-    /// Split with semantic awareness (requires embeddings)
-    /// For now, falls back to basic splitting
-    pub fn split_document(&self, document: &Document) -> Vec<Chunk> {
-        // In a full implementation, this would:
-        // 1. Split into candidate chunks
-        // 2. Embed each chunk
-        // 3. Merge/split based on semantic similarity
-        self.base_splitter.split_document(document)
-    }
 }
 
 #[cfg(test)]

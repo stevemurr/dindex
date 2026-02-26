@@ -4,6 +4,7 @@
 //! with candle as the inference backend. Supports CPU, CUDA, and Metal acceleration.
 
 use super::traits::{EmbeddingBackend, EmbeddingError, EmbeddingResult};
+use crate::embedding::normalize_embedding;
 use crate::types::Embedding;
 use std::fmt;
 use embed_anything::embeddings::embed::{Embedder, EmbeddingResult as EAResult};
@@ -199,16 +200,6 @@ impl EmbeddingBackend for LocalBackend {
     }
 }
 
-/// Normalize an embedding vector to unit length
-fn normalize_embedding(embedding: &Embedding) -> Embedding {
-    let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        embedding.iter().map(|x| x / norm).collect()
-    } else {
-        embedding.clone()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,13 +222,5 @@ mod tests {
 
         // Test unknown model
         assert!(LocalBackend::resolve_model_id("unknown-model").is_err());
-    }
-
-    #[test]
-    fn test_normalize_embedding() {
-        let embedding = vec![3.0, 4.0];
-        let normalized = normalize_embedding(&embedding);
-        assert!((normalized[0] - 0.6).abs() < 1e-6);
-        assert!((normalized[1] - 0.8).abs() < 1e-6);
     }
 }

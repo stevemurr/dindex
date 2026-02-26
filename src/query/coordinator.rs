@@ -229,7 +229,7 @@ impl QueryCoordinator {
         // Convert to ranked lists for RRF
         let ranked_lists: Vec<Vec<crate::retrieval::RankedResult>> = node_results
             .iter()
-            .map(|(node_id, results)| {
+            .map(|(_node_id, results)| {
                 results
                     .iter()
                     .enumerate()
@@ -237,7 +237,7 @@ impl QueryCoordinator {
                         chunk_id: r.chunk.metadata.chunk_id.clone(),
                         rank: rank + 1,
                         original_score: r.relevance_score,
-                        method: node_id.clone(),
+                        method: crate::retrieval::RetrievalMethod::Dense,
                     })
                     .collect()
             })
@@ -265,7 +265,7 @@ impl QueryCoordinator {
                 chunk_map.get(&f.chunk_id).map(|r| {
                     let mut result = r.clone();
                     result.relevance_score = f.rrf_score;
-                    result.matched_by = f.contributing_methods;
+                    result.matched_by = f.contributing_methods.iter().map(|m| m.to_string()).collect();
                     result
                 })
             })

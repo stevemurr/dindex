@@ -23,6 +23,7 @@ pub mod retrieval;
 pub mod routing;
 pub mod scraping;
 pub mod types;
+pub mod util;
 
 pub use config::Config;
 pub use types::*;

@@ -60,28 +60,6 @@ impl EmbeddingEngine {
         })
     }
 
-    /// Create an embedding engine from an existing backend
-    ///
-    /// This allows direct construction with a pre-configured backend.
-    pub fn from_backend(backend: Arc<dyn EmbeddingBackend>) -> Self {
-        let truncated_dimensions = backend.truncated_dimensions();
-        Self {
-            backend,
-            truncated_dimensions,
-        }
-    }
-
-    /// Create an embedding engine with custom truncated dimensions
-    pub fn from_backend_with_truncation(
-        backend: Arc<dyn EmbeddingBackend>,
-        truncated_dimensions: usize,
-    ) -> Self {
-        Self {
-            backend,
-            truncated_dimensions,
-        }
-    }
-
     /// Generate embedding for a single text
     pub fn embed(&self, text: &str) -> Result<Embedding> {
         self.backend
@@ -96,11 +74,6 @@ impl EmbeddingEngine {
             .embed_batch(texts)
             .map_err(|e| anyhow::anyhow!("{}", e))
             .context("Failed to generate batch embeddings")
-    }
-
-    /// Truncate embedding for Matryoshka (variable dimension)
-    pub fn truncate_embedding(&self, embedding: &Embedding, target_dims: usize) -> Embedding {
-        truncate_matryoshka(embedding, target_dims)
     }
 
     /// Get the full embedding dimensions

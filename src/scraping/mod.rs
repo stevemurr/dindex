@@ -29,3 +29,20 @@ pub use extractor::ContentExtractor;
 pub use fetcher::FetchEngine;
 pub use frontier::{ScoredUrl, UrlFrontier};
 pub use politeness::{FetchDecision, PolitenessController};
+
+/// Normalize a URL for deduplication (strip fragment, sort query params, lowercase)
+pub(crate) fn normalize_url(url: &url::Url) -> String {
+    let mut normalized = url.clone();
+
+    // Remove fragment
+    normalized.set_fragment(None);
+
+    // Sort query parameters
+    if let Some(query) = normalized.query() {
+        let mut params: Vec<_> = query.split('&').collect();
+        params.sort();
+        normalized.set_query(Some(&params.join("&")));
+    }
+
+    normalized.as_str().to_lowercase()
+}

@@ -34,13 +34,11 @@
 pub mod backend;
 mod engine;
 pub mod model;
-mod quantize;
 mod service;
 
 pub use engine::*;
 pub use model::{ModelInfo, ModelRegistry};
-pub use quantize::*;
 pub use service::{
-    check_model_exists, hash_based_embedding, init_embedding_backend, init_embedding_engine,
-    model_not_found_error,
+    check_model_exists, generate_with_fallback, hash_based_embedding, init_embedding_backend,
+    init_embedding_engine, model_not_found_error,
 };

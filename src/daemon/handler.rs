@@ -387,6 +387,7 @@ impl RequestHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     async fn create_test_handler() -> (RequestHandler, TempDir) {
@@ -395,8 +396,14 @@ mod tests {
         config.node.data_dir = temp_dir.path().to_path_buf();
 
         let index_manager = Arc::new(IndexManager::load(&config).unwrap());
-        let write_pipeline = Arc::new(WritePipeline::new(index_manager.clone(), 100));
-        let (shutdown_tx, _) = broadcast::channel(1);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let write_pipeline = Arc::new(WritePipeline::start(
+            index_manager.clone(),
+            None,
+            100,
+            Duration::from_secs(60),
+            shutdown_rx,
+        ));
 
         let handler = RequestHandler::new(index_manager, write_pipeline, config, shutdown_tx);
         (handler, temp_dir)

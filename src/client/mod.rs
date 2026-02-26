@@ -51,89 +51,74 @@ pub enum ClientError {
     DaemonError(String),
 }
 
+/// Send a request to the daemon and extract the response
+async fn send_request<T>(
+    request: Request,
+    extract: impl FnOnce(Response) -> Result<T, ClientError>,
+) -> Result<T, ClientError> {
+    let mut client = DaemonClient::connect().await?;
+    let response = client.send(request).await?;
+    extract(response)
+}
+
 /// Search the index via daemon
 pub async fn search(
     query: &str,
     top_k: usize,
     format: OutputFormat,
 ) -> Result<Vec<SearchResult>, ClientError> {
-    let mut client = DaemonClient::connect().await?;
-
-    let response = client
-        .send(Request::Search {
+    send_request(
+        Request::Search {
             query: query.to_string(),
             top_k,
             format,
             filters: None,
-        })
-        .await?;
-
-    match response {
-        Response::SearchResults { results, .. } => Ok(results),
-        Response::Error { message, .. } => Err(ClientError::SearchFailed(message)),
-        _ => Err(ClientError::UnexpectedResponse),
-    }
+        },
+        |response| match response {
+            Response::SearchResults { results, .. } => Ok(results),
+            Response::Error { message, .. } => Err(ClientError::SearchFailed(message)),
+            _ => Err(ClientError::UnexpectedResponse),
+        },
+    )
+    .await
 }
 
 /// Get daemon status
 pub async fn status() -> Result<DaemonStatus, ClientError> {
-    let mut client = DaemonClient::connect().await?;
-
-    let response = client.send(Request::Status).await?;
-
-    match response {
+    send_request(Request::Status, |response| match response {
         Response::Status(status) => Ok(status),
         Response::Error { message, .. } => Err(ClientError::DaemonError(message)),
         _ => Err(ClientError::UnexpectedResponse),
-    }
+    })
+    .await
 }
 
 /// Get index statistics
 pub async fn stats() -> Result<IndexStats, ClientError> {
-    let mut client = DaemonClient::connect().await?;
-
-    let response = client.send(Request::Stats).await?;
-
-    match response {
+    send_request(Request::Stats, |response| match response {
         Response::Stats(stats) => Ok(stats),
         Response::Error { message, .. } => Err(ClientError::DaemonError(message)),
         _ => Err(ClientError::UnexpectedResponse),
-    }
+    })
+    .await
 }
 
 /// Ping the daemon to check if it's running
 pub async fn ping() -> Result<bool, ClientError> {
-    let mut client = DaemonClient::connect().await?;
-
-    let response = client.send(Request::Ping).await?;
-
-    Ok(matches!(response, Response::Pong))
+    send_request(Request::Ping, |response| {
+        Ok(matches!(response, Response::Pong))
+    })
+    .await
 }
 
 /// Request daemon shutdown
 pub async fn shutdown() -> Result<(), ClientError> {
-    let mut client = DaemonClient::connect().await?;
-
-    let response = client.send(Request::Shutdown).await?;
-
-    match response {
+    send_request(Request::Shutdown, |response| match response {
         Response::Ok => Ok(()),
         Response::Error { message, .. } => Err(ClientError::DaemonError(message)),
         _ => Err(ClientError::UnexpectedResponse),
-    }
-}
-
-/// Force a commit of pending writes
-pub async fn force_commit() -> Result<(), ClientError> {
-    let mut client = DaemonClient::connect().await?;
-
-    let response = client.send(Request::ForceCommit).await?;
-
-    match response {
-        Response::Ok => Ok(()),
-        Response::Error { message, .. } => Err(ClientError::DaemonError(message)),
-        _ => Err(ClientError::UnexpectedResponse),
-    }
+    })
+    .await
 }
 
 /// Index chunks via daemon
@@ -190,76 +175,46 @@ pub async fn start_import(
     source: ImportSource,
     options: ImportOptions,
 ) -> Result<Uuid, ClientError> {
-    let mut client = DaemonClient::connect().await?;
-
-    let response = client
-        .send(Request::ImportStart { source, options })
-        .await?;
-
-    match response {
-        Response::JobStarted { job_id } => Ok(job_id),
-        Response::Error { message, .. } => Err(ClientError::ImportFailed(message)),
-        _ => Err(ClientError::UnexpectedResponse),
-    }
-}
-
-/// Cancel an import job
-pub async fn cancel_import(job_id: Uuid) -> Result<(), ClientError> {
-    let mut client = DaemonClient::connect().await?;
-
-    let response = client.send(Request::ImportCancel { job_id }).await?;
-
-    match response {
-        Response::Ok => Ok(()),
-        Response::Error { message, .. } => Err(ClientError::DaemonError(message)),
-        _ => Err(ClientError::UnexpectedResponse),
-    }
+    send_request(
+        Request::ImportStart { source, options },
+        |response| match response {
+            Response::JobStarted { job_id } => Ok(job_id),
+            Response::Error { message, .. } => Err(ClientError::ImportFailed(message)),
+            _ => Err(ClientError::UnexpectedResponse),
+        },
+    )
+    .await
 }
 
 /// Start a scrape job
 /// Returns job_id for tracking progress
 pub async fn start_scrape(urls: Vec<String>, options: ScrapeOptions) -> Result<Uuid, ClientError> {
-    let mut client = DaemonClient::connect().await?;
-
-    let response = client
-        .send(Request::ScrapeStart { urls, options })
-        .await?;
-
-    match response {
-        Response::JobStarted { job_id } => Ok(job_id),
-        Response::Error { message, .. } => Err(ClientError::ScrapeFailed(message)),
-        _ => Err(ClientError::UnexpectedResponse),
-    }
-}
-
-/// Cancel a scrape job
-pub async fn cancel_scrape(job_id: Uuid) -> Result<(), ClientError> {
-    let mut client = DaemonClient::connect().await?;
-
-    let response = client.send(Request::ScrapeCancel { job_id }).await?;
-
-    match response {
-        Response::Ok => Ok(()),
-        Response::Error { message, .. } => Err(ClientError::DaemonError(message)),
-        _ => Err(ClientError::UnexpectedResponse),
-    }
+    send_request(
+        Request::ScrapeStart { urls, options },
+        |response| match response {
+            Response::JobStarted { job_id } => Ok(job_id),
+            Response::Error { message, .. } => Err(ClientError::ScrapeFailed(message)),
+            _ => Err(ClientError::UnexpectedResponse),
+        },
+    )
+    .await
 }
 
 /// Get progress of a job
 pub async fn job_progress(job_id: Uuid) -> Result<Progress, ClientError> {
-    let mut client = DaemonClient::connect().await?;
-
-    let response = client.send(Request::JobProgress { job_id }).await?;
-
-    match response {
-        Response::JobProgress { progress, .. } => Ok(progress),
-        Response::Error { code, message } => {
-            if code == crate::daemon::protocol::ErrorCode::JobNotFound {
-                Err(ClientError::JobNotFound(job_id))
-            } else {
-                Err(ClientError::DaemonError(message))
+    send_request(
+        Request::JobProgress { job_id },
+        |response| match response {
+            Response::JobProgress { progress, .. } => Ok(progress),
+            Response::Error { code, message } => {
+                if code == crate::daemon::protocol::ErrorCode::JobNotFound {
+                    Err(ClientError::JobNotFound(job_id))
+                } else {
+                    Err(ClientError::DaemonError(message))
+                }
             }
-        }
-        _ => Err(ClientError::UnexpectedResponse),
-    }
+            _ => Err(ClientError::UnexpectedResponse),
+        },
+    )
+    .await
 }

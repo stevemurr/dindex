@@ -11,8 +11,10 @@ use anyhow::Result;
 use parking_lot::RwLock;
 use tracing::{debug, info};
 
+use std::collections::HashSet;
+
 use crate::config::Config;
-use crate::embedding::{hash_based_embedding, EmbeddingEngine};
+use crate::embedding::{generate_with_fallback, EmbeddingEngine};
 use crate::index::{ChunkStorage, VectorIndex};
 use crate::retrieval::{Bm25Index, HybridIndexer, HybridRetriever};
 use crate::types::{Chunk, Query, QueryFilters, SearchResult};
@@ -141,10 +143,22 @@ impl IndexManager {
 
     /// Filter search results by metadata constraints
     fn filter_by_metadata(results: Vec<SearchResult>, filters: &QueryFilters) -> Vec<SearchResult> {
+        // Pre-build HashSet for O(1) document_ids lookup
+        let document_id_set: Option<HashSet<&str>> = filters.document_ids.as_ref().map(|ids| {
+            ids.iter().map(|s| s.as_str()).collect()
+        });
+
         results
             .into_iter()
             .filter(|result| {
                 let extra = &result.chunk.metadata.extra;
+
+                // Check document_ids filter
+                if let Some(ref id_set) = document_id_set {
+                    if !id_set.contains(result.chunk.metadata.document_id.as_str()) {
+                        return false;
+                    }
+                }
 
                 // Check source_url_prefix
                 if let Some(ref prefix) = filters.source_url_prefix {
@@ -294,19 +308,9 @@ impl IndexManager {
 
     /// Generate embedding for content using real embedding engine
     fn generate_embedding(&self, content: &str) -> Vec<f32> {
-        if let Some(ref engine) = *self.embedding_engine.read() {
-            match engine.embed(content) {
-                Ok(embedding) => return embedding,
-                Err(e) => {
-                    tracing::warn!("Embedding generation failed, using fallback: {}", e);
-                    return hash_based_embedding(content, engine.dimensions());
-                }
-            }
-        }
-
-        // Fallback: generate deterministic fake embedding if no engine available
-        tracing::warn!("No embedding engine available for search, using hash-based fallback");
-        hash_based_embedding(content, self.config.embedding.dimensions)
+        let guard = self.embedding_engine.read();
+        let engine_ref = guard.as_ref().map(|arc| arc.as_ref());
+        generate_with_fallback(engine_ref, content, self.config.embedding.dimensions)
     }
 
     /// Get file size, returning 0 if file doesn't exist

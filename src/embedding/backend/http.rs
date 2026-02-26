@@ -6,6 +6,7 @@
 //! - Local servers (LM Studio, vLLM, Ollama with OpenAI compat, text-embeddings-inference)
 
 use super::traits::{EmbeddingBackend, EmbeddingError, EmbeddingResult};
+use crate::embedding::normalize_embedding;
 use crate::types::Embedding;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
@@ -282,16 +283,6 @@ impl EmbeddingBackend for HttpBackend {
     }
 }
 
-/// Normalize an embedding vector to unit length
-fn normalize_embedding(embedding: &Embedding) -> Embedding {
-    let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        embedding.iter().map(|x| x / norm).collect()
-    } else {
-        embedding.clone()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,13 +295,5 @@ mod tests {
         assert_eq!(config.dimensions, 1536);
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.max_batch_size, 100);
-    }
-
-    #[test]
-    fn test_normalize_embedding() {
-        let embedding = vec![3.0, 4.0];
-        let normalized = normalize_embedding(&embedding);
-        assert!((normalized[0] - 0.6).abs() < 1e-6);
-        assert!((normalized[1] - 0.8).abs() < 1e-6);
     }
 }

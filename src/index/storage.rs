@@ -9,7 +9,6 @@ use anyhow::{Context, Result};
 #[cfg(test)]
 use crate::types::ChunkMetadata;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
 
 /// Storage for chunk metadata and content using sled embedded database
@@ -238,120 +237,6 @@ impl ChunkStorage {
         );
 
         Ok(Some(storage))
-    }
-}
-
-/// Document storage for managing full documents using sled
-pub struct DocumentStorage {
-    /// Sled database for document metadata
-    db: sled::Db,
-}
-
-/// Document metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocumentMetadata {
-    pub id: String,
-    pub title: Option<String>,
-    pub url: Option<String>,
-    pub chunk_ids: Vec<String>,
-    pub indexed_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl DocumentStorage {
-    /// Create new document storage
-    pub fn new(data_dir: impl AsRef<Path>) -> Result<Self> {
-        Self::open(data_dir)
-    }
-
-    /// Load from disk (auto-migrates from JSON if needed)
-    pub fn load(data_dir: impl AsRef<Path>) -> Result<Self> {
-        let data_dir = data_dir.as_ref();
-        let json_path = data_dir.join("documents.json");
-        let sled_path = data_dir.join("documents.sled");
-
-        // Check if we need to migrate from JSON
-        if json_path.exists() && !sled_path.exists() {
-            tracing::info!("Migrating document storage from JSON to sled...");
-
-            let data = std::fs::read_to_string(&json_path)?;
-            let documents: HashMap<String, DocumentMetadata> = serde_json::from_str(&data)?;
-
-            let db = sled::open(&sled_path)
-                .with_context(|| format!("Failed to open document database at {:?}", sled_path))?;
-
-            for (id, metadata) in documents {
-                if let Ok(data) = bincode::serialize(&metadata) {
-                    let _ = db.insert(id.as_bytes(), data);
-                }
-            }
-            db.flush()?;
-
-            // Backup old JSON file
-            let backup_path = data_dir.join("documents.json.backup");
-            std::fs::rename(&json_path, &backup_path)?;
-            tracing::info!("Migration complete. Old JSON backed up to {:?}", backup_path);
-
-            return Ok(Self { db });
-        }
-
-        Self::open(data_dir)
-    }
-
-    /// Open or create the sled database
-    fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
-        let db_path = data_dir.as_ref().join("documents.sled");
-        let db = sled::open(&db_path)
-            .with_context(|| format!("Failed to open document database at {:?}", db_path))?;
-        Ok(Self { db })
-    }
-
-    /// Save to disk (flushes sled buffers)
-    pub fn save(&self) -> Result<()> {
-        self.db.flush().context("Failed to flush document database")?;
-        Ok(())
-    }
-
-    /// Add document metadata
-    pub fn add(&self, metadata: DocumentMetadata) {
-        if let Ok(data) = bincode::serialize(&metadata) {
-            let _ = self.db.insert(metadata.id.as_bytes(), data);
-        }
-    }
-
-    /// Get document metadata
-    pub fn get(&self, document_id: &str) -> Option<DocumentMetadata> {
-        self.db
-            .get(document_id.as_bytes())
-            .ok()
-            .flatten()
-            .and_then(|data| bincode::deserialize(&data).ok())
-    }
-
-    /// Remove document
-    pub fn remove(&self, document_id: &str) -> Option<DocumentMetadata> {
-        let metadata = self.get(document_id)?;
-        let _ = self.db.remove(document_id.as_bytes());
-        Some(metadata)
-    }
-
-    /// List all document IDs
-    pub fn document_ids(&self) -> Vec<String> {
-        self.db
-            .iter()
-            .keys()
-            .filter_map(|r| r.ok())
-            .filter_map(|k| String::from_utf8(k.to_vec()).ok())
-            .collect()
-    }
-
-    /// Get document count
-    pub fn len(&self) -> usize {
-        self.db.len()
-    }
-
-    /// Check if empty
-    pub fn is_empty(&self) -> bool {
-        self.db.is_empty()
     }
 }
 

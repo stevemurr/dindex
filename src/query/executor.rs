@@ -4,6 +4,7 @@ use crate::embedding::EmbeddingEngine;
 use crate::network::QueryRequest;
 use crate::retrieval::HybridRetriever;
 use crate::types::{Query, SearchResult};
+use crate::util::truncate_str;
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Instant;
@@ -54,7 +55,7 @@ impl QueryExecutor {
 
         debug!(
             "Executed query '{}': {} results in {}ms",
-            truncate(&query.text, 50),
+            truncate_str(&query.text, 50),
             results.len(),
             processing_time
         );
@@ -82,29 +83,5 @@ impl QueryExecutor {
             results,
             processing_time_ms: processing_time,
         })
-    }
-}
-
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len - 3])
-    } else {
-        s.to_string()
-    }
-}
-
-/// Batch query executor for parallel execution
-pub struct BatchExecutor {
-    executor: QueryExecutor,
-}
-
-impl BatchExecutor {
-    pub fn new(executor: QueryExecutor) -> Self {
-        Self { executor }
-    }
-
-    /// Execute multiple queries
-    pub fn execute_batch(&self, queries: &[Query]) -> Vec<Result<ExecutionResult>> {
-        queries.iter().map(|q| self.executor.execute(q)).collect()
     }
 }

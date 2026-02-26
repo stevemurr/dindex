@@ -116,134 +116,10 @@ impl BloomFilter {
         self.bits.len()
     }
 
-    /// Estimate the number of items in the filter
-    pub fn estimate_count(&self) -> usize {
-        let set_bits: usize = self.bits.iter().map(|b| b.count_ones() as usize).sum();
-        let m = self.num_bits as f64;
-        let k = self.num_hashes as f64;
-        let x = set_bits as f64;
-
-        // Handle edge cases: if all bits are set or nearly all, we can't estimate accurately
-        // ln(0) is undefined, so guard against x >= m
-        if x >= m || k == 0.0 {
-            return set_bits; // Return number of set bits as upper bound
-        }
-
-        // n ≈ -m/k * ln(1 - x/m)
-        let estimate = (-m / k) * (1.0 - x / m).ln();
-        if estimate.is_nan() || estimate.is_infinite() || estimate < 0.0 {
-            return 0;
-        }
-        estimate.round() as usize
-    }
-
-    /// Merge another bloom filter into this one (union)
-    pub fn merge(&mut self, other: &BloomFilter) {
-        assert_eq!(self.num_bits, other.num_bits);
-        assert_eq!(self.num_hashes, other.num_hashes);
-
-        for (a, b) in self.bits.iter_mut().zip(other.bits.iter()) {
-            *a |= *b;
-        }
-    }
-
     /// Get fill ratio (fraction of bits set)
     pub fn fill_ratio(&self) -> f64 {
         let set_bits: usize = self.bits.iter().map(|b| b.count_ones() as usize).sum();
         set_bits as f64 / self.num_bits as f64
-    }
-}
-
-/// Counting bloom filter (allows deletions)
-#[derive(Debug, Clone)]
-pub struct CountingBloomFilter {
-    /// Counters (4 bits each, packed into bytes)
-    counters: Vec<u8>,
-    /// Number of counters
-    num_counters: usize,
-    /// Number of hash functions
-    num_hashes: usize,
-}
-
-impl CountingBloomFilter {
-    /// Create a new counting bloom filter
-    pub fn new(num_items: usize, false_positive_rate: f64) -> Self {
-        let m = (-(num_items as f64) * false_positive_rate.ln() / (2.0_f64.ln().powi(2))).ceil() as usize;
-        let num_counters = m.max(8);
-        let num_bytes = (num_counters + 1) / 2; // 4 bits per counter
-
-        let k = ((num_counters as f64 / num_items as f64) * 2.0_f64.ln()).round() as usize;
-        let num_hashes = k.max(1).min(16);
-
-        Self {
-            counters: vec![0u8; num_bytes],
-            num_counters,
-            num_hashes,
-        }
-    }
-
-    /// Insert an item
-    pub fn insert(&mut self, item: &[u8]) {
-        for i in 0..self.num_hashes {
-            let hash = xxh3_64_with_seed(item, i as u64) as usize;
-            let idx = hash % self.num_counters;
-            self.increment_counter(idx);
-        }
-    }
-
-    /// Remove an item
-    pub fn remove(&mut self, item: &[u8]) {
-        for i in 0..self.num_hashes {
-            let hash = xxh3_64_with_seed(item, i as u64) as usize;
-            let idx = hash % self.num_counters;
-            self.decrement_counter(idx);
-        }
-    }
-
-    /// Check if item might be present
-    pub fn contains(&self, item: &[u8]) -> bool {
-        for i in 0..self.num_hashes {
-            let hash = xxh3_64_with_seed(item, i as u64) as usize;
-            let idx = hash % self.num_counters;
-            if self.get_counter(idx) == 0 {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn get_counter(&self, idx: usize) -> u8 {
-        let byte_idx = idx / 2;
-        if idx % 2 == 0 {
-            self.counters[byte_idx] & 0x0F
-        } else {
-            (self.counters[byte_idx] >> 4) & 0x0F
-        }
-    }
-
-    fn increment_counter(&mut self, idx: usize) {
-        let byte_idx = idx / 2;
-        let current = self.get_counter(idx);
-        if current < 15 {
-            // Don't overflow
-            if idx % 2 == 0 {
-                self.counters[byte_idx] = (self.counters[byte_idx] & 0xF0) | (current + 1);
-            } else {
-                self.counters[byte_idx] = (self.counters[byte_idx] & 0x0F) | ((current + 1) << 4);
-            }
-        }
-    }
-
-    fn decrement_counter(&mut self, idx: usize) {
-        let byte_idx = idx / 2;
-        let current = self.get_counter(idx);
-        if current > 0 {
-            if idx % 2 == 0 {
-                self.counters[byte_idx] = (self.counters[byte_idx] & 0xF0) | (current - 1);
-            } else {
-                self.counters[byte_idx] = (self.counters[byte_idx] & 0x0F) | ((current - 1) << 4);
-            }
-        }
     }
 }
 
@@ -325,7 +201,7 @@ impl BandedBloomFilter {
     }
 
     /// Extract a band from the signature and create a hashable key
-    fn extract_band_hash(&self, signature: &[u64], num_bits: usize, band_idx: usize) -> Vec<u8> {
+    fn extract_band_hash(&self, signature: &[u64], num_bits: usize, band_idx: usize) -> [u8; 9] {
         let start_bit = band_idx * self.bits_per_band;
         let end_bit = (start_bit + self.bits_per_band).min(num_bits);
 
@@ -340,9 +216,9 @@ impl BandedBloomFilter {
         }
 
         // Create key: [band_idx as u8] + [band_bits as le_bytes]
-        let mut key = Vec::with_capacity(9);
-        key.push(band_idx as u8);
-        key.extend_from_slice(&band_bits.to_le_bytes());
+        let mut key = [0u8; 9];
+        key[0] = band_idx as u8;
+        key[1..9].copy_from_slice(&band_bits.to_le_bytes());
         key
     }
 
@@ -411,17 +287,6 @@ mod tests {
 
         assert!(bf2.contains(b"test"));
         assert_eq!(bf.num_bits, bf2.num_bits);
-    }
-
-    #[test]
-    fn test_counting_bloom_filter() {
-        let mut cbf = CountingBloomFilter::new(100, 0.01);
-
-        cbf.insert(b"hello");
-        assert!(cbf.contains(b"hello"));
-
-        cbf.remove(b"hello");
-        assert!(!cbf.contains(b"hello"));
     }
 
     #[test]

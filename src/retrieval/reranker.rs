@@ -71,11 +71,7 @@ impl Reranker {
         }
 
         // Sort by new scores
-        results.sort_by(|a, b| {
-            b.relevance_score
-                .partial_cmp(&a.relevance_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        results.sort_by(|a, b| b.relevance_score.total_cmp(&a.relevance_score));
 
         Ok(())
     }
@@ -190,10 +186,6 @@ impl SimpleReranker {
         }
 
         // Sort by adjusted scores
-        results.sort_by(|a, b| {
-            b.relevance_score
-                .partial_cmp(&a.relevance_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        results.sort_by(|a, b| b.relevance_score.total_cmp(&a.relevance_score));
     }
 }

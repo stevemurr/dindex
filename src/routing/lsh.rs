@@ -100,39 +100,6 @@ impl LshIndex {
     }
 }
 
-/// Multi-probe LSH for better recall
-pub struct MultiProbeLsh {
-    base_lsh: LshIndex,
-    num_probes: usize,
-}
-
-impl MultiProbeLsh {
-    pub fn new(dimensions: usize, num_bits: usize, num_probes: usize, seed: u64) -> Self {
-        Self {
-            base_lsh: LshIndex::new(dimensions, num_bits, seed),
-            num_probes,
-        }
-    }
-
-    /// Hash with multi-probe (returns base signature + nearby signatures)
-    pub fn hash_with_probes(&self, embedding: &Embedding) -> Vec<LshSignature> {
-        let base = self.base_lsh.hash(embedding);
-        let mut signatures = vec![base.clone()];
-
-        // Generate probe signatures by flipping individual bits
-        // This is a simplified version - full multi-probe uses more sophisticated probing
-        for i in 0..self.num_probes.min(self.base_lsh.num_bits) {
-            let mut probe_bits = base.bits.clone();
-            let word_idx = i / 64;
-            let bit_idx = i % 64;
-            probe_bits[word_idx] ^= 1 << bit_idx;
-            signatures.push(LshSignature::new(probe_bits, base.num_bits));
-        }
-
-        signatures
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

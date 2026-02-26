@@ -94,8 +94,7 @@ impl Ord for ScoredUrl {
     fn cmp(&self, other: &Self) -> Ordering {
         // Higher priority first, then older discovery time
         self.priority
-            .partial_cmp(&other.priority)
-            .unwrap_or(Ordering::Equal)
+            .total_cmp(&other.priority)
             .then_with(|| other.discovered_at.cmp(&self.discovered_at))
     }
 }
@@ -138,8 +137,8 @@ pub struct UrlFrontier {
     /// Per-domain priority heaps, keyed by hostname
     domain_queues: HashMap<String, BinaryHeap<ScoredUrl>>,
 
-    /// Global seen-URL filter (using HashSet for now; can be replaced with Bloom filter)
-    seen_urls: HashSet<String>,
+    /// Global seen-URL filter using hashed URLs to save memory
+    seen_urls: HashSet<u64>,
 
     /// Domain assignment for routing
     domain_assignment: DomainAssignment,
@@ -171,16 +170,22 @@ impl UrlFrontier {
         }
     }
 
+    /// Hash a normalized URL string to u64
+    fn hash_url(normalized: &str) -> u64 {
+        xxhash_rust::xxh3::xxh3_64(normalized.as_bytes())
+    }
+
     /// Add a discovered URL to the appropriate queue
     pub fn add_discovered_url(&mut self, url: Url, depth: u8) -> UrlDestination {
         // Normalize and check if seen
         let normalized = Self::normalize_url(&url);
-        if self.seen_urls.contains(&normalized) {
+        let hash = Self::hash_url(&normalized);
+        if self.seen_urls.contains(&hash) {
             return UrlDestination::AlreadySeen;
         }
 
         // Mark as seen
-        self.seen_urls.insert(normalized);
+        self.seen_urls.insert(hash);
 
         let hostname = url.host_str().unwrap_or_default().to_string();
         let scored_url = ScoredUrl::with_depth(url, depth);
@@ -258,25 +263,6 @@ impl UrlFrontier {
         None
     }
 
-    /// Get next URL from a specific domain
-    pub fn pop_from_domain(&mut self, domain: &str) -> Option<ScoredUrl> {
-        self.domain_queues.get_mut(domain).and_then(|q| q.pop())
-    }
-
-    /// Peek at the next URL from a specific domain
-    pub fn peek_domain(&self, domain: &str) -> Option<&ScoredUrl> {
-        self.domain_queues.get(domain).and_then(|q| q.peek())
-    }
-
-    /// Get all domains with pending URLs
-    pub fn pending_domains(&self) -> Vec<String> {
-        self.domain_queues
-            .iter()
-            .filter(|(_, q)| !q.is_empty())
-            .map(|(d, _)| d.clone())
-            .collect()
-    }
-
     /// Get outbound batches that are ready to send
     pub fn take_ready_batches(&mut self) -> Vec<UrlExchangeBatch> {
         let ready_peers: Vec<_> = self
@@ -324,19 +310,7 @@ impl UrlFrontier {
 
     /// Normalize a URL for deduplication
     fn normalize_url(url: &Url) -> String {
-        let mut normalized = url.clone();
-
-        // Remove fragment
-        normalized.set_fragment(None);
-
-        // Sort query parameters
-        if let Some(query) = normalized.query() {
-            let mut params: Vec<_> = query.split('&').collect();
-            params.sort();
-            normalized.set_query(Some(&params.join("&")));
-        }
-
-        normalized.as_str().to_lowercase()
+        super::normalize_url(url)
     }
 
     /// Add seed URLs
@@ -349,7 +323,7 @@ impl UrlFrontier {
     /// Check if a URL has been seen
     pub fn is_seen(&self, url: &Url) -> bool {
         let normalized = Self::normalize_url(url);
-        self.seen_urls.contains(&normalized)
+        self.seen_urls.contains(&Self::hash_url(&normalized))
     }
 
     /// Update domain assignment (when network topology changes)

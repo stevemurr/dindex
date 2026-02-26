@@ -1,14 +1,16 @@
 //! Hybrid retrieval combining dense and sparse search
 
 use super::{
-    bm25::{Bm25Index, Bm25SearchResult},
-    fusion::{reciprocal_rank_fusion, to_ranked_results, RankedResult, RrfConfig},
+    bm25::Bm25Index,
+    fusion::{reciprocal_rank_fusion, to_ranked_results, RankedResult, RetrievalMethod, RrfConfig},
 };
 use crate::config::RetrievalConfig;
 use crate::embedding::EmbeddingEngine;
-use crate::index::{ChunkStorage, VectorIndex, VectorSearchResult};
+use crate::index::{ChunkStorage, VectorIndex};
 use crate::types::{Chunk, ChunkId, Embedding, Query, SearchResult};
+use crate::util::truncate_str;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -77,7 +79,7 @@ impl HybridRetriever {
                     .iter()
                     .map(|r| (r.chunk_id.clone(), r.similarity))
                     .collect();
-                ranked_lists.push(to_ranked_results(&ranked, "dense"));
+                ranked_lists.push(to_ranked_results(&ranked, RetrievalMethod::Dense));
                 debug!("Dense search: {} results", dense_results.len());
             }
         }
@@ -89,7 +91,7 @@ impl HybridRetriever {
                 .iter()
                 .map(|r| (r.chunk_id.clone(), r.score))
                 .collect();
-            ranked_lists.push(to_ranked_results(&ranked, "bm25"));
+            ranked_lists.push(to_ranked_results(&ranked, RetrievalMethod::Bm25));
             debug!("BM25 search: {} results", bm25_results.len());
         }
 
@@ -104,53 +106,31 @@ impl HybridRetriever {
         let chunk_ids: Vec<String> = top_fused.iter().map(|f| f.chunk_id.clone()).collect();
         let stored_chunks = self.chunk_storage.get_batch(&chunk_ids);
 
+        // Build HashMap for O(1) lookup instead of O(n) linear scan per result
+        let chunk_map: HashMap<&str, _> = stored_chunks
+            .iter()
+            .map(|s| (s.chunk.metadata.chunk_id.as_str(), s))
+            .collect();
+
         // Build search results
         let mut results: Vec<SearchResult> = Vec::with_capacity(top_k);
         for fused_result in top_fused {
-            if let Some(stored) = stored_chunks.iter().find(|s| s.chunk.metadata.chunk_id == fused_result.chunk_id) {
+            if let Some(stored) = chunk_map.get(fused_result.chunk_id.as_str()) {
                 let mut result = SearchResult::new(stored.chunk.clone(), fused_result.rrf_score);
-                result.matched_by = fused_result.contributing_methods.clone();
+                result.matched_by = fused_result.contributing_methods.iter().map(|m| m.to_string()).collect();
                 results.push(result);
             }
         }
 
         info!(
             "Hybrid search for '{}': {} results",
-            truncate_query(&query.text),
+            truncate_str(&query.text, 50),
             results.len()
         );
 
         Ok(results)
     }
 
-    /// Search with pre-computed embedding
-    pub fn search_with_embedding(
-        &self,
-        query: &Query,
-        embedding: &Embedding,
-    ) -> Result<Vec<SearchResult>> {
-        self.search(query, Some(embedding))
-    }
-
-    /// Dense-only search
-    pub fn dense_search(&self, embedding: &Embedding, k: usize) -> Result<Vec<VectorSearchResult>> {
-        self.vector_index.search(embedding, k)
-    }
-
-    /// BM25-only search
-    pub fn bm25_search(&self, query_text: &str, k: usize) -> Result<Vec<Bm25SearchResult>> {
-        self.bm25_index.search(query_text, k)
-    }
-}
-
-fn truncate_query(query: &str) -> String {
-    let char_count = query.chars().count();
-    if char_count > 50 {
-        let truncated: String = query.chars().take(47).collect();
-        format!("{}...", truncated)
-    } else {
-        query.to_string()
-    }
 }
 
 /// Builder for creating a hybrid retriever with indexing support
@@ -295,7 +275,7 @@ mod tests {
         let key = indexer.index_chunk(&chunk, &embedding).unwrap();
         indexer.save().unwrap();
 
-        assert!(key > 0 || key == 0); // Key was assigned
+        // Key was assigned (any u64 value is valid)
 
         // Verify it's stored
         let stored = chunk_storage

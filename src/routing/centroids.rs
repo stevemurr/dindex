@@ -2,6 +2,7 @@
 //!
 //! Generates cluster centroids from node content for efficient routing
 
+use crate::embedding::cosine_similarity;
 use crate::types::{Embedding, NodeCentroid};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -209,41 +210,9 @@ pub fn truncate_centroids(centroids: &[NodeCentroid], target_dims: usize) -> Vec
         .collect()
 }
 
-/// Find nearest centroids for a query embedding
-pub fn find_nearest_centroids(
-    query: &Embedding,
-    centroids: &[NodeCentroid],
-    top_k: usize,
-) -> Vec<(u32, f32)> {
-    let mut scores: Vec<(u32, f32)> = centroids
-        .iter()
-        .map(|c| {
-            let sim = cosine_similarity(query, &c.embedding);
-            (c.centroid_id, sim)
-        })
-        .collect();
-
-    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scores.truncate(top_k);
-    scores
-}
-
 /// Cosine distance (1 - cosine similarity)
 fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     1.0 - cosine_similarity(a, b)
-}
-
-/// Cosine similarity between two vectors
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-    if norm_a > 0.0 && norm_b > 0.0 {
-        dot / (norm_a * norm_b)
-    } else {
-        0.0
-    }
 }
 
 /// Normalize vector in place

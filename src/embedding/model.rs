@@ -3,10 +3,6 @@
 //! Note: With embed_anything, model downloading is handled automatically
 //! by the HuggingFace hub. This module provides metadata and compatibility.
 
-use crate::config::EmbeddingConfig;
-use anyhow::Result;
-use tracing::info;
-
 /// Model registry with known models and their metadata
 pub struct ModelRegistry;
 
@@ -145,43 +141,6 @@ impl ModelRegistry {
         ]
     }
 
-    /// Get recommended model for a use case
-    pub fn recommended(use_case: &str) -> &'static str {
-        match use_case {
-            "english" => "bge-base-en-v1.5",
-            "fast" | "small" => "all-MiniLM-L6-v2",
-            "quality" | "best" => "bge-large-en-v1.5",
-            _ => "all-MiniLM-L6-v2",
-        }
-    }
-}
-
-/// Create an embedding config for a model
-///
-/// Note: With embed_anything, model downloading is automatic.
-/// This function just creates the config with appropriate dimensions.
-pub fn create_config(model_name: &str) -> Result<EmbeddingConfig> {
-    let model_info = ModelRegistry::get(model_name)
-        .ok_or_else(|| anyhow::anyhow!("Unknown model: {}", model_name))?;
-
-    info!(
-        "Creating config for model: {} ({} dims, {} max tokens)",
-        model_name, model_info.dimensions, model_info.max_sequence_length
-    );
-
-    Ok(EmbeddingConfig {
-        model_name: model_name.to_string(),
-        model_path: None, // embed_anything handles this
-        tokenizer_path: None, // embed_anything handles this
-        dimensions: model_info.dimensions,
-        truncated_dimensions: if model_info.supports_matryoshka {
-            256
-        } else {
-            model_info.dimensions
-        },
-        max_sequence_length: model_info.max_sequence_length,
-        ..Default::default()
-    })
 }
 
 /// Check if a model is cached in HuggingFace hub

@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::embedding::{hash_based_embedding, EmbeddingEngine};
+use crate::embedding::{generate_with_fallback, EmbeddingEngine};
 use crate::types::Chunk;
 
 use super::index_manager::IndexManager;
@@ -38,19 +38,6 @@ pub struct WritePipeline {
 }
 
 impl WritePipeline {
-    /// Create a new write pipeline
-    pub fn new(_index_manager: Arc<IndexManager>, batch_size: usize) -> Self {
-        let (ingest_tx, _ingest_rx) = mpsc::channel(1000);
-
-        // Note: The worker task is started separately via start()
-        // to allow for proper shutdown handling
-
-        Self {
-            ingest_tx,
-            batch_size,
-        }
-    }
-
     /// Create and start the write pipeline with a shutdown receiver
     pub fn start(
         index_manager: Arc<IndexManager>,
@@ -220,21 +207,11 @@ impl WritePipelineWorker {
 
     /// Generate embedding for content using real embedding engine
     fn generate_embedding(&self, content: &str) -> Vec<f32> {
-        if let Some(ref engine) = self.embedding_engine {
-            match engine.embed(content) {
-                Ok(embedding) => return embedding,
-                Err(e) => {
-                    warn!("Embedding generation failed, using fallback: {}", e);
-                    // Use engine's configured dimensions for fallback
-                    return hash_based_embedding(content, engine.dimensions());
-                }
-            }
-        }
-
-        // Fallback: generate deterministic fake embedding if no engine available
-        // Use configured dimensions from IndexManager
-        warn!("No embedding engine available, using hash-based fallback");
-        hash_based_embedding(content, self.index_manager.dimensions())
+        generate_with_fallback(
+            self.embedding_engine.as_deref(),
+            content,
+            self.index_manager.dimensions(),
+        )
     }
 }
 
@@ -257,7 +234,14 @@ mod tests {
         let config = test_config(temp_dir.path());
         let index_manager = Arc::new(IndexManager::load(&config).unwrap());
 
-        let pipeline = WritePipeline::new(index_manager, 100);
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let pipeline = WritePipeline::start(
+            index_manager,
+            None,
+            100,
+            Duration::from_secs(60),
+            shutdown_rx,
+        );
         assert_eq!(pipeline.batch_size(), 100);
     }
 

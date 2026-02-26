@@ -152,9 +152,11 @@ impl VectorIndex {
                 let next_key = db
                     .get(b"__next_key__")?
                     .map(|v| {
-                        let bytes: [u8; 8] = v.as_ref().try_into().unwrap_or([0; 8]);
-                        u64::from_le_bytes(bytes)
+                        let bytes: [u8; 8] = v.as_ref().try_into()
+                            .context("Corrupt next_key entry in mappings database")?;
+                        Ok::<u64, anyhow::Error>(u64::from_le_bytes(bytes))
                     })
+                    .transpose()?
                     .unwrap_or(0);
 
                 // Load all mappings
@@ -164,7 +166,10 @@ impl VectorIndex {
                     if k.starts_with(b"__") {
                         continue;
                     }
-                    let key = u64::from_le_bytes(k.as_ref().try_into().unwrap_or([0; 8]));
+                    let key = u64::from_le_bytes(
+                        k.as_ref().try_into()
+                            .with_context(|| format!("Corrupt key in mappings database: {} bytes", k.len()))?
+                    );
                     let chunk_id = String::from_utf8(v.to_vec())
                         .context("Invalid chunk ID in mappings")?;
                     chunk_to_key.insert(chunk_id.clone(), key);

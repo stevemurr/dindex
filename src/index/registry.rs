@@ -99,16 +99,22 @@ pub enum DuplicateCheckResult {
     },
 }
 
+/// Inner data protected by a single lock to prevent TOCTOU races
+struct RegistryInner {
+    /// Content ID to entry mapping (in-memory cache)
+    entries: HashMap<String, DocumentEntry>,
+    /// SimHash to content ID mapping (for exact simhash lookups)
+    simhash_index: HashMap<u64, String>,
+    /// LSH buckets for fast near-duplicate search (top 8 bits of simhash)
+    simhash_buckets: HashMap<u8, HashSet<String>>,
+    /// URL to content ID mapping (for URL-based lookups)
+    url_index: HashMap<String, String>,
+}
+
 /// Persistent document registry for deduplication
 pub struct DocumentRegistry {
-    /// Content ID to entry mapping (in-memory cache)
-    entries: RwLock<HashMap<String, DocumentEntry>>,
-    /// SimHash to content ID mapping (for exact simhash lookups)
-    simhash_index: RwLock<HashMap<u64, String>>,
-    /// LSH buckets for fast near-duplicate search (top 8 bits of simhash)
-    simhash_buckets: RwLock<HashMap<u8, HashSet<String>>>,
-    /// URL to content ID mapping (for URL-based lookups)
-    url_index: RwLock<HashMap<String, String>>,
+    /// All in-memory indices under a single lock
+    inner: RwLock<RegistryInner>,
     /// Sled database for persistent storage
     db: Option<sled::Db>,
     /// Storage path
@@ -124,10 +130,12 @@ impl DocumentRegistry {
         std::fs::create_dir_all(&data_dir)?;
 
         Ok(Self {
-            entries: RwLock::new(HashMap::new()),
-            simhash_index: RwLock::new(HashMap::new()),
-            simhash_buckets: RwLock::new(HashMap::new()),
-            url_index: RwLock::new(HashMap::new()),
+            inner: RwLock::new(RegistryInner {
+                entries: HashMap::new(),
+                simhash_index: HashMap::new(),
+                simhash_buckets: HashMap::new(),
+                url_index: HashMap::new(),
+            }),
             db: None,
             data_dir,
             distance_threshold,
@@ -214,15 +222,15 @@ impl DocumentRegistry {
         };
 
         // Write all entries to sled
-        let entries = self.entries.read();
-        for (content_id, entry) in entries.iter() {
+        let inner = self.inner.read();
+        for (content_id, entry) in inner.entries.iter() {
             let data = bincode::serialize(entry)?;
             db.insert(content_id.as_bytes(), data)?;
         }
 
         db.flush().context("Failed to flush registry database")?;
 
-        info!("Saved document registry with {} entries", entries.len());
+        info!("Saved document registry with {} entries", inner.entries.len());
 
         Ok(())
     }
@@ -230,67 +238,55 @@ impl DocumentRegistry {
     /// Check if content is a duplicate
     pub fn check_duplicate(&self, identity: &DocumentIdentity) -> DuplicateCheckResult {
         let content_id_str = identity.content_id.as_str();
+        let inner = self.inner.read();
 
         // Check for exact SimHash match first
-        {
-            let entries = self.entries.read();
-            if let Some(entry) = entries.get(content_id_str) {
-                // Check if content hash matches exactly
-                if entry.content_hash == identity.content_hash {
-                    return DuplicateCheckResult::ExactMatch {
-                        entry: entry.clone(),
-                    };
-                } else {
-                    // Same simhash but different content - this is a near-duplicate
-                    return DuplicateCheckResult::NearDuplicate {
-                        entry: entry.clone(),
-                        hamming_distance: 0,
-                    };
-                }
+        if let Some(entry) = inner.entries.get(content_id_str) {
+            if entry.content_hash == identity.content_hash {
+                return DuplicateCheckResult::ExactMatch {
+                    entry: entry.clone(),
+                };
+            } else {
+                return DuplicateCheckResult::NearDuplicate {
+                    entry: entry.clone(),
+                    hamming_distance: 0,
+                };
             }
         }
 
         // Check for near-duplicates using LSH buckets
         let bucket_id = (identity.simhash >> 56) as u8;
 
-        {
-            let buckets = self.simhash_buckets.read();
-            let entries = self.entries.read();
-
-            if let Some(bucket) = buckets.get(&bucket_id) {
-                for candidate_id in bucket {
-                    if let Some(entry) = entries.get(candidate_id) {
-                        let distance = (entry.simhash ^ identity.simhash).count_ones();
-                        if distance <= self.distance_threshold {
-                            // Check if it's an exact match by content hash
-                            if entry.content_hash == identity.content_hash {
-                                return DuplicateCheckResult::ExactMatch {
-                                    entry: entry.clone(),
-                                };
-                            } else {
-                                return DuplicateCheckResult::NearDuplicate {
-                                    entry: entry.clone(),
-                                    hamming_distance: distance,
-                                };
-                            }
+        if let Some(bucket) = inner.simhash_buckets.get(&bucket_id) {
+            for candidate_id in bucket {
+                if let Some(entry) = inner.entries.get(candidate_id) {
+                    let distance = (entry.simhash ^ identity.simhash).count_ones();
+                    if distance <= self.distance_threshold {
+                        if entry.content_hash == identity.content_hash {
+                            return DuplicateCheckResult::ExactMatch {
+                                entry: entry.clone(),
+                            };
+                        } else {
+                            return DuplicateCheckResult::NearDuplicate {
+                                entry: entry.clone(),
+                                hamming_distance: distance,
+                            };
                         }
                     }
                 }
             }
         }
 
-        // No duplicate found
         DuplicateCheckResult::New
     }
 
     /// Check for duplicate by URL
     pub fn check_url(&self, url: &str) -> Option<DocumentEntry> {
-        let url_index = self.url_index.read();
-        let entries = self.entries.read();
-
-        url_index
+        let inner = self.inner.read();
+        inner
+            .url_index
             .get(url)
-            .and_then(|content_id| entries.get(content_id).cloned())
+            .and_then(|content_id| inner.entries.get(content_id).cloned())
     }
 
     /// Register a new document
@@ -308,34 +304,33 @@ impl DocumentRegistry {
 
         let mut entry = DocumentEntry::new(identity, title, source_type.to_string());
 
-        if let Some(u) = url {
-            entry.add_url(u.clone());
-            self.url_index.write().insert(u, content_id_str.clone());
-        }
-
         if let Some((key, value)) = source_id {
             entry.add_source_id(key.to_string(), value.to_string());
         }
 
         entry.set_chunk_ids(chunk_ids);
 
-        // Update indices
-        self.simhash_index
-            .write()
-            .insert(simhash, content_id_str.clone());
+        // Single lock acquisition for all index updates
+        {
+            let mut inner = self.inner.write();
 
-        let bucket_id = (simhash >> 56) as u8;
-        self.simhash_buckets
-            .write()
-            .entry(bucket_id)
-            .or_default()
-            .insert(content_id_str.clone());
+            if let Some(ref u) = url {
+                entry.add_url(u.clone());
+                inner.url_index.insert(u.clone(), content_id_str.clone());
+            }
 
-        self.entries
-            .write()
-            .insert(content_id_str.clone(), entry.clone());
+            inner.simhash_index.insert(simhash, content_id_str.clone());
 
-        // Persist to sled
+            let bucket_id = (simhash >> 56) as u8;
+            inner.simhash_buckets
+                .entry(bucket_id)
+                .or_default()
+                .insert(content_id_str.clone());
+
+            inner.entries.insert(content_id_str.clone(), entry.clone());
+        }
+
+        // Persist to sled (outside lock)
         if let Some(ref db) = self.db {
             if let Ok(data) = bincode::serialize(&entry) {
                 let _ = db.insert(content_id_str.as_bytes(), data);
@@ -355,12 +350,16 @@ impl DocumentRegistry {
         source_id: Option<(&str, &str)>,
     ) -> Option<DocumentEntry> {
         let content_id_str = content_id.as_str();
-        let mut entries = self.entries.write();
+        let mut inner = self.inner.write();
 
-        if let Some(entry) = entries.get_mut(content_id_str) {
+        // Update URL index first (before borrowing entries mutably)
+        if let Some(ref u) = url {
+            inner.url_index.insert(u.clone(), content_id_str.to_string());
+        }
+
+        if let Some(entry) = inner.entries.get_mut(content_id_str) {
             if let Some(u) = url {
-                entry.add_url(u.clone());
-                self.url_index.write().insert(u, content_id_str.to_string());
+                entry.add_url(u);
             }
 
             if let Some((key, value)) = source_id {
@@ -379,6 +378,10 @@ impl DocumentRegistry {
 
             Some(result)
         } else {
+            // Entry doesn't exist — remove the URL index entry we just added
+            if let Some(ref u) = url {
+                inner.url_index.remove(u);
+            }
             None
         }
     }
@@ -391,9 +394,9 @@ impl DocumentRegistry {
         chunk_ids: Vec<ChunkId>,
     ) -> Option<(DocumentEntry, Vec<ChunkId>)> {
         let content_id_str = content_id.as_str();
-        let mut entries = self.entries.write();
+        let mut inner = self.inner.write();
 
-        if let Some(entry) = entries.get_mut(content_id_str) {
+        if let Some(entry) = inner.entries.get_mut(content_id_str) {
             let old_chunk_ids = std::mem::replace(&mut entry.chunk_ids, chunk_ids);
             entry.update_content(new_identity.content_hash);
             let result = entry.clone();
@@ -414,22 +417,23 @@ impl DocumentRegistry {
     /// Remove a document from the registry
     pub fn remove(&self, content_id: &ContentId) -> Option<DocumentEntry> {
         let content_id_str = content_id.as_str();
+        let mut inner = self.inner.write();
 
-        let entry = self.entries.write().remove(content_id_str)?;
+        let entry = inner.entries.remove(content_id_str)?;
 
-        // Clean up indices
-        self.simhash_index.write().remove(&entry.simhash);
+        // Clean up indices under the same lock
+        inner.simhash_index.remove(&entry.simhash);
 
         let bucket_id = (entry.simhash >> 56) as u8;
-        if let Some(bucket) = self.simhash_buckets.write().get_mut(&bucket_id) {
+        if let Some(bucket) = inner.simhash_buckets.get_mut(&bucket_id) {
             bucket.remove(content_id_str);
         }
 
         for url in &entry.urls {
-            self.url_index.write().remove(url);
+            inner.url_index.remove(url);
         }
 
-        // Remove from sled
+        // Remove from sled (outside lock would be fine, but entry is already removed)
         if let Some(ref db) = self.db {
             let _ = db.remove(content_id_str.as_bytes());
         }
@@ -439,59 +443,52 @@ impl DocumentRegistry {
 
     /// Get a document entry by content ID
     pub fn get(&self, content_id: &ContentId) -> Option<DocumentEntry> {
-        self.entries.read().get(content_id.as_str()).cloned()
+        self.inner.read().entries.get(content_id.as_str()).cloned()
     }
 
     /// Get all entries
     pub fn all_entries(&self) -> Vec<DocumentEntry> {
-        self.entries.read().values().cloned().collect()
+        self.inner.read().entries.values().cloned().collect()
     }
 
     /// Get the number of registered documents
     pub fn len(&self) -> usize {
-        self.entries.read().len()
+        self.inner.read().entries.len()
     }
 
     /// Check if registry is empty
     pub fn is_empty(&self) -> bool {
-        self.entries.read().is_empty()
+        self.inner.read().entries.is_empty()
     }
 
-    /// Internal method to add an entry and update all indices
+    /// Internal method to add an entry and update all indices (used during load)
     fn add_entry_internal(&mut self, content_id: String, entry: DocumentEntry) {
-        // Update simhash index
-        self.simhash_index
-            .write()
-            .insert(entry.simhash, content_id.clone());
+        let inner = self.inner.get_mut();
 
-        // Update bucket
+        inner.simhash_index.insert(entry.simhash, content_id.clone());
+
         let bucket_id = (entry.simhash >> 56) as u8;
-        self.simhash_buckets
-            .write()
+        inner.simhash_buckets
             .entry(bucket_id)
             .or_default()
             .insert(content_id.clone());
 
-        // Update URL index
         for url in &entry.urls {
-            self.url_index
-                .write()
-                .insert(url.clone(), content_id.clone());
+            inner.url_index.insert(url.clone(), content_id.clone());
         }
 
-        // Add entry
-        self.entries.write().insert(content_id, entry);
+        inner.entries.insert(content_id, entry);
     }
 
     /// Get statistics about the registry
     pub fn stats(&self) -> RegistryStats {
-        let entries = self.entries.read();
-        let total_docs = entries.len();
-        let total_chunks: usize = entries.values().map(|e| e.chunk_ids.len()).sum();
-        let total_urls = self.url_index.read().len();
-        let buckets_used = self.simhash_buckets.read().len();
+        let inner = self.inner.read();
+        let total_docs = inner.entries.len();
+        let total_chunks: usize = inner.entries.values().map(|e| e.chunk_ids.len()).sum();
+        let total_urls = inner.url_index.len();
+        let buckets_used = inner.simhash_buckets.len();
 
-        let source_counts: HashMap<String, usize> = entries
+        let source_counts: HashMap<String, usize> = inner.entries
             .values()
             .fold(HashMap::new(), |mut acc, e| {
                 *acc.entry(e.source_type.clone()).or_insert(0) += 1;

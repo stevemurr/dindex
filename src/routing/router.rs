@@ -4,6 +4,7 @@
 
 use super::{BandedBloomFilter, CentroidGenerator, LshIndex};
 use crate::config::RoutingConfig;
+use crate::embedding::cosine_similarity;
 use crate::types::{Embedding, LshSignature, NodeAdvertisement, NodeCentroid, NodeId};
 
 /// Number of bands for LSH banding (divides 128-bit LSH into 8 bands of 16 bits)
@@ -50,11 +51,6 @@ impl QueryRouter {
         self.node_ads
             .write()
             .insert(advertisement.node_id.clone(), advertisement);
-    }
-
-    /// Remove a node
-    pub fn remove_node(&self, node_id: &NodeId) {
-        self.node_ads.write().remove(node_id);
     }
 
     /// Find candidate nodes for a query embedding
@@ -134,11 +130,7 @@ impl QueryRouter {
         }
 
         // Sort by similarity
-        candidates.sort_by(|a, b| {
-            b.similarity
-                .partial_cmp(&a.similarity)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        candidates.sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
 
         // Return top candidates
         let top_k = self.config.candidate_nodes.min(candidates.len());
@@ -150,21 +142,6 @@ impl QueryRouter {
         );
 
         candidates
-    }
-
-    /// Get node advertisement
-    pub fn get_node(&self, node_id: &NodeId) -> Option<NodeAdvertisement> {
-        self.node_ads.read().get(node_id).cloned()
-    }
-
-    /// List all known nodes
-    pub fn list_nodes(&self) -> Vec<NodeId> {
-        self.node_ads.read().keys().cloned().collect()
-    }
-
-    /// Get total number of known nodes
-    pub fn node_count(&self) -> usize {
-        self.node_ads.read().len()
     }
 
     /// Generate LSH signature for a query
@@ -243,18 +220,6 @@ impl AdvertisementBuilder {
             total_chunks: self.total_chunks,
             last_updated: chrono::Utc::now(),
         }
-    }
-}
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-    if norm_a > 0.0 && norm_b > 0.0 {
-        dot / (norm_a * norm_b)
-    } else {
-        0.0
     }
 }
 

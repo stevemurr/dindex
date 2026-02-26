@@ -128,6 +128,29 @@ pub fn model_not_found_error(config: &Config) {
     print_models();
 }
 
+/// Generate an embedding with hash-based fallback
+///
+/// Tries the real embedding engine first. If it fails or is not available,
+/// falls back to a deterministic hash-based embedding.
+pub fn generate_with_fallback(
+    engine: Option<&EmbeddingEngine>,
+    content: &str,
+    fallback_dims: usize,
+) -> Vec<f32> {
+    if let Some(engine) = engine {
+        match engine.embed(content) {
+            Ok(embedding) => return embedding,
+            Err(e) => {
+                tracing::warn!("Embedding generation failed, using fallback: {}", e);
+                return hash_based_embedding(content, engine.dimensions());
+            }
+        }
+    }
+
+    tracing::warn!("No embedding engine available, using hash-based fallback");
+    hash_based_embedding(content, fallback_dims)
+}
+
 /// Generate a deterministic hash-based embedding (fallback when embedding engine unavailable)
 ///
 /// This produces embeddings that are deterministic for the same content but have no

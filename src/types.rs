@@ -123,11 +123,15 @@ impl DocumentIdentity {
 
     /// Normalize content for consistent hashing
     fn normalize_content(content: &str) -> String {
-        content
-            .to_lowercase()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
+        let lower = content.to_lowercase();
+        let mut result = String::with_capacity(lower.len());
+        for (i, word) in lower.split_whitespace().enumerate() {
+            if i > 0 {
+                result.push(' ');
+            }
+            result.push_str(word);
+        }
+        result
     }
 
     /// Compute SimHash for text content using 3-grams
@@ -385,16 +389,6 @@ impl Document {
         self.url = Some(url.into());
         self
     }
-}
-
-/// Statistics about the local node
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeStats {
-    pub total_documents: usize,
-    pub total_chunks: usize,
-    pub index_size_bytes: u64,
-    pub connected_peers: usize,
-    pub uptime_seconds: u64,
 }
 
 #[cfg(test)]
