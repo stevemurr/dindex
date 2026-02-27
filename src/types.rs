@@ -271,6 +271,77 @@ impl SearchResult {
     }
 }
 
+/// A matching chunk within a grouped search result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatchingChunk {
+    pub chunk_id: ChunkId,
+    pub content: String,
+    pub relevance_score: f32,
+    pub matched_by: Vec<String>,
+    pub section_hierarchy: Vec<String>,
+    pub position_in_doc: f32,
+}
+
+/// Search results grouped by document, with matching chunks as sub-items
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupedSearchResult {
+    pub document_id: DocumentId,
+    pub source_url: Option<String>,
+    pub source_title: Option<String>,
+    /// Maximum relevance score among all matching chunks
+    pub relevance_score: f32,
+    /// Matching chunks sorted by score descending
+    pub chunks: Vec<MatchingChunk>,
+}
+
+impl GroupedSearchResult {
+    /// Group flat search results by document, returning top_k groups sorted by max score.
+    pub fn from_results(results: Vec<SearchResult>, top_k: usize) -> Vec<GroupedSearchResult> {
+        let mut groups: HashMap<DocumentId, GroupedSearchResult> = HashMap::new();
+
+        for result in results {
+            let doc_id = result.chunk.metadata.document_id.clone();
+            let matching_chunk = MatchingChunk {
+                chunk_id: result.chunk.metadata.chunk_id.clone(),
+                content: result.chunk.content,
+                relevance_score: result.relevance_score,
+                matched_by: result.matched_by,
+                section_hierarchy: result.chunk.metadata.section_hierarchy.clone(),
+                position_in_doc: result.chunk.metadata.position_in_doc,
+            };
+
+            groups
+                .entry(doc_id.clone())
+                .and_modify(|group| {
+                    if result.relevance_score > group.relevance_score {
+                        group.relevance_score = result.relevance_score;
+                    }
+                    group.chunks.push(matching_chunk.clone());
+                })
+                .or_insert_with(|| GroupedSearchResult {
+                    document_id: doc_id,
+                    source_url: result.chunk.metadata.source_url.clone(),
+                    source_title: result.chunk.metadata.source_title.clone(),
+                    relevance_score: result.relevance_score,
+                    chunks: vec![matching_chunk],
+                });
+        }
+
+        let mut grouped: Vec<GroupedSearchResult> = groups.into_values().collect();
+
+        // Sort groups by max score descending
+        grouped.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Sort chunks within each group by score descending
+        for group in &mut grouped {
+            group.chunks.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
+        grouped.truncate(top_k);
+        grouped
+    }
+}
+
 /// Query request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Query {
@@ -684,5 +755,108 @@ mod tests {
         assert_eq!(doc.title, Some("Chained Title".to_string()));
         assert_eq!(doc.url, Some("https://example.com/doc".to_string()));
         assert!(doc.metadata.is_empty());
+    }
+
+    // ========================================================================
+    // GroupedSearchResult tests
+    // ========================================================================
+
+    fn make_search_result(doc_id: &str, chunk_id: &str, score: f32, content: &str) -> SearchResult {
+        let mut meta = ChunkMetadata::new(chunk_id.to_string(), doc_id.to_string());
+        meta.source_title = Some(format!("Doc {}", doc_id));
+        meta.source_url = Some(format!("https://example.com/{}", doc_id));
+        let chunk = Chunk {
+            metadata: meta,
+            content: content.to_string(),
+            token_count: 10,
+        };
+        SearchResult {
+            chunk,
+            relevance_score: score,
+            node_id: None,
+            matched_by: vec!["dense".to_string()],
+        }
+    }
+
+    #[test]
+    fn test_grouped_search_result_groups_by_document() {
+        let results = vec![
+            make_search_result("doc-1", "chunk-1a", 0.9, "first chunk"),
+            make_search_result("doc-1", "chunk-1b", 0.7, "second chunk"),
+            make_search_result("doc-2", "chunk-2a", 0.8, "another doc"),
+        ];
+
+        let grouped = GroupedSearchResult::from_results(results, 10);
+        assert_eq!(grouped.len(), 2);
+
+        // doc-1 should be first (max score 0.9 > 0.8)
+        assert_eq!(grouped[0].document_id, "doc-1");
+        assert_eq!(grouped[0].chunks.len(), 2);
+        assert_eq!(grouped[0].relevance_score, 0.9);
+
+        // doc-2 second
+        assert_eq!(grouped[1].document_id, "doc-2");
+        assert_eq!(grouped[1].chunks.len(), 1);
+    }
+
+    #[test]
+    fn test_grouped_search_result_chunks_sorted_by_score() {
+        let results = vec![
+            make_search_result("doc-1", "chunk-low", 0.3, "low"),
+            make_search_result("doc-1", "chunk-high", 0.9, "high"),
+            make_search_result("doc-1", "chunk-mid", 0.6, "mid"),
+        ];
+
+        let grouped = GroupedSearchResult::from_results(results, 10);
+        assert_eq!(grouped[0].chunks.len(), 3);
+        assert_eq!(grouped[0].chunks[0].chunk_id, "chunk-high");
+        assert_eq!(grouped[0].chunks[1].chunk_id, "chunk-mid");
+        assert_eq!(grouped[0].chunks[2].chunk_id, "chunk-low");
+    }
+
+    #[test]
+    fn test_grouped_search_result_truncates_to_top_k() {
+        let results = vec![
+            make_search_result("doc-1", "c1", 0.9, "a"),
+            make_search_result("doc-2", "c2", 0.8, "b"),
+            make_search_result("doc-3", "c3", 0.7, "c"),
+        ];
+
+        let grouped = GroupedSearchResult::from_results(results, 2);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].document_id, "doc-1");
+        assert_eq!(grouped[1].document_id, "doc-2");
+    }
+
+    #[test]
+    fn test_grouped_search_result_empty_input() {
+        let grouped = GroupedSearchResult::from_results(vec![], 10);
+        assert!(grouped.is_empty());
+    }
+
+    #[test]
+    fn test_grouped_search_result_preserves_metadata() {
+        let results = vec![
+            make_search_result("doc-1", "chunk-1", 0.9, "content"),
+        ];
+
+        let grouped = GroupedSearchResult::from_results(results, 10);
+        assert_eq!(grouped[0].source_title, Some("Doc doc-1".to_string()));
+        assert_eq!(grouped[0].source_url, Some("https://example.com/doc-1".to_string()));
+        assert_eq!(grouped[0].chunks[0].matched_by, vec!["dense".to_string()]);
+    }
+
+    #[test]
+    fn test_grouped_search_result_max_score_from_lower_ranked_chunk() {
+        // doc-2's best chunk (0.95) is the second result but should still give doc-2 highest group score
+        let results = vec![
+            make_search_result("doc-1", "c1", 0.9, "a"),
+            make_search_result("doc-2", "c2a", 0.5, "b"),
+            make_search_result("doc-2", "c2b", 0.95, "c"),
+        ];
+
+        let grouped = GroupedSearchResult::from_results(results, 10);
+        assert_eq!(grouped[0].document_id, "doc-2");
+        assert_eq!(grouped[0].relevance_score, 0.95);
     }
 }

@@ -6,7 +6,7 @@ use dindex::{
     embedding::init_embedding_engine,
     index::ChunkStorage,
     retrieval::{Bm25Index, HybridRetriever},
-    types::Query,
+    types::{GroupedSearchResult, Query},
     util::truncate_for_display,
 };
 use std::sync::Arc;
@@ -30,7 +30,7 @@ pub async fn search_index(
     // Try daemon first
     match client::search(&query_text, top_k, output_format.clone()).await {
         Ok(results) => {
-            output_search_results(&results, &format);
+            output_search_results(&results, &format, top_k);
             return Ok(());
         }
         Err(ClientError::DaemonNotRunning) => {
@@ -78,27 +78,49 @@ pub async fn search_index(
     // Execute search
     let results = retriever.search(&query, Some(&query_embedding))?;
 
-    output_search_results(&results, &format);
+    output_search_results(&results, &format, top_k);
     Ok(())
 }
 
-/// Output search results in the requested format
-fn output_search_results(results: &[dindex::types::SearchResult], format: &str) {
+/// Output search results in the requested format, grouped by document
+fn output_search_results(results: &[dindex::types::SearchResult], format: &str, top_k: usize) {
+    let grouped = GroupedSearchResult::from_results(results.to_vec(), top_k);
+    let total_chunks: usize = grouped.iter().map(|g| g.chunks.len()).sum();
+
     match format {
-        "json" => {
-            let json = serde_json::to_string_pretty(results).unwrap_or_default();
+        "json" | "json-pretty" => {
+            let json = serde_json::to_string_pretty(&grouped).unwrap_or_default();
             println!("{}", json);
         }
         _ => {
-            println!("\nSearch Results ({} found):\n", results.len());
-            for (i, result) in results.iter().enumerate() {
-                println!("{}. [Score: {:.4}]", i + 1, result.relevance_score);
-                println!("   ID: {}", result.chunk.metadata.chunk_id);
-                if let Some(title) = &result.chunk.metadata.source_title {
-                    println!("   Title: {}", title);
+            println!(
+                "\nSearch Results ({} documents, {} chunks):\n",
+                grouped.len(),
+                total_chunks,
+            );
+            for (i, group) in grouped.iter().enumerate() {
+                println!(
+                    "{}. [Score: {:.4}] {}",
+                    i + 1,
+                    group.relevance_score,
+                    group.source_title.as_deref().unwrap_or("(untitled)"),
+                );
+                if let Some(url) = &group.source_url {
+                    println!("   URL: {}", url);
                 }
-                println!("   Content: {}...", truncate_for_display(&result.chunk.content, 200));
-                println!("   Matched by: {:?}", result.matched_by);
+                println!("   Document: {}", group.document_id);
+                println!("   Chunks ({}):", group.chunks.len());
+                for (j, chunk) in group.chunks.iter().enumerate() {
+                    println!(
+                        "     {}. [Score: {:.4}] {}...",
+                        j + 1,
+                        chunk.relevance_score,
+                        truncate_for_display(&chunk.content, 200),
+                    );
+                    if !chunk.matched_by.is_empty() {
+                        println!("        Matched by: {:?}", chunk.matched_by);
+                    }
+                }
                 println!();
             }
         }

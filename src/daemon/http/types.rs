@@ -92,11 +92,47 @@ impl From<&ChunkMetadata> for ChunkMetadataJson {
     }
 }
 
+/// A matching chunk within a grouped search result (JSON)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatchingChunkJson {
+    /// Chunk identifier
+    pub chunk_id: String,
+    /// The chunk content text
+    pub content: String,
+    /// Relevance score (0.0 to 1.0)
+    pub relevance_score: f32,
+    /// Which retrieval methods matched
+    pub matched_by: Vec<String>,
+    /// Section hierarchy in the document
+    pub section_hierarchy: Vec<String>,
+    /// Position in document (0.0 to 1.0)
+    pub position_in_doc: f32,
+}
+
+/// Search results grouped by document (JSON)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupedSearchResultJson {
+    /// Parent document identifier
+    pub document_id: String,
+    /// Source URL if available
+    pub source_url: Option<String>,
+    /// Source title if available
+    pub source_title: Option<String>,
+    /// Maximum relevance score among all matching chunks
+    pub relevance_score: f32,
+    /// Matching chunks sorted by score descending
+    pub chunks: Vec<MatchingChunkJson>,
+}
+
 /// Search response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResponse {
-    /// Search results
-    pub results: Vec<SearchResultJson>,
+    /// Search results grouped by document
+    pub results: Vec<GroupedSearchResultJson>,
+    /// Total number of unique documents matched
+    pub total_documents: usize,
+    /// Total number of matching chunks across all documents
+    pub total_chunks: usize,
     /// Query execution time in milliseconds
     pub query_time_ms: u64,
 }

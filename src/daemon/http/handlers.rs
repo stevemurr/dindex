@@ -17,7 +17,7 @@ use axum::extract::Path;
 
 use crate::daemon::handler::RequestHandler;
 use crate::daemon::protocol::{self, OutputFormat, Request, Response as IpcResponse, ScrapeOptions};
-use crate::types::Document;
+use crate::types::{Document, GroupedSearchResult};
 
 use super::types::*;
 
@@ -81,12 +81,25 @@ pub async fn search(
 
     match state.handler.handle(ipc_request).await {
         IpcResponse::SearchResults { results, query_time_ms } => {
-            let json_results: Vec<SearchResultJson> = results
-                .iter()
-                .map(|r| SearchResultJson {
-                    chunk: ChunkJson::from(&r.chunk),
-                    relevance_score: r.relevance_score,
-                    matched_by: r.matched_by.clone(),
+            let grouped = GroupedSearchResult::from_results(results, request.top_k);
+            let total_documents = grouped.len();
+            let total_chunks: usize = grouped.iter().map(|g| g.chunks.len()).sum();
+
+            let json_results: Vec<GroupedSearchResultJson> = grouped
+                .into_iter()
+                .map(|g| GroupedSearchResultJson {
+                    document_id: g.document_id,
+                    source_url: g.source_url,
+                    source_title: g.source_title,
+                    relevance_score: g.relevance_score,
+                    chunks: g.chunks.into_iter().map(|c| MatchingChunkJson {
+                        chunk_id: c.chunk_id,
+                        content: c.content,
+                        relevance_score: c.relevance_score,
+                        matched_by: c.matched_by,
+                        section_hierarchy: c.section_hierarchy,
+                        position_in_doc: c.position_in_doc,
+                    }).collect(),
                 })
                 .collect();
 
@@ -94,6 +107,8 @@ pub async fn search(
                 StatusCode::OK,
                 Json(SearchResponse {
                     results: json_results,
+                    total_documents,
+                    total_chunks,
                     query_time_ms,
                 }),
             )
