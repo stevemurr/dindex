@@ -750,4 +750,231 @@ mod tests {
         assert_eq!(processor.config.min_content_length, 50);
         assert_eq!(processor.config.simhash_threshold, 5);
     }
+
+    #[test]
+    fn test_process_near_duplicate() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = create_test_processor(&temp_dir);
+
+        // Index original document
+        let content1 = "This is a test document with enough content to pass the minimum length requirement for processing.";
+        let result1 = processor
+            .process(
+                content1,
+                Some("https://example.com/v1".to_string()),
+                Some("Original Doc".to_string()),
+                "test",
+                None,
+                |text| create_test_embedding(text, 64),
+            )
+            .unwrap();
+
+        assert!(matches!(result1, ProcessingResult::Indexed { .. }));
+
+        // Index near-duplicate: slightly modified content that produces
+        // the same SimHash content_id but a different SHA256 content_hash.
+        // Since DocumentIdentity normalizes (lowercases, collapses whitespace),
+        // we need a change that affects the SHA256 but keeps the SimHash close.
+        let content2 = "This is a test document with enough content to pass the minimum length requirement for processing today.";
+
+        let id1 = crate::types::DocumentIdentity::compute(content1);
+        let id2 = crate::types::DocumentIdentity::compute(content2);
+
+        // If they happen to share the same content_id (same simhash), the registry
+        // will detect a NearDuplicate (same content_id key, different content_hash).
+        // If the simhash differs, the near-dup detection uses LSH buckets.
+        // Either way, the processor should handle it gracefully.
+        if id1.content_id == id2.content_id {
+            // Same content_id, different hash -> NearDuplicate with distance 0
+            let result2 = processor
+                .process(
+                    content2,
+                    Some("https://example.com/v2".to_string()),
+                    Some("Updated Doc".to_string()),
+                    "test",
+                    None,
+                    |text| create_test_embedding(text, 64),
+                )
+                .unwrap();
+
+            assert!(
+                matches!(result2, ProcessingResult::ContentUpdated { .. }),
+                "Expected ContentUpdated for near-duplicate with same content_id, got {:?}",
+                result2
+            );
+        } else {
+            // Different content_id but possibly within hamming distance threshold
+            let distance = id1.hamming_distance(&id2);
+            let result2 = processor
+                .process(
+                    content2,
+                    Some("https://example.com/v2".to_string()),
+                    Some("Updated Doc".to_string()),
+                    "test",
+                    None,
+                    |text| create_test_embedding(text, 64),
+                )
+                .unwrap();
+
+            if distance <= 3 {
+                // Within threshold -> ContentUpdated
+                assert!(
+                    matches!(result2, ProcessingResult::ContentUpdated { .. }),
+                    "Expected ContentUpdated for near-duplicate within threshold, got {:?}",
+                    result2
+                );
+            } else {
+                // Could be Indexed (new) or Skipped (too different)
+                assert!(
+                    matches!(
+                        result2,
+                        ProcessingResult::Indexed { .. } | ProcessingResult::Skipped { .. }
+                    ),
+                    "Expected Indexed or Skipped for content beyond threshold, got {:?}",
+                    result2
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_save_persists_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = create_test_processor(&temp_dir);
+
+        let content = "This is a document that should be persisted across save and reload cycles.";
+        processor
+            .process(
+                content,
+                Some("https://example.com/persist".to_string()),
+                Some("Persist Test".to_string()),
+                "test",
+                None,
+                |text| create_test_embedding(text, 64),
+            )
+            .unwrap();
+
+        assert_eq!(processor.registry().len(), 1);
+
+        // Save should succeed without error
+        processor.save().unwrap();
+
+        // Verify registry was saved by reloading
+        let reloaded_registry =
+            DocumentRegistry::load(temp_dir.path(), 3).unwrap();
+        assert_eq!(reloaded_registry.len(), 1);
+    }
+
+    #[test]
+    fn test_stats_returns_correct_counts() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = create_test_processor(&temp_dir);
+
+        // Initially empty
+        let stats = processor.stats();
+        assert_eq!(stats.total_documents, 0);
+        assert_eq!(stats.total_chunks, 0);
+        assert_eq!(stats.total_urls, 0);
+        assert!(stats.source_counts.is_empty());
+
+        // Add a document
+        let content = "This is a test document with enough content for the processor to create chunks from it.";
+        processor
+            .process(
+                content,
+                Some("https://example.com/stats".to_string()),
+                Some("Stats Test".to_string()),
+                "web",
+                None,
+                |text| create_test_embedding(text, 64),
+            )
+            .unwrap();
+
+        let stats = processor.stats();
+        assert_eq!(stats.total_documents, 1);
+        assert!(stats.total_chunks > 0);
+        assert_eq!(stats.total_urls, 1);
+        assert_eq!(stats.source_counts.get("web"), Some(&1));
+    }
+
+    #[test]
+    fn test_processing_result_content_id() {
+        let indexed = ProcessingResult::Indexed {
+            content_id: "abc123".to_string(),
+            chunks_created: 5,
+        };
+        assert_eq!(indexed.content_id(), "abc123");
+
+        let updated = ProcessingResult::MetadataUpdated {
+            content_id: "def456".to_string(),
+        };
+        assert_eq!(updated.content_id(), "def456");
+
+        let content_updated = ProcessingResult::ContentUpdated {
+            content_id: "ghi789".to_string(),
+            chunks_created: 3,
+            chunks_removed: 2,
+        };
+        assert_eq!(content_updated.content_id(), "ghi789");
+
+        let skipped = ProcessingResult::Skipped {
+            content_id: "jkl012".to_string(),
+            reason: "too short".to_string(),
+        };
+        assert_eq!(skipped.content_id(), "jkl012");
+    }
+
+    #[test]
+    fn test_processing_result_was_indexed() {
+        let indexed = ProcessingResult::Indexed {
+            content_id: "a".to_string(),
+            chunks_created: 1,
+        };
+        assert!(indexed.was_indexed());
+
+        let content_updated = ProcessingResult::ContentUpdated {
+            content_id: "b".to_string(),
+            chunks_created: 2,
+            chunks_removed: 1,
+        };
+        assert!(content_updated.was_indexed());
+
+        let metadata_updated = ProcessingResult::MetadataUpdated {
+            content_id: "c".to_string(),
+        };
+        assert!(!metadata_updated.was_indexed());
+
+        let skipped = ProcessingResult::Skipped {
+            content_id: "d".to_string(),
+            reason: "test".to_string(),
+        };
+        assert!(!skipped.was_indexed());
+    }
+
+    #[test]
+    fn test_processing_result_chunks_created() {
+        let indexed = ProcessingResult::Indexed {
+            content_id: "a".to_string(),
+            chunks_created: 5,
+        };
+        assert_eq!(indexed.chunks_created(), 5);
+
+        let content_updated = ProcessingResult::ContentUpdated {
+            content_id: "b".to_string(),
+            chunks_created: 3,
+            chunks_removed: 2,
+        };
+        assert_eq!(content_updated.chunks_created(), 3);
+
+        let metadata_updated = ProcessingResult::MetadataUpdated {
+            content_id: "c".to_string(),
+        };
+        assert_eq!(metadata_updated.chunks_created(), 0);
+
+        let skipped = ProcessingResult::Skipped {
+            content_id: "d".to_string(),
+            reason: "test".to_string(),
+        };
+        assert_eq!(skipped.chunks_created(), 0);
+    }
 }

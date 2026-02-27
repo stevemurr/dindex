@@ -445,4 +445,107 @@ mod tests {
         assert!(temp_dir.path().join("test.mappings.sled").exists());
         assert!(!temp_dir.path().join("test.mappings.json").exists());
     }
+
+    #[test]
+    fn test_len_after_adds_and_removes() {
+        let index = create_test_index();
+
+        assert_eq!(index.len(), 0);
+
+        index
+            .add(&"chunk1".to_string(), &vec![1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        assert_eq!(index.len(), 1);
+
+        index
+            .add(&"chunk2".to_string(), &vec![0.0, 1.0, 0.0, 0.0])
+            .unwrap();
+        assert_eq!(index.len(), 2);
+
+        index
+            .add(&"chunk3".to_string(), &vec![0.0, 0.0, 1.0, 0.0])
+            .unwrap();
+        assert_eq!(index.len(), 3);
+
+        // Remove one
+        index.remove(&"chunk2".to_string()).unwrap();
+        assert_eq!(index.len(), 2);
+
+        // Remove another
+        index.remove(&"chunk1".to_string()).unwrap();
+        assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn test_is_empty_on_new_vs_populated() {
+        let index = create_test_index();
+
+        // New index should be empty
+        assert!(index.is_empty());
+
+        // After adding, no longer empty
+        index
+            .add(&"chunk1".to_string(), &vec![1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        assert!(!index.is_empty());
+
+        // After removing the only element, empty again
+        index.remove(&"chunk1".to_string()).unwrap();
+        assert!(index.is_empty());
+    }
+
+    #[test]
+    fn test_dimensions_returns_configured_value() {
+        let config = IndexConfig {
+            hnsw_m: 8,
+            hnsw_ef_construction: 100,
+            hnsw_ef_search: 50,
+            memory_mapped: false,
+            max_capacity: 1000,
+        };
+
+        let index_4d = VectorIndex::new(4, &config).unwrap();
+        assert_eq!(index_4d.dimensions(), 4);
+
+        let index_128d = VectorIndex::new(128, &config).unwrap();
+        assert_eq!(index_128d.dimensions(), 128);
+
+        let index_1024d = VectorIndex::new(1024, &config).unwrap();
+        assert_eq!(index_1024d.dimensions(), 1024);
+    }
+
+    #[test]
+    fn test_dimension_mismatch_error_on_add() {
+        let index = create_test_index(); // 4 dimensions
+
+        // Adding a vector with wrong dimensions should fail
+        let wrong_dims_vec = vec![1.0, 0.0]; // 2 dimensions instead of 4
+        let result = index.add(&"chunk1".to_string(), &wrong_dims_vec);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("dimension mismatch"),
+            "Error should mention dimension mismatch, got: {}",
+            err_msg
+        );
+
+        // Too many dimensions should also fail
+        let too_many = vec![1.0, 0.0, 0.0, 0.0, 0.5, 0.5]; // 6 dimensions
+        let result = index.add(&"chunk2".to_string(), &too_many);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dimension_mismatch_error_on_search() {
+        let index = create_test_index(); // 4 dimensions
+
+        index
+            .add(&"chunk1".to_string(), &vec![1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+
+        // Searching with wrong dimensions should fail
+        let wrong_query = vec![1.0, 0.0]; // 2 dimensions
+        let result = index.search(&wrong_query, 1);
+        assert!(result.is_err());
+    }
 }

@@ -263,6 +263,66 @@ mod tests {
             .collect()
     }
 
+    fn make_chunk(id: &str, doc_id: &str, content: &str) -> Chunk {
+        Chunk {
+            metadata: ChunkMetadata::new(id.to_string(), doc_id.to_string()),
+            content: content.to_string(),
+            token_count: content.split_whitespace().count(),
+        }
+    }
+
+    /// Helper to create a fully wired test indexer and retriever
+    struct TestHarness {
+        indexer: HybridIndexer,
+        vector_index: Arc<VectorIndex>,
+        bm25_index: Arc<Bm25Index>,
+        chunk_storage: Arc<ChunkStorage>,
+        _temp_dir: TempDir,
+    }
+
+    impl TestHarness {
+        fn new(dims: usize) -> Self {
+            let temp_dir = TempDir::new().unwrap();
+            let vector_index =
+                Arc::new(VectorIndex::new(dims, &IndexConfig::default()).unwrap());
+            let bm25_index = Arc::new(Bm25Index::new_in_memory().unwrap());
+            let chunk_storage =
+                Arc::new(ChunkStorage::new(temp_dir.path().join("chunks")).unwrap());
+
+            let indexer = HybridIndexer::new(
+                vector_index.clone(),
+                bm25_index.clone(),
+                chunk_storage.clone(),
+            );
+
+            Self {
+                indexer,
+                vector_index,
+                bm25_index,
+                chunk_storage,
+                _temp_dir: temp_dir,
+            }
+        }
+
+        fn retriever(&self, enable_reranking: bool) -> HybridRetriever {
+            let config = RetrievalConfig {
+                enable_dense: true,
+                enable_bm25: true,
+                rrf_k: 60,
+                candidate_count: 10,
+                enable_reranking,
+                reranker_model_path: None,
+            };
+            HybridRetriever::new(
+                self.vector_index.clone(),
+                self.bm25_index.clone(),
+                self.chunk_storage.clone(),
+                None,
+                config,
+            )
+        }
+    }
+
     #[test]
     fn test_hybrid_indexer() {
         let temp_dir = TempDir::new().unwrap();
@@ -355,5 +415,138 @@ mod tests {
         let results = retriever.search(&query, Some(&query_embedding)).unwrap();
 
         assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_remove_chunk_removes_from_vector_and_storage() {
+        let harness = TestHarness::new(64);
+
+        let chunk = make_chunk("c1", "doc1", "removable content alpha bravo");
+        let embedding = create_test_embedding(1, 64);
+
+        harness.indexer.index_chunk(&chunk, &embedding).unwrap();
+        harness.indexer.save().unwrap();
+
+        // Verify chunk exists in vector index and chunk storage
+        assert!(harness.vector_index.contains(&"c1".to_string()));
+        assert!(harness.chunk_storage.get("c1").is_some());
+
+        // Remove the chunk
+        harness.indexer.remove_chunk(&"c1".to_string()).unwrap();
+
+        // Should be gone from vector index
+        assert!(!harness.vector_index.contains(&"c1".to_string()));
+        // Should be gone from chunk storage
+        assert!(harness.chunk_storage.get("c1").is_none());
+    }
+
+    #[test]
+    fn test_remove_document_removes_all_chunks() {
+        let harness = TestHarness::new(64);
+
+        let c1 = make_chunk("c1", "docX", "first chunk alpha content");
+        let c2 = make_chunk("c2", "docX", "second chunk bravo content");
+        let c3 = make_chunk("c3", "docY", "other document charlie content");
+
+        harness
+            .indexer
+            .index_batch(&[
+                (c1, create_test_embedding(1, 64)),
+                (c2, create_test_embedding(2, 64)),
+                (c3, create_test_embedding(3, 64)),
+            ])
+            .unwrap();
+
+        // Remove all chunks for docX
+        let removed_count = harness.indexer.remove_document("docX").unwrap();
+        assert_eq!(removed_count, 2);
+
+        // docX chunks should be gone
+        assert!(!harness.vector_index.contains(&"c1".to_string()));
+        assert!(!harness.vector_index.contains(&"c2".to_string()));
+        assert!(harness.chunk_storage.get("c1").is_none());
+        assert!(harness.chunk_storage.get("c2").is_none());
+
+        // docY chunks should remain
+        assert!(harness.vector_index.contains(&"c3".to_string()));
+        assert!(harness.chunk_storage.get("c3").is_some());
+    }
+
+    #[test]
+    fn test_remove_document_nonexistent_returns_zero() {
+        let harness = TestHarness::new(64);
+        let removed_count = harness.indexer.remove_document("no_such_doc").unwrap();
+        assert_eq!(removed_count, 0);
+    }
+
+    #[test]
+    fn test_empty_query_returns_empty_results() {
+        let harness = TestHarness::new(64);
+
+        let chunk = make_chunk("c1", "doc1", "some indexed content");
+        harness
+            .indexer
+            .index_chunk(&chunk, &create_test_embedding(1, 64))
+            .unwrap();
+        harness.indexer.save().unwrap();
+
+        let retriever = harness.retriever(false);
+        let query = Query::new("".to_string(), 5);
+        let results = retriever.search(&query, None).unwrap();
+        assert!(results.is_empty(), "Empty query should return empty results");
+    }
+
+    #[test]
+    fn test_whitespace_only_query_returns_empty() {
+        let harness = TestHarness::new(64);
+
+        let chunk = make_chunk("c1", "doc1", "some indexed content");
+        harness
+            .indexer
+            .index_chunk(&chunk, &create_test_embedding(1, 64))
+            .unwrap();
+        harness.indexer.save().unwrap();
+
+        let retriever = harness.retriever(false);
+        let query = Query::new("   \t\n  ".to_string(), 5);
+        let results = retriever.search(&query, None).unwrap();
+        assert!(
+            results.is_empty(),
+            "Whitespace-only query should return empty results"
+        );
+    }
+
+    #[test]
+    fn test_top_k_zero_returns_empty() {
+        let harness = TestHarness::new(64);
+
+        let chunk = make_chunk("c1", "doc1", "searchable content");
+        harness
+            .indexer
+            .index_chunk(&chunk, &create_test_embedding(1, 64))
+            .unwrap();
+        harness.indexer.save().unwrap();
+
+        let retriever = harness.retriever(false);
+        let query = Query::new("searchable".to_string(), 0);
+        let embedding = create_test_embedding(1, 64);
+        let results = retriever.search(&query, Some(&embedding)).unwrap();
+        assert!(results.is_empty(), "top_k=0 should return empty results");
+    }
+
+    #[test]
+    fn test_index_chunk_rejects_empty_content() {
+        let harness = TestHarness::new(64);
+        let chunk = make_chunk("c1", "doc1", "   ");
+        let result = harness.indexer.index_chunk(&chunk, &create_test_embedding(1, 64));
+        assert!(result.is_err(), "Should reject chunk with whitespace-only content");
+    }
+
+    #[test]
+    fn test_index_chunk_rejects_empty_embedding() {
+        let harness = TestHarness::new(64);
+        let chunk = make_chunk("c1", "doc1", "valid content");
+        let result = harness.indexer.index_chunk(&chunk, &vec![]);
+        assert!(result.is_err(), "Should reject empty embedding");
     }
 }

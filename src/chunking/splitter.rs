@@ -373,4 +373,69 @@ mod tests {
             assert!(last.metadata.following_chunk_id.is_none());
         }
     }
+
+    #[test]
+    fn test_empty_document_produces_no_chunks() {
+        let config = ChunkingConfig {
+            chunk_size: 100,
+            overlap_fraction: 0.15,
+            min_chunk_size: 20,
+            max_chunk_size: 200,
+        };
+        let splitter = TextSplitter::new(config);
+
+        let doc = Document::new("");
+        let chunks = splitter.split_document(&doc);
+        assert!(
+            chunks.is_empty(),
+            "Empty document should produce no chunks, got {}",
+            chunks.len()
+        );
+    }
+
+    #[test]
+    fn test_very_short_document_single_chunk() {
+        let config = ChunkingConfig {
+            chunk_size: 100,
+            overlap_fraction: 0.15,
+            min_chunk_size: 5,
+            max_chunk_size: 200,
+        };
+        let splitter = TextSplitter::new(config);
+
+        let doc = Document::new("A short document.");
+        let chunks = splitter.split_document(&doc);
+
+        assert_eq!(
+            chunks.len(),
+            1,
+            "Very short document should produce exactly one chunk"
+        );
+        assert_eq!(chunks[0].content, "A short document.");
+    }
+
+    #[test]
+    fn test_headings_only_no_body_text() {
+        let config = ChunkingConfig {
+            chunk_size: 100,
+            overlap_fraction: 0.15,
+            min_chunk_size: 5,
+            max_chunk_size: 200,
+        };
+        let splitter = TextSplitter::new(config);
+
+        // Document with only headings and no body text at all
+        let doc = Document::new("# Heading One\n## Heading Two\n### Heading Three");
+        let chunks = splitter.split_document(&doc);
+
+        // The splitter's detect_sections will parse headings and find no
+        // content between them, resulting in no sections with content.
+        // The fallback creates one section with the full text, but since
+        // all lines are headings, sections might be empty.
+        // Regardless, the function should not panic.
+        // If any chunks are produced, they should have valid content.
+        for chunk in &chunks {
+            assert!(!chunk.metadata.chunk_id.is_empty());
+        }
+    }
 }

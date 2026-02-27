@@ -263,4 +263,66 @@ mod tests {
         let truncated = truncate_centroids(&centroids, 2);
         assert_eq!(truncated[0].embedding.len(), 2);
     }
+
+    #[test]
+    fn test_fewer_embeddings_than_requested_centroids() {
+        // Request 10 centroids from only 3 embeddings
+        let generator = CentroidGenerator::new(10);
+
+        let embeddings = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+        ];
+
+        let centroids = generator.generate(&embeddings);
+
+        // Should produce at most 3 centroids (min of requested and available)
+        assert!(
+            centroids.len() <= 3,
+            "Should not produce more centroids than embeddings, got {}",
+            centroids.len()
+        );
+        assert!(
+            !centroids.is_empty(),
+            "Should produce at least one centroid"
+        );
+
+        // Total chunk count across centroids should equal number of embeddings
+        let total: usize = centroids.iter().map(|c| c.chunk_count).sum();
+        assert_eq!(
+            total, 3,
+            "Total chunk count should equal number of embeddings"
+        );
+    }
+
+    #[test]
+    fn test_single_embedding_produces_single_centroid() {
+        let generator = CentroidGenerator::new(5);
+
+        let embeddings = vec![vec![1.0, 2.0, 3.0]];
+
+        let centroids = generator.generate(&embeddings);
+
+        assert_eq!(
+            centroids.len(),
+            1,
+            "Single embedding should produce exactly one centroid"
+        );
+        assert_eq!(centroids[0].chunk_count, 1);
+        assert_eq!(centroids[0].centroid_id, 0);
+    }
+
+    #[test]
+    fn test_empty_embeddings_produces_no_centroids() {
+        let generator = CentroidGenerator::new(5);
+
+        let embeddings: Vec<Vec<f32>> = Vec::new();
+        let centroids = generator.generate(&embeddings);
+
+        assert!(
+            centroids.is_empty(),
+            "Empty embeddings should produce no centroids"
+        );
+    }
 }

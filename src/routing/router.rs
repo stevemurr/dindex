@@ -227,16 +227,19 @@ impl AdvertisementBuilder {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_query_router() {
-        let config = RoutingConfig {
+    fn test_routing_config() -> RoutingConfig {
+        RoutingConfig {
             num_centroids: 10,
             lsh_bits: 64,
             lsh_num_hashes: 4,
             bloom_bits_per_item: 10,
             candidate_nodes: 3,
-        };
+        }
+    }
 
+    #[test]
+    fn test_query_router() {
+        let config = test_routing_config();
         let router = QueryRouter::new(64, &config);
 
         // Create a test advertisement
@@ -260,5 +263,131 @@ mod tests {
 
         assert!(!candidates.is_empty());
         assert_eq!(candidates[0].node_id, "node1");
+    }
+
+    #[test]
+    fn test_find_candidates_no_registered_nodes() {
+        let config = test_routing_config();
+        let router = QueryRouter::new(64, &config);
+
+        // Query with no nodes registered
+        let query: Vec<f32> = (0..64).map(|i| (i as f32 / 64.0).sin()).collect();
+        let candidates = router.find_candidates(&query, None);
+
+        assert!(
+            candidates.is_empty(),
+            "Should return empty when no nodes are registered"
+        );
+    }
+
+    #[test]
+    fn test_find_candidates_with_bloom_filter_prefilter() {
+        let config = RoutingConfig {
+            num_centroids: 10,
+            lsh_bits: 128,
+            lsh_num_hashes: 4,
+            bloom_bits_per_item: 10,
+            candidate_nodes: 5,
+        };
+
+        let router = QueryRouter::new(64, &config);
+
+        // Create embeddings and their LSH signatures for a node
+        let embeddings: Vec<Vec<f32>> = (0..20)
+            .map(|i| {
+                (0..64)
+                    .map(|j| ((i * 64 + j) as f32 / 1000.0).sin())
+                    .collect()
+            })
+            .collect();
+
+        // Generate LSH signatures for each embedding
+        let lsh_sigs: Vec<LshSignature> = embeddings
+            .iter()
+            .map(|emb| router.hash_query(emb))
+            .collect();
+
+        // Build advertisement with LSH bloom filter
+        let ad = AdvertisementBuilder::new("node_with_bloom".to_string())
+            .with_centroids(&embeddings, 5, None)
+            .with_lsh(lsh_sigs)
+            .build(config.lsh_bits);
+
+        router.register_node(ad);
+
+        // Query with a similar embedding (should match via bloom filter)
+        let query: Vec<f32> = (0..64).map(|i| (i as f32 / 1000.0).sin()).collect();
+        let query_lsh = router.hash_query(&query);
+        let candidates = router.find_candidates(&query, Some(&query_lsh));
+
+        assert!(
+            !candidates.is_empty(),
+            "Should find the node when bloom filter matches"
+        );
+        assert_eq!(candidates[0].node_id, "node_with_bloom");
+
+        // Query with a very different embedding (may or may not be filtered)
+        // We just verify it doesn't panic
+        let different_query: Vec<f32> = (0..64)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let different_lsh = router.hash_query(&different_query);
+        let _candidates = router.find_candidates(&different_query, Some(&different_lsh));
+        // Result may or may not be empty depending on false positive rate
+    }
+
+    #[test]
+    fn test_dimension_mismatch_handling() {
+        let config = test_routing_config();
+        let router = QueryRouter::new(64, &config);
+
+        // Register a node with 32-dim centroids
+        let small_embeddings: Vec<Vec<f32>> = (0..10)
+            .map(|i| {
+                (0..32)
+                    .map(|j| ((i * 32 + j) as f32 / 500.0).sin())
+                    .collect()
+            })
+            .collect();
+
+        let ad = AdvertisementBuilder::new("small_node".to_string())
+            .with_centroids(&small_embeddings, 3, None)
+            .build(config.lsh_bits);
+
+        router.register_node(ad);
+
+        // Query with 64-dim embedding (larger than centroid dims)
+        let query_64: Vec<f32> = (0..64).map(|i| (i as f32 / 64.0).sin()).collect();
+        let candidates = router.find_candidates(&query_64, None);
+
+        // Should still return results (truncation handles the mismatch)
+        assert!(
+            !candidates.is_empty(),
+            "Should handle query dimension > centroid dimension"
+        );
+
+        // Register a node with 128-dim centroids
+        let large_embeddings: Vec<Vec<f32>> = (0..10)
+            .map(|i| {
+                (0..128)
+                    .map(|j| ((i * 128 + j) as f32 / 1000.0).sin())
+                    .collect()
+            })
+            .collect();
+
+        let ad2 = AdvertisementBuilder::new("large_node".to_string())
+            .with_centroids(&large_embeddings, 3, None)
+            .build(config.lsh_bits);
+
+        router.register_node(ad2);
+
+        // Query with 64-dim embedding (smaller than centroid dims)
+        let candidates2 = router.find_candidates(&query_64, None);
+
+        // Should still return results (centroid truncation handles the mismatch)
+        assert!(
+            candidates2.len() >= 2,
+            "Should find both nodes despite different dimensions"
+        );
     }
 }

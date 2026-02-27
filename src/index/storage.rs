@@ -349,4 +349,129 @@ mod tests {
             assert_eq!(retrieved.index_key, 42);
         }
     }
+
+    #[test]
+    fn test_remove_returns_chunk_and_cleans_up() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = ChunkStorage::new(temp_dir.path()).unwrap();
+
+        // Store two chunks in the same document
+        for i in 0..2u64 {
+            let metadata =
+                ChunkMetadata::new(format!("chunk{}", i), "doc1".to_string());
+            let indexed = IndexedChunk {
+                chunk: Chunk {
+                    metadata,
+                    content: format!("content {}", i),
+                    token_count: 2,
+                },
+                embedding: vec![1.0, 2.0, 3.0],
+                lsh_signature: None,
+                index_key: i,
+            };
+            storage.store(&indexed);
+        }
+
+        assert_eq!(storage.len(), 2);
+
+        // Remove one chunk and verify the returned data
+        let removed = storage.remove("chunk0");
+        assert!(removed.is_some());
+        let removed = removed.unwrap();
+        assert_eq!(removed.chunk.content, "content 0");
+        assert_eq!(removed.index_key, 0);
+
+        // Storage should now have one chunk
+        assert_eq!(storage.len(), 1);
+        assert!(storage.get("chunk0").is_none());
+        assert!(storage.get("chunk1").is_some());
+
+        // Document index should still reference chunk1
+        let doc_chunks = storage.get_by_document("doc1");
+        assert_eq!(doc_chunks.len(), 1);
+        assert_eq!(doc_chunks[0].chunk.metadata.chunk_id, "chunk1");
+
+        // Removing a non-existent chunk should return None
+        let removed_none = storage.remove("nonexistent");
+        assert!(removed_none.is_none());
+    }
+
+    #[test]
+    fn test_chunk_ids_returns_all_stored_ids() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = ChunkStorage::new(temp_dir.path()).unwrap();
+
+        // Empty storage should return empty vec
+        assert!(storage.chunk_ids().is_empty());
+
+        // Store some chunks across different documents
+        let expected_ids: Vec<String> =
+            vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+
+        for (i, chunk_id) in expected_ids.iter().enumerate() {
+            let metadata =
+                ChunkMetadata::new(chunk_id.clone(), format!("doc{}", i));
+            let indexed = IndexedChunk {
+                chunk: Chunk {
+                    metadata,
+                    content: format!("content for {}", chunk_id),
+                    token_count: 3,
+                },
+                embedding: vec![i as f32; 4],
+                lsh_signature: None,
+                index_key: i as u64,
+            };
+            storage.store(&indexed);
+        }
+
+        let mut ids = storage.chunk_ids();
+        ids.sort();
+        let mut expected_sorted = expected_ids.clone();
+        expected_sorted.sort();
+        assert_eq!(ids, expected_sorted);
+    }
+
+    #[test]
+    fn test_all_embeddings_returns_correct_data() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = ChunkStorage::new(temp_dir.path()).unwrap();
+
+        // Empty storage
+        assert!(storage.all_embeddings().is_empty());
+
+        // Store chunks with distinct embeddings
+        let chunks_data = vec![
+            ("c1", "doc1", vec![1.0, 0.0, 0.0]),
+            ("c2", "doc1", vec![0.0, 1.0, 0.0]),
+            ("c3", "doc2", vec![0.0, 0.0, 1.0]),
+        ];
+
+        for (i, (chunk_id, doc_id, embedding)) in chunks_data.iter().enumerate()
+        {
+            let metadata =
+                ChunkMetadata::new(chunk_id.to_string(), doc_id.to_string());
+            let indexed = IndexedChunk {
+                chunk: Chunk {
+                    metadata,
+                    content: "content".to_string(),
+                    token_count: 1,
+                },
+                embedding: embedding.clone(),
+                lsh_signature: None,
+                index_key: i as u64,
+            };
+            storage.store(&indexed);
+        }
+
+        let all = storage.all_embeddings();
+        assert_eq!(all.len(), 3);
+
+        // Verify each embedding can be found by its chunk_id
+        let all_map: std::collections::HashMap<String, Vec<f32>> =
+            all.into_iter().collect();
+
+        assert_eq!(all_map.get("c1").unwrap(), &vec![1.0, 0.0, 0.0]);
+        assert_eq!(all_map.get("c2").unwrap(), &vec![0.0, 1.0, 0.0]);
+        assert_eq!(all_map.get("c3").unwrap(), &vec![0.0, 0.0, 1.0]);
+    }
 }

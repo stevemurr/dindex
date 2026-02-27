@@ -616,11 +616,28 @@ impl ScrapingCoordinator {
 mod tests {
     use super::*;
 
+    fn default_coordinator() -> ScrapingCoordinator {
+        let config = ScrapingConfig::default();
+        ScrapingCoordinator::new(config, "test_peer".to_string()).unwrap()
+    }
+
     #[tokio::test]
     async fn test_coordinator_creation() {
         let config = ScrapingConfig::default();
         let coordinator = ScrapingCoordinator::new(config, "test_peer".to_string());
 
+        assert!(coordinator.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_creation_with_custom_config() {
+        let config = ScrapingConfig {
+            max_concurrent_fetches: 5,
+            max_depth: 10,
+            stay_on_domain: true,
+            ..ScrapingConfig::default()
+        };
+        let coordinator = ScrapingCoordinator::new(config, "custom_peer".to_string());
         assert!(coordinator.is_ok());
     }
 
@@ -638,6 +655,250 @@ mod tests {
 
         let stats = coordinator.stats().await;
         assert!(stats.queue_size > 0);
+    }
+
+    #[tokio::test]
+    async fn test_add_seeds_tracks_domains() {
+        let mut coordinator = default_coordinator();
+
+        let seeds = vec![
+            Url::parse("https://foo.com/page1").unwrap(),
+            Url::parse("https://bar.org/page2").unwrap(),
+            Url::parse("https://foo.com/page3").unwrap(), // duplicate domain
+        ];
+
+        coordinator.add_seeds(seeds).await;
+
+        // The coordinator should have tracked the seed domains
+        assert!(coordinator.seed_domains.contains("foo.com"));
+        assert!(coordinator.seed_domains.contains("bar.org"));
+        assert_eq!(coordinator.seed_domains.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_add_seeds_empty_list() {
+        let mut coordinator = default_coordinator();
+        coordinator.add_seeds(vec![]).await;
+
+        let stats = coordinator.stats().await;
+        assert_eq!(stats.queue_size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_stats_default_values() {
+        let coordinator = default_coordinator();
+
+        let stats = coordinator.stats().await;
+        assert_eq!(stats.urls_processed, 0);
+        assert_eq!(stats.successful_fetches, 0);
+        assert_eq!(stats.failed_fetches, 0);
+        assert_eq!(stats.duplicates_skipped, 0);
+        assert_eq!(stats.urls_discovered, 0);
+        assert_eq!(stats.urls_exchanged, 0);
+        assert_eq!(stats.queue_size, 0);
+        assert_eq!(stats.active_domains, 0);
+        assert!((stats.avg_processing_time_ms - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_stats_reflects_queue_size() {
+        let mut coordinator = default_coordinator();
+
+        coordinator
+            .add_seeds(vec![
+                Url::parse("https://example.com/a").unwrap(),
+                Url::parse("https://example.com/b").unwrap(),
+                Url::parse("https://other.com/c").unwrap(),
+            ])
+            .await;
+
+        let stats = coordinator.stats().await;
+        assert!(stats.queue_size >= 3, "Queue should have at least 3 URLs");
+        assert!(stats.active_domains >= 1, "Should have at least 1 active domain");
+    }
+
+    #[tokio::test]
+    async fn test_is_running_initially_false() {
+        let coordinator = default_coordinator();
+        assert!(!coordinator.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn test_stop_sets_not_running() {
+        let coordinator = default_coordinator();
+
+        // Manually set running to true
+        {
+            let mut running = coordinator.running.write().await;
+            *running = true;
+        }
+        assert!(coordinator.is_running().await);
+
+        // Stop should set it back to false
+        coordinator.stop().await;
+        assert!(!coordinator.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn test_get_next_url_empty_frontier() {
+        let coordinator = default_coordinator();
+
+        // With no seeds added, get_next_url should return None
+        let next = coordinator.get_next_url().await;
+        assert!(next.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_next_url_returns_seeded_url() {
+        let mut coordinator = default_coordinator();
+
+        coordinator
+            .add_seeds(vec![Url::parse("https://example.com/page").unwrap()])
+            .await;
+
+        // The politeness controller's ready_domains() only returns domains
+        // that have entries in domain_state. We need to register the domain
+        // by recording a success so the domain appears as "ready".
+        {
+            let mut politeness = coordinator.politeness.write().await;
+            politeness.record_success("example.com");
+        }
+        // Wait for the default delay to expire so the domain is ready
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        let next = coordinator.get_next_url().await;
+        assert!(next.is_some(), "Should return a URL from the frontier");
+        let scored_url = next.unwrap();
+        assert_eq!(
+            scored_url.url.host_str(),
+            Some("example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_next_url_depletes_queue() {
+        let config = ScrapingConfig {
+            politeness: PolitenessConfig {
+                default_delay: std::time::Duration::from_millis(10),
+                min_delay: std::time::Duration::from_millis(5),
+                ..PolitenessConfig::default()
+            },
+            ..ScrapingConfig::default()
+        };
+        let mut coordinator =
+            ScrapingCoordinator::new(config, "test_peer".to_string()).unwrap();
+
+        coordinator
+            .add_seeds(vec![Url::parse("https://example.com/only").unwrap()])
+            .await;
+
+        // Register the domain in politeness state so ready_domains works
+        {
+            let mut politeness = coordinator.politeness.write().await;
+            // Set last_fetch to far in the past so it's immediately ready
+            politeness.record_success("example.com");
+        }
+        // Wait for the short delay to expire
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Pop the only URL
+        let first = coordinator.get_next_url().await;
+        assert!(first.is_some());
+
+        // Queue should now be empty
+        let second = coordinator.get_next_url().await;
+        assert!(second.is_none(), "Queue should be empty after popping the only URL");
+    }
+
+    #[tokio::test]
+    async fn test_add_discovered_urls_respects_max_depth() {
+        let config = ScrapingConfig {
+            max_depth: 2,
+            ..ScrapingConfig::default()
+        };
+        let coordinator = ScrapingCoordinator::new(config, "test_peer".to_string()).unwrap();
+
+        // Adding URLs at depth >= max_depth should be a no-op
+        coordinator
+            .add_discovered_urls(
+                vec![Url::parse("https://example.com/deep").unwrap()],
+                2, // depth=2, max_depth=2, so depth+1=3 >= max_depth, should skip
+            )
+            .await;
+
+        let stats = coordinator.stats().await;
+        assert_eq!(stats.queue_size, 0, "URLs at max_depth should not be added");
+    }
+
+    #[tokio::test]
+    async fn test_add_discovered_urls_within_depth() {
+        let config = ScrapingConfig {
+            max_depth: 3,
+            ..ScrapingConfig::default()
+        };
+        let mut coordinator =
+            ScrapingCoordinator::new(config, "test_peer".to_string()).unwrap();
+
+        // Need to seed first so the domain is known to the domain assignment
+        coordinator
+            .add_seeds(vec![Url::parse("https://example.com").unwrap()])
+            .await;
+        // Pop the seed so frontier is clear for the discovered URL test
+        let _ = coordinator.get_next_url().await;
+
+        coordinator
+            .add_discovered_urls(
+                vec![Url::parse("https://example.com/page2").unwrap()],
+                1, // depth 1, max_depth 3 -> depth+1=2 < 3, should be added
+            )
+            .await;
+
+        let stats = coordinator.stats().await;
+        assert!(stats.queue_size > 0, "URL within depth limit should be added");
+    }
+
+    #[tokio::test]
+    async fn test_process_url_duplicate_url() {
+        let coordinator = default_coordinator();
+
+        let url = Url::parse("https://example.com/dup").unwrap();
+
+        // Process once - marks URL as seen (will fail to fetch since no server,
+        // but the URL dedup should trigger on the second call)
+        let _first_result = coordinator.process_url(&url).await;
+
+        // Process same URL again - should be detected as duplicate
+        let second_result = coordinator.process_url(&url).await;
+        assert!(!second_result.success);
+        assert_eq!(
+            second_result.error.as_deref(),
+            Some("URL already seen")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_on_node_join_and_leave() {
+        let coordinator = default_coordinator();
+
+        // Should not panic
+        coordinator.on_node_join("peer2".to_string()).await;
+        coordinator.on_node_leave(&"peer2".to_string()).await;
+    }
+
+    #[tokio::test]
+    async fn test_receive_url_batch_updates_stats() {
+        let coordinator = default_coordinator();
+
+        let mut batch = super::super::frontier::UrlExchangeBatch::new("remote_peer".to_string());
+        batch.add(
+            "example.com".to_string(),
+            ScoredUrl::new(Url::parse("https://example.com/remote").unwrap()),
+        );
+
+        coordinator.receive_url_batch(batch).await;
+
+        let stats = coordinator.stats().await;
+        assert_eq!(stats.urls_exchanged, 1);
     }
 
     #[tokio::test]
@@ -678,5 +939,49 @@ mod tests {
         assert_eq!(doc.title, Some("Test Article".to_string()));
         assert_eq!(doc.url, Some("https://example.com/article".to_string()));
         assert_eq!(doc.metadata.get("author"), Some(&"John Doe".to_string()));
+        assert_eq!(doc.metadata.get("language"), Some(&"en".to_string()));
+        assert_eq!(doc.metadata.get("word_count"), Some(&"5".to_string()));
+        assert_eq!(doc.metadata.get("domain"), Some(&"example.com".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_document_conversion_without_optional_fields() {
+        let url = Url::parse("https://example.com/bare").unwrap();
+
+        let content = ExtractedContent {
+            title: "Bare Article".to_string(),
+            text_content: "Minimal content.".to_string(),
+            clean_html: None,
+            author: None,
+            published_date: None,
+            excerpt: None,
+            language: None,
+            word_count: 2,
+            reading_time_minutes: 1,
+        };
+
+        let metadata = ExtractedMetadata {
+            url: url.to_string(),
+            canonical_url: None,
+            title: "Bare Article".to_string(),
+            description: None,
+            author: None,
+            published_date: None,
+            modified_date: None,
+            language: None,
+            content_type: super::super::extractor::ContentType::Article,
+            word_count: 2,
+            reading_time_minutes: 1,
+            domain: "example.com".to_string(),
+            fetched_at: chrono::Utc::now(),
+            extra: std::collections::HashMap::new(),
+        };
+
+        let doc = ScrapingCoordinator::to_document(&url, &content, &metadata);
+
+        assert_eq!(doc.title, Some("Bare Article".to_string()));
+        // Optional fields should not be in metadata
+        assert!(doc.metadata.get("author").is_none());
+        assert!(doc.metadata.get("language").is_none());
     }
 }

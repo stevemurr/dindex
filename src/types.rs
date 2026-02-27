@@ -490,4 +490,199 @@ mod tests {
         assert!(distance <= 10, "Near-duplicates should have low distance, got {}", distance);
         assert!(!id1.is_exact_match(&id2));
     }
+
+    // ========================================================================
+    // LshSignature tests
+    // ========================================================================
+
+    #[test]
+    fn test_lsh_signature_new() {
+        let bits = [0xDEADBEEF_u64, 0xCAFEBABE_u64];
+        let sig = LshSignature::new(bits, 128);
+        assert_eq!(sig.bits, bits);
+        assert_eq!(sig.num_bits, 128);
+    }
+
+    #[test]
+    fn test_lsh_signature_hamming_distance_identical() {
+        let sig1 = LshSignature::new([0xFF00FF00, 0x00FF00FF], 128);
+        let sig2 = LshSignature::new([0xFF00FF00, 0x00FF00FF], 128);
+        assert_eq!(sig1.hamming_distance(&sig2), 0);
+    }
+
+    #[test]
+    fn test_lsh_signature_hamming_distance_different() {
+        // First word differs by 1 bit, second word is the same
+        let sig1 = LshSignature::new([0b0000, 0b0000], 128);
+        let sig2 = LshSignature::new([0b0001, 0b0000], 128);
+        assert_eq!(sig1.hamming_distance(&sig2), 1);
+
+        // Both words differ
+        let sig3 = LshSignature::new([0b1111, 0b1111], 128);
+        let sig4 = LshSignature::new([0b0000, 0b0000], 128);
+        assert_eq!(sig3.hamming_distance(&sig4), 8);
+    }
+
+    #[test]
+    fn test_lsh_signature_hamming_distance_all_bits_differ() {
+        let sig1 = LshSignature::new([u64::MAX, u64::MAX], 128);
+        let sig2 = LshSignature::new([0, 0], 128);
+        assert_eq!(sig1.hamming_distance(&sig2), 128);
+    }
+
+    #[test]
+    fn test_lsh_signature_similarity_range() {
+        let sig1 = LshSignature::new([0xAAAAAAAA, 0x55555555], 128);
+        let sig2 = LshSignature::new([0x55555555, 0xAAAAAAAA], 128);
+        let similarity = sig1.similarity(&sig2);
+        assert!(
+            (0.0..=1.0).contains(&similarity),
+            "Similarity should be in [0.0, 1.0], got {}",
+            similarity
+        );
+    }
+
+    #[test]
+    fn test_lsh_signature_similarity_identical() {
+        let sig = LshSignature::new([0xDEADBEEF, 0xCAFEBABE], 128);
+        assert_eq!(sig.similarity(&sig), 1.0);
+    }
+
+    #[test]
+    fn test_lsh_signature_similarity_completely_different() {
+        let sig1 = LshSignature::new([u64::MAX, u64::MAX], 128);
+        let sig2 = LshSignature::new([0, 0], 128);
+        assert_eq!(sig1.similarity(&sig2), 0.0);
+    }
+
+    #[test]
+    fn test_lsh_signature_similar_has_high_similarity() {
+        // Only 4 bits differ out of 128
+        let sig1 = LshSignature::new([0xFF00FF00FF00FF00, 0x00FF00FF00FF00FF], 128);
+        let sig2 = LshSignature::new([0xFF00FF00FF00FF0F, 0x00FF00FF00FF00FF], 128);
+        let similarity = sig1.similarity(&sig2);
+        assert!(
+            similarity > 0.9,
+            "Signatures differing by few bits should have high similarity, got {}",
+            similarity
+        );
+    }
+
+    // ========================================================================
+    // ChunkMetadata tests
+    // ========================================================================
+
+    #[test]
+    fn test_chunk_metadata_new() {
+        let meta = ChunkMetadata::new("chunk-1".to_string(), "doc-1".to_string());
+        assert_eq!(meta.chunk_id, "chunk-1");
+        assert_eq!(meta.document_id, "doc-1");
+        assert!(meta.source_url.is_none());
+        assert!(meta.source_title.is_none());
+        assert_eq!(meta.position_in_doc, 0.0);
+        assert!(meta.section_hierarchy.is_empty());
+        assert!(meta.preceding_chunk_id.is_none());
+        assert!(meta.following_chunk_id.is_none());
+        assert!(meta.node_id.is_none());
+        assert!(meta.extra.is_empty());
+    }
+
+    // ========================================================================
+    // SearchResult tests
+    // ========================================================================
+
+    fn make_test_chunk() -> Chunk {
+        Chunk {
+            metadata: ChunkMetadata::new("chunk-42".to_string(), "doc-7".to_string()),
+            content: "test chunk content".to_string(),
+            token_count: 3,
+        }
+    }
+
+    #[test]
+    fn test_search_result_new() {
+        let chunk = make_test_chunk();
+        let result = SearchResult::new(chunk.clone(), 0.95);
+        assert_eq!(result.chunk.metadata.chunk_id, "chunk-42");
+        assert_eq!(result.chunk.metadata.document_id, "doc-7");
+        assert_eq!(result.chunk.content, "test chunk content");
+        assert_eq!(result.relevance_score, 0.95);
+        assert!(result.node_id.is_none());
+        assert!(result.matched_by.is_empty());
+    }
+
+    #[test]
+    fn test_search_result_default_contributing_methods_empty() {
+        let result = SearchResult::new(make_test_chunk(), 0.5);
+        assert!(
+            result.matched_by.is_empty(),
+            "Default matched_by should be empty"
+        );
+    }
+
+    // ========================================================================
+    // Query tests
+    // ========================================================================
+
+    #[test]
+    fn test_query_new() {
+        let query = Query::new("semantic search query", 10);
+        assert_eq!(query.text, "semantic search query");
+        assert_eq!(query.top_k, 10);
+        assert!(query.filters.is_none());
+    }
+
+    #[test]
+    fn test_query_new_with_string() {
+        let query = Query::new(String::from("owned string query"), 5);
+        assert_eq!(query.text, "owned string query");
+        assert_eq!(query.top_k, 5);
+    }
+
+    // ========================================================================
+    // Document tests
+    // ========================================================================
+
+    #[test]
+    fn test_document_new() {
+        let doc = Document::new("Some document content");
+        assert_eq!(doc.content, "Some document content");
+        assert!(!doc.id.is_empty(), "ID should be auto-generated");
+        assert!(doc.title.is_none());
+        assert!(doc.url.is_none());
+        assert!(doc.metadata.is_empty());
+    }
+
+    #[test]
+    fn test_document_with_id() {
+        let doc = Document::new("content").with_id("custom-id");
+        assert_eq!(doc.id, "custom-id");
+        assert_eq!(doc.content, "content");
+    }
+
+    #[test]
+    fn test_document_with_title() {
+        let doc = Document::new("content").with_title("My Title");
+        assert_eq!(doc.title, Some("My Title".to_string()));
+    }
+
+    #[test]
+    fn test_document_with_url() {
+        let doc = Document::new("content").with_url("https://example.com");
+        assert_eq!(doc.url, Some("https://example.com".to_string()));
+    }
+
+    #[test]
+    fn test_document_builder_chaining() {
+        let doc = Document::new("Full document content")
+            .with_id("doc-123")
+            .with_title("Chained Title")
+            .with_url("https://example.com/doc");
+
+        assert_eq!(doc.id, "doc-123");
+        assert_eq!(doc.content, "Full document content");
+        assert_eq!(doc.title, Some("Chained Title".to_string()));
+        assert_eq!(doc.url, Some("https://example.com/doc".to_string()));
+        assert!(doc.metadata.is_empty());
+    }
 }
