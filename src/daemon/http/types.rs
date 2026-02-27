@@ -214,6 +214,97 @@ pub struct ErrorResponse {
     pub message: String,
 }
 
+// ============ Scrape Types ============
+
+/// Scrape options for HTTP API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScrapeOptionsJson {
+    /// Maximum crawl depth (0 = current page only)
+    #[serde(default = "default_max_depth")]
+    pub max_depth: u8,
+    /// Stay on the same domain
+    #[serde(default = "default_stay_on_domain")]
+    pub stay_on_domain: bool,
+    /// Delay between requests in milliseconds
+    #[serde(default = "default_delay_ms")]
+    pub delay_ms: u64,
+    /// Maximum number of pages to scrape
+    #[serde(default = "default_max_pages")]
+    pub max_pages: usize,
+}
+
+fn default_max_depth() -> u8 {
+    2
+}
+
+fn default_stay_on_domain() -> bool {
+    true
+}
+
+fn default_delay_ms() -> u64 {
+    1000
+}
+
+fn default_max_pages() -> usize {
+    100
+}
+
+impl Default for ScrapeOptionsJson {
+    fn default() -> Self {
+        Self {
+            max_depth: default_max_depth(),
+            stay_on_domain: default_stay_on_domain(),
+            delay_ms: default_delay_ms(),
+            max_pages: default_max_pages(),
+        }
+    }
+}
+
+/// Scrape request body
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScrapeRequest {
+    /// URLs to start scraping from
+    pub urls: Vec<String>,
+    /// Scrape options
+    #[serde(default)]
+    pub options: ScrapeOptionsJson,
+}
+
+/// Response when a job is started
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobStartedResponse {
+    /// The job ID
+    pub job_id: String,
+    /// Human-readable message
+    pub message: String,
+}
+
+/// Response for job progress queries
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobProgressResponse {
+    /// The job ID
+    pub job_id: String,
+    /// Current stage of the job
+    pub stage: String,
+    /// Current progress count
+    pub current: u64,
+    /// Total count (if known)
+    pub total: Option<u64>,
+    /// Processing rate (items/sec)
+    pub rate: Option<f64>,
+    /// Estimated time remaining in seconds
+    pub eta_seconds: Option<u64>,
+}
+
+/// Response for job cancellation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobCancelResponse {
+    /// Whether the cancellation was successful
+    pub success: bool,
+    /// Human-readable message
+    pub message: String,
+}
+
 impl ErrorResponse {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {

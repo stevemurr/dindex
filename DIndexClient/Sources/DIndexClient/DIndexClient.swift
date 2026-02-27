@@ -217,3 +217,45 @@ extension DIndexClient {
         return response.results
     }
 }
+
+// MARK: - Scraping Extensions
+
+extension DIndexClient {
+    /// Start a web scraping job
+    ///
+    /// - Parameters:
+    ///   - urls: URLs to start scraping from
+    ///   - options: Scrape options (depth, domain filtering, etc.)
+    /// - Returns: Response containing the job ID
+    public func startScrape(urls: [String], options: ScrapeOptions = ScrapeOptions()) async throws -> JobStartedResponse {
+        let request = ScrapeRequest(urls: urls, options: options)
+        return try await transport.post(path: "/api/v1/scrape", body: request)
+    }
+
+    /// Start scraping a single URL
+    ///
+    /// - Parameters:
+    ///   - url: URL to start scraping from
+    ///   - options: Scrape options
+    /// - Returns: Response containing the job ID
+    public func startScrape(url: String, options: ScrapeOptions = ScrapeOptions()) async throws -> JobStartedResponse {
+        try await startScrape(urls: [url], options: options)
+    }
+
+    /// Get the progress of a scraping job
+    ///
+    /// - Parameter jobId: The job ID returned from startScrape
+    /// - Returns: Current job progress
+    public func getJobProgress(jobId: String) async throws -> JobProgress {
+        try await transport.get(path: "/api/v1/jobs/\(jobId)")
+    }
+
+    /// Cancel a running scrape job
+    ///
+    /// - Parameter jobId: The job ID to cancel
+    /// - Returns: Cancellation response
+    @discardableResult
+    public func cancelJob(jobId: String) async throws -> JobCancelResponse {
+        try await transport.post(path: "/api/v1/jobs/\(jobId)/cancel")
+    }
+}

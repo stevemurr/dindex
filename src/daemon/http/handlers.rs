@@ -13,8 +13,10 @@ use std::time::Instant;
 use tracing::{debug, error};
 use uuid::Uuid;
 
+use axum::extract::Path;
+
 use crate::daemon::handler::RequestHandler;
-use crate::daemon::protocol::{self, OutputFormat, Request, Response as IpcResponse};
+use crate::daemon::protocol::{self, OutputFormat, Request, Response as IpcResponse, ScrapeOptions};
 use crate::types::Document;
 
 use super::types::*;
@@ -396,6 +398,195 @@ pub async fn commit(State(state): State<AppState>) -> impl IntoResponse {
             Json(ErrorResponse::new(format!("{:?}", code), message)),
         )
             .into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal_error("Unexpected response type")),
+        )
+            .into_response(),
+    }
+}
+
+// ============ Scrape Handlers ============
+
+/// Start a web scrape job
+pub async fn start_scrape(
+    State(state): State<AppState>,
+    Json(request): Json<ScrapeRequest>,
+) -> impl IntoResponse {
+    if request.urls.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "INVALID_REQUEST".to_string(),
+                "At least one URL is required".to_string(),
+            )),
+        )
+            .into_response();
+    }
+
+    debug!("HTTP scrape request: {} URLs, depth={}", request.urls.len(), request.options.max_depth);
+
+    // Convert HTTP options to IPC options
+    let options = ScrapeOptions {
+        max_depth: request.options.max_depth,
+        stay_on_domain: request.options.stay_on_domain,
+        delay_ms: request.options.delay_ms,
+        max_pages: request.options.max_pages,
+    };
+
+    let ipc_request = Request::ScrapeStart {
+        urls: request.urls,
+        options,
+    };
+
+    match state.handler.handle(ipc_request).await {
+        IpcResponse::JobStarted { job_id } => (
+            StatusCode::OK,
+            Json(JobStartedResponse {
+                job_id: job_id.to_string(),
+                message: "Scrape job started".to_string(),
+            }),
+        )
+            .into_response(),
+        IpcResponse::Error { code, message } => {
+            error!("Scrape start failed: {:?} - {}", code, message);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(format!("{:?}", code), message)),
+            )
+                .into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal_error("Unexpected response type")),
+        )
+            .into_response(),
+    }
+}
+
+/// Get job progress
+pub async fn get_job_progress(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> impl IntoResponse {
+    let uuid = match uuid::Uuid::parse_str(&job_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "INVALID_JOB_ID".to_string(),
+                    "Invalid job ID format".to_string(),
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    debug!("HTTP job progress request: {}", job_id);
+
+    match state.handler.handle(Request::JobProgress { job_id: uuid }).await {
+        IpcResponse::JobProgress { job_id, progress } => (
+            StatusCode::OK,
+            Json(JobProgressResponse {
+                job_id: job_id.to_string(),
+                stage: progress.stage,
+                current: progress.current,
+                total: progress.total,
+                rate: progress.rate,
+                eta_seconds: progress.eta_seconds,
+            }),
+        )
+            .into_response(),
+        IpcResponse::JobComplete { job_id, stats } => (
+            StatusCode::OK,
+            Json(JobProgressResponse {
+                job_id: job_id.to_string(),
+                stage: "completed".to_string(),
+                current: stats.chunks_indexed as u64,
+                total: Some(stats.chunks_indexed as u64),
+                rate: None,
+                eta_seconds: Some(0),
+            }),
+        )
+            .into_response(),
+        IpcResponse::JobFailed { job_id, error } => (
+            StatusCode::OK,
+            Json(JobProgressResponse {
+                job_id: job_id.to_string(),
+                stage: format!("failed: {}", error),
+                current: 0,
+                total: None,
+                rate: None,
+                eta_seconds: None,
+            }),
+        )
+            .into_response(),
+        IpcResponse::Error { code, message } => {
+            let status = if code == crate::daemon::protocol::ErrorCode::JobNotFound {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (
+                status,
+                Json(ErrorResponse::new(format!("{:?}", code), message)),
+            )
+                .into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal_error("Unexpected response type")),
+        )
+            .into_response(),
+    }
+}
+
+/// Cancel a running job
+pub async fn cancel_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> impl IntoResponse {
+    let uuid = match uuid::Uuid::parse_str(&job_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "INVALID_JOB_ID".to_string(),
+                    "Invalid job ID format".to_string(),
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    debug!("HTTP job cancel request: {}", job_id);
+
+    match state.handler.handle(Request::ScrapeCancel { job_id: uuid }).await {
+        IpcResponse::Ok => (
+            StatusCode::OK,
+            Json(JobCancelResponse {
+                success: true,
+                message: "Job cancelled".to_string(),
+            }),
+        )
+            .into_response(),
+        IpcResponse::Error { code, message } => {
+            let status = if code == crate::daemon::protocol::ErrorCode::JobNotFound {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (
+                status,
+                Json(JobCancelResponse {
+                    success: false,
+                    message,
+                }),
+            )
+                .into_response()
+        }
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal_error("Unexpected response type")),
