@@ -31,3 +31,4 @@ dataset
 
 # Local dev config
 config.toml
+.claude/worktrees/
