@@ -25,13 +25,8 @@ RUN cargo fetch
 # Copy actual source code
 COPY src ./src
 
-# Build the actual binary
-ARG FEATURES=""
-RUN if [ -z "$FEATURES" ]; then \
-    cargo build --release; \
-    else \
-    cargo build --release --features "$FEATURES"; \
-    fi
+# Build the binary
+RUN cargo build --release
 
 # =============================================================================
 # Stage 2: Runtime

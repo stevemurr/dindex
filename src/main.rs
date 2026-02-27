@@ -94,24 +94,6 @@ enum Commands {
     /// Show index statistics
     Stats,
 
-    /// Download embedding model
-    Download {
-        /// Model name (default: bge-m3, 1024 dimensions, multilingual)
-        #[arg(default_value = "all-MiniLM-L6-v2")]
-        model: String,
-    },
-
-    /// Check if embedding model is downloaded, download if needed
-    CheckModel {
-        /// Model name (default: bge-m3)
-        #[arg(default_value = "all-MiniLM-L6-v2")]
-        model: String,
-
-        /// Only check, don't download if missing
-        #[arg(long)]
-        no_download: bool,
-    },
-
     /// Export index for LLM consumption
     Export {
         /// Output path
@@ -433,12 +415,6 @@ async fn async_main(cli: Cli, config: Config) -> Result<()> {
         }
         Commands::Stats => {
             commands::stats::show_stats(config).await
-        }
-        Commands::Download { model } => {
-            commands::model::download_model(config, model).await
-        }
-        Commands::CheckModel { model, no_download } => {
-            commands::model::check_model(config, model, !no_download).await
         }
         Commands::Export { output, format } => {
             commands::export::export_index(config, output, format).await

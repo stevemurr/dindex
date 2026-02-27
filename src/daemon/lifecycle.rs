@@ -61,7 +61,7 @@ impl Daemon {
             }
             Err(e) => {
                 warn!("Failed to initialize embedding engine: {}. Embeddings will use fallback.", e);
-                warn!("Run 'dindex download {}' to download the model.", config.embedding.model_name);
+                warn!("Check your [embedding] config in dindex.toml (backend, endpoint, model).");
                 None
             }
         };

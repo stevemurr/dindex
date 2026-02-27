@@ -18,16 +18,9 @@ fn default_batch_size() -> usize {
     100
 }
 
-/// Default max sequence length for local backend
-fn default_max_sequence_length() -> usize {
-    512
-}
-
 /// Backend configuration for embedding providers
 ///
-/// Supports two backend types:
-/// - `http`: OpenAI-compatible HTTP endpoints (OpenAI, Azure, LM Studio, vLLM, etc.)
-/// - `local`: Local inference using embed_anything (CPU/CUDA/Metal)
+/// Supports OpenAI-compatible HTTP endpoints (OpenAI, Azure, LM Studio, vLLM, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum BackendConfig {
@@ -51,22 +44,6 @@ pub enum BackendConfig {
         /// Maximum batch size for requests
         #[serde(default = "default_batch_size")]
         max_batch_size: usize,
-    },
-    /// Local inference using embed_anything (legacy)
-    ///
-    /// Uses embed_anything with candle backend for local inference.
-    /// Supports CPU, CUDA (--features cuda), and Metal (--features metal).
-    Local {
-        /// Model name (e.g., "all-MiniLM-L6-v2", "bge-base-en-v1.5")
-        model_name: String,
-        /// Embedding dimensions
-        dimensions: usize,
-        /// Truncated dimensions for Matryoshka routing (optional)
-        #[serde(default)]
-        truncated_dimensions: Option<usize>,
-        /// Maximum sequence length
-        #[serde(default = "default_max_sequence_length")]
-        max_sequence_length: usize,
     },
 }
 
@@ -339,9 +316,8 @@ fn default_num_threads() -> usize {
         .min(8)
 }
 
-/// Default for use_gpu - true when cuda or metal feature is enabled
 fn default_use_gpu() -> bool {
-    cfg!(feature = "cuda") || cfg!(feature = "metal")
+    false
 }
 
 impl EmbeddingConfig {
@@ -360,12 +336,6 @@ impl EmbeddingConfig {
                     max_batch_size: self.max_batch_size,
                 })
             }
-            Some("local") => Some(BackendConfig::Local {
-                model_name: self.model_name.clone(),
-                dimensions: self.dimensions,
-                truncated_dimensions: Some(self.truncated_dimensions),
-                max_sequence_length: self.max_sequence_length,
-            }),
             _ => None,
         }
     }
@@ -399,11 +369,8 @@ impl Default for EmbeddingConfig {
 
 impl EmbeddingConfig {
     /// Resolve model paths from the data directory if not explicitly set.
-    /// Note: embed_anything handles model downloading automatically,
-    /// so this is primarily for backward compatibility.
+    /// Kept for backward compatibility with legacy local config layouts.
     pub fn resolve_paths(&mut self, data_dir: &std::path::Path) {
-        // embed_anything handles model caching in ~/.cache/huggingface/
-        // This method is kept for backward compatibility but is no longer required
         if self.model_path.is_none() || self.tokenizer_path.is_none() {
             let model_dir = data_dir.join("models").join(&self.model_name);
             let model_file = model_dir.join("model.onnx");
@@ -1019,24 +986,20 @@ mod tests {
         emb.dimensions = 1536;
 
         let backend = emb.resolve_backend().expect("should produce Http backend");
-        match backend {
-            BackendConfig::Http {
-                endpoint,
-                api_key,
-                model,
-                dimensions,
-                timeout_secs,
-                max_batch_size,
-            } => {
-                assert_eq!(endpoint, "https://api.openai.com/v1/embeddings");
-                assert_eq!(api_key, Some("sk-test".to_string()));
-                assert_eq!(model, "text-embedding-3-small");
-                assert_eq!(dimensions, 1536);
-                assert_eq!(timeout_secs, 30);
-                assert_eq!(max_batch_size, 100);
-            }
-            _ => panic!("expected Http variant"),
-        }
+        let BackendConfig::Http {
+            endpoint,
+            api_key,
+            model,
+            dimensions,
+            timeout_secs,
+            max_batch_size,
+        } = backend;
+        assert_eq!(endpoint, "https://api.openai.com/v1/embeddings");
+        assert_eq!(api_key, Some("sk-test".to_string()));
+        assert_eq!(model, "text-embedding-3-small");
+        assert_eq!(dimensions, 1536);
+        assert_eq!(timeout_secs, 30);
+        assert_eq!(max_batch_size, 100);
     }
 
     #[test]
@@ -1048,12 +1011,8 @@ mod tests {
         emb.model = None;
 
         let backend = emb.resolve_backend().expect("should produce Http backend");
-        match backend {
-            BackendConfig::Http { model, .. } => {
-                assert_eq!(model, "all-MiniLM-L6-v2");
-            }
-            _ => panic!("expected Http variant"),
-        }
+        let BackendConfig::Http { model, .. } = backend;
+        assert_eq!(model, "all-MiniLM-L6-v2");
     }
 
     #[test]
@@ -1065,28 +1024,6 @@ mod tests {
             emb.resolve_backend().is_none(),
             "http backend without endpoint should return None"
         );
-    }
-
-    #[test]
-    fn resolve_backend_local() {
-        let mut emb = EmbeddingConfig::default();
-        emb.backend = Some("local".to_string());
-
-        let backend = emb.resolve_backend().expect("should produce Local backend");
-        match backend {
-            BackendConfig::Local {
-                model_name,
-                dimensions,
-                truncated_dimensions,
-                max_sequence_length,
-            } => {
-                assert_eq!(model_name, "all-MiniLM-L6-v2");
-                assert_eq!(dimensions, 384);
-                assert_eq!(truncated_dimensions, Some(384));
-                assert_eq!(max_sequence_length, 256);
-            }
-            _ => panic!("expected Local variant"),
-        }
     }
 
     #[test]

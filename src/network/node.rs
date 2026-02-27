@@ -129,7 +129,8 @@ impl NetworkHandle {
         timeout: Duration,
     ) -> Result<Vec<QueryResponse>> {
         let mut request = QueryRequest::new(query)
-            .with_origin(self.local_peer_id.to_string());
+            .with_origin(self.local_peer_id.to_string())
+            .with_target_peers(peers.iter().map(|p| p.to_string()).collect());
         if let Some(emb) = embedding {
             request = request.with_embedding(emb);
         }
@@ -437,7 +438,17 @@ impl NetworkNode {
                                 .await;
                         }
                         NetworkMessage::QueryRequest(request) => {
-                            // Check if this query is for us (or broadcast)
+                            // Filter: if target_peers is non-empty, only execute if we're targeted
+                            if !request.target_peers.is_empty() {
+                                let local_id = self.local_peer_id.to_string();
+                                if !request.target_peers.contains(&local_id) {
+                                    debug!(
+                                        "Dropping query {} — not targeted (targets: {:?})",
+                                        request.request_id, request.target_peers
+                                    );
+                                    return;
+                                }
+                            }
                             debug!("Received query request: {}", request.request_id);
                             let _ = self
                                 .event_tx

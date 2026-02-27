@@ -43,7 +43,7 @@ pub async fn search_index(
     }
 
     // Direct access fallback
-    // Initialize embedding engine (model is downloaded automatically by embed_anything)
+    // Initialize embedding engine
     let engine = init_embedding_engine(&config)
         .context("Failed to initialize embedding engine")?;
 

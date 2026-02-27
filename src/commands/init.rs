@@ -6,7 +6,7 @@ pub async fn init_config(path: PathBuf) -> Result<()> {
     let config = Config::default();
     let config_path = path.join("dindex.toml");
 
-    // Generate TOML config
+    // Generate TOML config with HTTP embedding backend
     let toml_content = format!(
         r#"# DIndex Configuration
 
@@ -18,15 +18,10 @@ replication_factor = 3
 query_timeout_secs = 10
 
 [embedding]
-model_name = "{}"
-dimensions = {}
-truncated_dimensions = {}
-max_sequence_length = {}
-quantize_int8 = true
-# GPU acceleration - auto-enabled when built with cuda feature
-# Set to false to force CPU mode
-# use_gpu = true
-# gpu_device_id = 0
+backend = "http"
+endpoint = "http://localhost:8002/v1/embeddings"
+model = "BAAI/bge-m3"
+dimensions = 1024
 
 [index]
 hnsw_m = {}
@@ -56,10 +51,6 @@ bloom_bits_per_item = {}
 candidate_nodes = {}
 "#,
         config.node.listen_addr,
-        config.embedding.model_name,
-        config.embedding.dimensions,
-        config.embedding.truncated_dimensions,
-        config.embedding.max_sequence_length,
         config.index.hnsw_m,
         config.index.hnsw_ef_construction,
         config.index.hnsw_ef_search,

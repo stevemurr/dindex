@@ -12,7 +12,7 @@ A federated semantic search system designed for LLM consumption, featuring plugg
 - **Vector Search**: USearch HNSW index with INT8 scalar quantization
 - **Hybrid Retrieval**: Combines dense vector search + BM25 lexical search with RRF fusion
 - **Semantic Routing**: Content centroids and LSH signatures for efficient query routing
-- **Pluggable Embeddings**: HTTP backends (OpenAI, vLLM, Ollama, LM Studio) or local inference (candle)
+- **Pluggable Embeddings**: HTTP backends (OpenAI, vLLM, Ollama, LM Studio)
 - **HTTP API**: REST API server for programmatic access with optional auth and CORS
 - **Metadata Filtering**: Category-based search with exact match and contains filters
 - **Bulk Import**: Wikipedia dumps, ZIM files, WARC archives with resumable checkpointing
@@ -26,9 +26,9 @@ A federated semantic search system designed for LLM consumption, featuring plugg
 │                         DECENTRALIZED NODE                               │
 │  ┌─────────────────┐  ┌──────────────────┐  ┌───────────────────────┐  │
 │  │  rust-libp2p    │  │ Embedding Engine │  │  Vector Index         │  │
-│  │  - Kademlia DHT │  │ (pluggable)      │  │  (USearch HNSW)       │  │
-│  │  - GossipSub    │  │ - HTTP backends  │  │  - INT8 quantized     │  │
-│  │  - QUIC         │  │ - Local (candle) │  │  - Memory-mapped      │  │
+│  │  - Kademlia DHT │  │ (HTTP backends)  │  │  (USearch HNSW)       │  │
+│  │  - GossipSub    │  │ - OpenAI, vLLM   │  │  - INT8 quantized     │  │
+│  │  - QUIC         │  │ - Ollama, etc.   │  │  - Memory-mapped      │  │
 │  │  - AutoNAT      │  └────────┬─────────┘  │  - 50-200 centroids   │  │
 │  └────────┬────────┘           │            └───────────┬───────────┘  │
 │           │                    │                        │              │
@@ -54,24 +54,11 @@ A federated semantic search system designed for LLM consumption, featuring plugg
 git clone https://github.com/stevemurr/dindex
 cd dindex
 
-# Build (HTTP embedding backend only — no local model needed)
+# Build
 cargo build --release
-
-# Or build with local embedding support
-cargo build --release --features local
 
 # Install directly
 cargo install --path .
-```
-
-### GPU Acceleration (Local Embeddings)
-
-```bash
-# macOS (Apple Silicon) — Metal
-cargo build --release --features metal
-
-# Linux — CUDA
-cargo build --release --features cuda
 ```
 
 ## Quick Start (Docker Compose)
@@ -303,20 +290,6 @@ max_batch_size = 100
 | vLLM | `http://localhost:8000/v1/embeddings` |
 | Ollama | `http://localhost:11434/v1/embeddings` |
 | LM Studio | `http://localhost:1234/v1/embeddings` |
-
-### Local Backend
-
-Requires building with `--features local` (or `metal`/`cuda`):
-
-```toml
-[embedding]
-backend = "local"
-model_name = "all-MiniLM-L6-v2"
-dimensions = 384
-truncated_dimensions = 256
-max_sequence_length = 512
-use_gpu = true  # Auto-detected (CUDA/Metal)
-```
 
 ## Swift Client
 

@@ -1,8 +1,7 @@
 //! Embedding engine implementation
 //!
-//! This module provides a backward-compatible wrapper around the pluggable
-//! embedding backend system. It maintains the same public API as before
-//! while delegating to the configured backend.
+//! Wraps the pluggable HTTP embedding backend system with a consistent API
+//! used across all commands (index, search, import, scrape).
 
 use crate::config::EmbeddingConfig;
 use crate::embedding::backend::{create_backend_from_legacy, EmbeddingBackend, EmbeddingError};

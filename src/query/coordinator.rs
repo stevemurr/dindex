@@ -15,6 +15,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+/// Minimum quality score before triggering adaptive fan-out to additional peers
+const ADAPTIVE_FANOUT_QUALITY_THRESHOLD: f32 = 0.5;
+
+/// Minimum number of results before considering fan-out
+const ADAPTIVE_FANOUT_MIN_RESULTS: usize = 1;
+
 /// Query coordinator for distributed search
 pub struct QueryCoordinator {
     /// Local hybrid retriever
@@ -152,8 +158,50 @@ impl QueryCoordinator {
                     }
                     Err(e) => {
                         warn!("Remote query failed: {}", e);
-                        for peer_id in peer_ids {
+                        for peer_id in &peer_ids {
                             timed_out_nodes.push(peer_id.to_string());
+                        }
+                    }
+                }
+
+                // Adaptive fan-out: if initial results are low quality, expand to more peers
+                let initial_quality = self.estimate_quality(&responding_nodes, &timed_out_nodes, &plan);
+                let total_results: usize = all_results.iter().map(|(_, r)| r.len()).sum();
+
+                if initial_quality < ADAPTIVE_FANOUT_QUALITY_THRESHOLD
+                    || total_results < ADAPTIVE_FANOUT_MIN_RESULTS
+                {
+                    if let Ok(all_peers) = network.get_peers().await {
+                        let already_queried: std::collections::HashSet<PeerId> =
+                            peer_ids.iter().cloned().collect();
+                        let tier2_peers: Vec<PeerId> = all_peers
+                            .into_iter()
+                            .map(|p| p.peer_id)
+                            .filter(|p| !already_queried.contains(p))
+                            .collect();
+
+                        if !tier2_peers.is_empty() {
+                            debug!(
+                                "Adaptive fan-out: expanding to {} additional peers (quality={:.2}, results={})",
+                                tier2_peers.len(), initial_quality, total_results
+                            );
+                            match network
+                                .query(tier2_peers.clone(), query.clone(), Some(embedding.clone()), plan.timeout)
+                                .await
+                            {
+                                Ok(responses) => {
+                                    for response in responses {
+                                        responding_nodes.push(response.request_id.clone());
+                                        all_results.push((response.request_id, response.results));
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Adaptive fan-out query failed: {}", e);
+                                    for peer_id in tier2_peers {
+                                        timed_out_nodes.push(peer_id.to_string());
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -313,11 +361,15 @@ mod tests {
     use super::*;
     use crate::types::Chunk;
 
-    #[test]
-    fn test_result_aggregation() {
+    fn make_coordinator() -> QueryCoordinator {
         let config = Config::default();
         let router = Arc::new(QueryRouter::new(768, &config.routing));
-        let coordinator = QueryCoordinator::new(None, None, router, None, config);
+        QueryCoordinator::new(None, None, router, None, config)
+    }
+
+    #[test]
+    fn test_result_aggregation() {
+        let coordinator = make_coordinator();
 
         // Create test results from multiple nodes
         let chunk1 = Chunk {
@@ -349,5 +401,66 @@ mod tests {
 
         // Both chunks should be present
         assert_eq!(aggregated.len(), 2);
+    }
+
+    #[test]
+    fn test_quality_estimate_full_response() {
+        let coordinator = make_coordinator();
+        let plan = QueryPlan {
+            embedding: vec![0.0; 768],
+            candidate_nodes: vec![
+                CandidateNode { node_id: "node1".to_string(), similarity: 0.9, matching_centroids: vec![0] },
+                CandidateNode { node_id: "node2".to_string(), similarity: 0.8, matching_centroids: vec![1] },
+            ],
+            query_local: false,
+            timeout: Duration::from_secs(10),
+        };
+
+        let responding = vec!["node1".to_string(), "node2".to_string()];
+        let timed_out: Vec<NodeId> = vec![];
+        let quality = coordinator.estimate_quality(&responding, &timed_out, &plan);
+        assert!(quality >= 0.9, "full response should have high quality, got {}", quality);
+    }
+
+    #[test]
+    fn test_quality_estimate_no_responses() {
+        let coordinator = make_coordinator();
+        let plan = QueryPlan {
+            embedding: vec![0.0; 768],
+            candidate_nodes: vec![
+                CandidateNode { node_id: "node1".to_string(), similarity: 0.9, matching_centroids: vec![0] },
+                CandidateNode { node_id: "node2".to_string(), similarity: 0.8, matching_centroids: vec![1] },
+            ],
+            query_local: false,
+            timeout: Duration::from_secs(10),
+        };
+
+        let responding: Vec<NodeId> = vec![];
+        let timed_out = vec!["node1".to_string(), "node2".to_string()];
+        let quality = coordinator.estimate_quality(&responding, &timed_out, &plan);
+        assert!(quality < ADAPTIVE_FANOUT_QUALITY_THRESHOLD,
+            "no responses should trigger fan-out, got quality {}", quality);
+    }
+
+    #[test]
+    fn test_quality_estimate_partial_response() {
+        let coordinator = make_coordinator();
+        let plan = QueryPlan {
+            embedding: vec![0.0; 768],
+            candidate_nodes: vec![
+                CandidateNode { node_id: "node1".to_string(), similarity: 0.9, matching_centroids: vec![0] },
+                CandidateNode { node_id: "node2".to_string(), similarity: 0.8, matching_centroids: vec![1] },
+                CandidateNode { node_id: "node3".to_string(), similarity: 0.7, matching_centroids: vec![2] },
+            ],
+            query_local: false,
+            timeout: Duration::from_secs(10),
+        };
+
+        // Only top candidate responded
+        let responding = vec!["node1".to_string()];
+        let timed_out = vec!["node2".to_string(), "node3".to_string()];
+        let quality = coordinator.estimate_quality(&responding, &timed_out, &plan);
+        assert!(quality > 0.0 && quality < 1.0,
+            "partial response should have intermediate quality, got {}", quality);
     }
 }

@@ -1,18 +1,12 @@
 //! Backend factory for creating embedding backends from configuration
-//!
-//! Provides a unified way to create embedding backends based on configuration.
 
 use super::http::{HttpBackend, HttpConfig};
-#[cfg(feature = "local")]
-use super::local::{LocalBackend, LocalConfig};
 use super::traits::{EmbeddingBackend, EmbeddingResult};
 use crate::config::BackendConfig;
 use std::sync::Arc;
 use tracing::info;
 
 /// Create an embedding backend from configuration
-///
-/// Returns an `Arc<dyn EmbeddingBackend>` that can be shared across threads.
 pub fn create_backend(config: &BackendConfig) -> EmbeddingResult<Arc<dyn EmbeddingBackend>> {
     match config {
         BackendConfig::Http {
@@ -37,43 +31,14 @@ pub fn create_backend(config: &BackendConfig) -> EmbeddingResult<Arc<dyn Embeddi
             let backend = HttpBackend::new(http_config)?;
             Ok(Arc::new(backend))
         }
-
-        #[cfg(feature = "local")]
-        BackendConfig::Local {
-            model_name,
-            dimensions,
-            truncated_dimensions,
-            max_sequence_length,
-        } => {
-            info!("Creating local embedding backend: model={}", model_name);
-
-            let local_config = LocalConfig {
-                model_name: model_name.clone(),
-                dimensions: *dimensions,
-                truncated_dimensions: truncated_dimensions.unwrap_or(*dimensions),
-                max_sequence_length: *max_sequence_length,
-            };
-
-            let backend = LocalBackend::new(local_config)?;
-            Ok(Arc::new(backend))
-        }
-
-        #[cfg(not(feature = "local"))]
-        BackendConfig::Local { .. } => {
-            Err(super::traits::EmbeddingError::Config(
-                "Local embedding backend requires the 'local' feature. \
-                 Build with: cargo build --features local\n\
-                 Or use an HTTP backend instead (recommended)."
-                    .to_string(),
-            ))
-        }
     }
 }
 
 /// Create a backend from legacy EmbeddingConfig (backward compatibility)
 ///
-/// This function is provided for backward compatibility with the old
-/// EmbeddingConfig structure. It creates a LocalBackend.
+/// Resolves the backend configuration from EmbeddingConfig fields.
+/// Falls back to an HTTP backend using the configured endpoint, or returns
+/// an error if no HTTP endpoint is configured.
 pub fn create_backend_from_legacy(
     config: &crate::config::EmbeddingConfig,
 ) -> EmbeddingResult<Arc<dyn EmbeddingBackend>> {
@@ -82,41 +47,16 @@ pub fn create_backend_from_legacy(
         return create_backend(&backend_config);
     }
 
-    // Fall back to local backend using legacy fields
-    #[cfg(feature = "local")]
-    {
-        info!(
-            "Creating local embedding backend from legacy config: model={}",
-            config.model_name
-        );
-
-        let local_config = LocalConfig {
-            model_name: config.model_name.clone(),
-            dimensions: config.dimensions,
-            truncated_dimensions: config.truncated_dimensions,
-            max_sequence_length: config.max_sequence_length,
-        };
-
-        let backend = LocalBackend::new(local_config)?;
-        Ok(Arc::new(backend))
-    }
-
-    #[cfg(not(feature = "local"))]
-    {
-        Err(super::traits::EmbeddingError::Config(
-            format!(
-                "Local embedding backend for model '{}' requires the 'local' feature. \
-                 Build with: cargo build --features local\n\
-                 Or configure an HTTP backend in your config.toml:\n\
-                 [embedding]\n\
-                 backend = \"http\"\n\
-                 endpoint = \"http://localhost:8002/v1/embeddings\"\n\
-                 model = \"bge-m3\"\n\
-                 dimensions = 1024",
-                config.model_name
-            ),
-        ))
-    }
+    // No backend configured — require HTTP configuration
+    Err(super::traits::EmbeddingError::Config(
+        "No embedding backend configured. Add an HTTP backend to your config.toml:\n\
+         [embedding]\n\
+         backend = \"http\"\n\
+         endpoint = \"http://localhost:8002/v1/embeddings\"\n\
+         model = \"bge-m3\"\n\
+         dimensions = 1024"
+            .to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -141,5 +81,12 @@ mod tests {
         let backend = result.unwrap();
         assert_eq!(backend.name(), "http");
         assert_eq!(backend.dimensions(), 384);
+    }
+
+    #[test]
+    fn test_create_backend_from_legacy_no_backend() {
+        let config = crate::config::EmbeddingConfig::default();
+        let result = create_backend_from_legacy(&config);
+        assert!(result.is_err(), "should error when no backend configured");
     }
 }

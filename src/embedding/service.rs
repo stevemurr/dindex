@@ -2,13 +2,9 @@
 //!
 //! Provides a consistent way to initialize the embedding engine
 //! across all commands (index, search, import, scrape).
-//!
-//! Supports both the new pluggable backend system and legacy configuration
-//! for backward compatibility.
 
 use crate::config::Config;
 use crate::embedding::EmbeddingEngine;
-use crate::embedding::model::ModelRegistry;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tracing::info;
@@ -16,27 +12,16 @@ use tracing::info;
 /// Initialize embedding engine from config
 ///
 /// Creates the embedding engine with the configured backend.
-/// Supports both new-style backend configuration and legacy fields.
 pub fn init_embedding_engine(config: &Config) -> Result<Arc<EmbeddingEngine>> {
-    // Log what we're doing
     if let Some(ref backend_config) = config.embedding.resolve_backend() {
         match backend_config {
             crate::config::BackendConfig::Http { endpoint, model, .. } => {
                 info!("Initializing HTTP embedding backend: {} ({})", endpoint, model);
             }
-            crate::config::BackendConfig::Local { model_name, .. } => {
-                info!("Initializing local embedding backend: {}", model_name);
-            }
         }
     } else {
-        info!(
-            "Initializing embedding engine with model: {}",
-            config.embedding.model_name
-        );
+        info!("Initializing embedding engine (no backend configured)");
     }
-
-    // Print execution provider info
-    print_embedding_status(&config.embedding);
 
     // Create engine using the backend factory
     let engine = EmbeddingEngine::new(&config.embedding)
@@ -49,67 +34,6 @@ pub fn init_embedding_engine(config: &Config) -> Result<Arc<EmbeddingEngine>> {
     );
 
     Ok(Arc::new(engine))
-}
-
-/// Print embedding execution status
-fn print_embedding_status(config: &crate::config::EmbeddingConfig) {
-    // Check if using HTTP backend
-    if let Some(ref backend_config) = config.resolve_backend() {
-        match backend_config {
-            crate::config::BackendConfig::Http { endpoint, .. } => {
-                println!("  Embeddings: HTTP ({})", endpoint);
-                return;
-            }
-            crate::config::BackendConfig::Local { .. } => {
-                // Fall through to local status
-            }
-        }
-    }
-
-    // Local backend status
-    #[cfg(feature = "metal")]
-    if config.use_gpu {
-        println!("  Embeddings: GPU (Metal)");
-        return;
-    }
-
-    #[cfg(feature = "cuda")]
-    if config.use_gpu {
-        println!("  Embeddings: GPU (CUDA device {})", config.gpu_device_id);
-        return;
-    }
-
-    if config.use_gpu {
-        println!("  Embeddings: CPU (GPU requested but no GPU feature enabled)");
-        println!("    Rebuild with --features cuda or --features metal");
-    } else {
-        println!("  Embeddings: CPU ({} threads)", config.num_threads);
-    }
-}
-
-/// Check if a model is known in the registry
-pub fn check_model_exists(config: &Config) -> Result<bool> {
-    // If using HTTP backend, we can't check model existence locally
-    if let Some(ref backend_config) = config.embedding.resolve_backend() {
-        if matches!(backend_config, crate::config::BackendConfig::Http { .. }) {
-            // For HTTP backends, we assume the model exists on the server
-            return Ok(true);
-        }
-    }
-
-    // With embed_anything, models are downloaded on demand
-    // We just check if the model is in our registry or looks like a valid HF ID
-    let model_name = &config.embedding.model_name;
-    Ok(ModelRegistry::is_valid(model_name))
-}
-
-/// Print a helpful error message if model is not found
-pub fn model_not_found_error(config: &Config) {
-    use crate::embedding::model::print_models;
-
-    eprintln!("Error: Unknown model '{}'.", config.embedding.model_name);
-    eprintln!();
-    print_models();
 }
 
 /// Generate an embedding with hash-based fallback

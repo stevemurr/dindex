@@ -8,9 +8,6 @@ authors = ["DIndex Contributors"]
 
 [features]
 default = []
-local = ["dep:embed_anything"]
-cuda = ["local", "embed_anything/cuda"]
-metal = ["local", "embed_anything/metal"]
 onnx = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 
 [dependencies]
@@ -39,8 +36,6 @@ futures = "0.3"
 # Vector index
 usearch = "2"
 
-# Embedding inference (optional - only needed for local backend)
-embed_anything = { git = "https://github.com/StarlightSearch/EmbedAnything", branch = "main", optional = true }
 ndarray = { version = "0.17", optional = true }
 
 # Serialization
@@ -109,7 +104,6 @@ tower = { version = "0.4", features = ["timeout", "limit"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 
 # Optional: ONNX reranking (enable with --features onnx)
-# Note: ort version must match embed_anything's requirement (2.0.0-rc.9)
 ort = { version = "=2.0.0-rc.10", optional = true }
 tokenizers = { version = "0.20", optional = true }
 
@@ -126,4 +120,3 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-# embed_anything main branch now uses candle 0.9.2 directly - no patch needed

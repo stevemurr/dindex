@@ -34,6 +34,10 @@ pub struct QueryRequest {
     pub query_embedding: Option<Vec<f32>>,
     /// Originating peer (for routing response back)
     pub origin_peer: Option<String>,
+    /// Target peers for this query. If non-empty, only these peers should execute the query.
+    /// GossipSub broadcasts to all subscribers, so receivers use this list to filter.
+    #[serde(default)]
+    pub target_peers: Vec<String>,
 }
 
 impl QueryRequest {
@@ -43,6 +47,7 @@ impl QueryRequest {
             query,
             query_embedding: None,
             origin_peer: None,
+            target_peers: Vec::new(),
         }
     }
 
@@ -53,6 +58,11 @@ impl QueryRequest {
 
     pub fn with_origin(mut self, peer_id: String) -> Self {
         self.origin_peer = Some(peer_id);
+        self
+    }
+
+    pub fn with_target_peers(mut self, peers: Vec<String>) -> Self {
+        self.target_peers = peers;
         self
     }
 }
@@ -125,6 +135,7 @@ mod tests {
         assert_eq!(req.query.top_k, 5);
         assert!(req.query_embedding.is_none());
         assert!(req.origin_peer.is_none());
+        assert!(req.target_peers.is_empty());
     }
 
     #[test]
@@ -151,6 +162,63 @@ mod tests {
         assert_eq!(req.query.text, "chained");
         assert_eq!(req.query_embedding, Some(vec![1.0, 2.0]));
         assert_eq!(req.origin_peer, Some("peer-xyz".to_string()));
+    }
+
+    #[test]
+    fn test_query_request_with_target_peers() {
+        let query = Query::new("targeted", 5);
+        let peers = vec!["peer-a".to_string(), "peer-b".to_string()];
+        let req = QueryRequest::new(query).with_target_peers(peers.clone());
+        assert_eq!(req.target_peers, peers);
+    }
+
+    #[test]
+    fn test_target_peers_filtering_drops_non_targeted() {
+        let query = Query::new("targeted query", 5);
+        let req = QueryRequest::new(query)
+            .with_target_peers(vec!["peer-a".to_string(), "peer-b".to_string()]);
+
+        // Simulate receiver-side check: local peer is "peer-c" (not in target list)
+        let local_peer_id = "peer-c".to_string();
+        let should_process = req.target_peers.is_empty()
+            || req.target_peers.contains(&local_peer_id);
+        assert!(!should_process, "non-targeted peer should drop the query");
+    }
+
+    #[test]
+    fn test_target_peers_filtering_accepts_targeted() {
+        let query = Query::new("targeted query", 5);
+        let req = QueryRequest::new(query)
+            .with_target_peers(vec!["peer-a".to_string(), "peer-b".to_string()]);
+
+        // Simulate receiver-side check: local peer is "peer-a" (in target list)
+        let local_peer_id = "peer-a".to_string();
+        let should_process = req.target_peers.is_empty()
+            || req.target_peers.contains(&local_peer_id);
+        assert!(should_process, "targeted peer should process the query");
+    }
+
+    #[test]
+    fn test_target_peers_empty_means_broadcast() {
+        let query = Query::new("broadcast query", 5);
+        let req = QueryRequest::new(query);
+
+        // Empty target_peers = broadcast, all peers should process
+        let local_peer_id = "any-peer".to_string();
+        let should_process = req.target_peers.is_empty()
+            || req.target_peers.contains(&local_peer_id);
+        assert!(should_process, "empty target_peers means broadcast to all");
+    }
+
+    #[test]
+    fn test_target_peers_serialization_roundtrip() {
+        let query = Query::new("ser target", 3);
+        let peers = vec!["peer-x".to_string(), "peer-y".to_string()];
+        let req = QueryRequest::new(query).with_target_peers(peers.clone());
+
+        let serialized = serde_json::to_string(&req).expect("serialize");
+        let deserialized: QueryRequest = serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(deserialized.target_peers, peers);
     }
 
     #[test]
