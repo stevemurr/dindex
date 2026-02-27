@@ -15,8 +15,11 @@ import FoundationNetworking
 ///
 /// // Search
 /// let response = try await client.search(query: "machine learning", topK: 5)
-/// for result in response.results {
-///     print("[\(result.relevanceScore)] \(result.chunk.content)")
+/// for group in response.results {
+///     print("[\(group.relevanceScore)] \(group.sourceTitle ?? "untitled")")
+///     for chunk in group.chunks {
+///         print("  [\(chunk.relevanceScore)] \(chunk.content.prefix(100))")
+///     }
 /// }
 ///
 /// // Check health
@@ -133,8 +136,8 @@ extension DIndexClient {
     /// - Parameters:
     ///   - query: The search query text
     ///   - topK: Number of results to return
-    /// - Returns: Array of search results
-    public func searchResults(query: String, topK: Int = 10) async throws -> [SearchResult] {
+    /// - Returns: Array of grouped search results
+    public func searchResults(query: String, topK: Int = 10) async throws -> [GroupedSearchResult] {
         let response = try await search(query: query, topK: topK)
         return response.results
     }
@@ -207,12 +210,12 @@ extension DIndexClient {
     ///   - query: The search query text
     ///   - categories: Array of category tags to filter by
     ///   - topK: Number of results to return (default: 10)
-    /// - Returns: Array of search results
+    /// - Returns: Array of grouped search results
     public func searchResults(
         query: String,
         categories: [String],
         topK: Int = 10
-    ) async throws -> [SearchResult] {
+    ) async throws -> [GroupedSearchResult] {
         let response = try await search(query: query, categories: categories, topK: topK)
         return response.results
     }

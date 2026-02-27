@@ -59,19 +59,24 @@ final class DIndexClientTests: XCTestCase {
         {
             "results": [
                 {
-                    "chunk": {
-                        "content": "Test content",
-                        "metadata": {
-                            "chunk_id": "chunk1",
-                            "document_id": "doc1",
-                            "source_url": "https://example.com",
-                            "source_title": "Example"
-                        }
-                    },
+                    "document_id": "doc1",
+                    "source_url": "https://example.com",
+                    "source_title": "Example",
                     "relevance_score": 0.95,
-                    "matched_by": ["dense", "bm25"]
+                    "chunks": [
+                        {
+                            "chunk_id": "chunk1",
+                            "content": "Test content",
+                            "relevance_score": 0.95,
+                            "matched_by": ["dense", "bm25"],
+                            "section_hierarchy": [],
+                            "position_in_doc": 0.0
+                        }
+                    ]
                 }
             ],
+            "total_documents": 1,
+            "total_chunks": 1,
             "query_time_ms": 42
         }
         """
@@ -80,18 +85,21 @@ final class DIndexClientTests: XCTestCase {
         let response = try decoder.decode(SearchResponse.self, from: json.data(using: .utf8)!)
 
         XCTAssertEqual(response.results.count, 1)
+        XCTAssertEqual(response.totalDocuments, 1)
+        XCTAssertEqual(response.totalChunks, 1)
         XCTAssertEqual(response.queryTimeMs, 42)
 
-        let result = response.results[0]
-        XCTAssertEqual(result.chunk.content, "Test content")
-        XCTAssertEqual(result.relevanceScore, 0.95, accuracy: 0.001)
-        XCTAssertEqual(result.matchedBy, ["dense", "bm25"])
+        let group = response.results[0]
+        XCTAssertEqual(group.documentId, "doc1")
+        XCTAssertEqual(group.sourceUrl, "https://example.com")
+        XCTAssertEqual(group.sourceTitle, "Example")
+        XCTAssertEqual(group.relevanceScore, 0.95, accuracy: 0.001)
 
-        let metadata = result.chunk.metadata
-        XCTAssertEqual(metadata.chunkId, "chunk1")
-        XCTAssertEqual(metadata.documentId, "doc1")
-        XCTAssertEqual(metadata.sourceUrl, "https://example.com")
-        XCTAssertEqual(metadata.sourceTitle, "Example")
+        let chunk = group.chunks[0]
+        XCTAssertEqual(chunk.chunkId, "chunk1")
+        XCTAssertEqual(chunk.content, "Test content")
+        XCTAssertEqual(chunk.relevanceScore, 0.95, accuracy: 0.001)
+        XCTAssertEqual(chunk.matchedBy, ["dense", "bm25"])
     }
 
     func testIndexStatsDecoding() throws {
