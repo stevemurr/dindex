@@ -15,7 +15,7 @@ A federated semantic search system designed for LLM consumption, featuring plugg
 - **Pluggable Embeddings**: HTTP backends (OpenAI, vLLM, Ollama, LM Studio)
 - **HTTP API**: REST API server for programmatic access with optional auth and CORS
 - **Metadata Filtering**: Category-based search with exact match and contains filters
-- **Bulk Import**: Wikipedia dumps, ZIM files, WARC archives with resumable checkpointing
+- **Bulk Import**: Wikipedia dumps with resumable checkpointing (ZIM and WARC support planned)
 - **Web Scraping**: Multi-URL crawling with depth control and domain restriction
 - **LLM-Ready**: Rich metadata structure for retrieved chunks
 
@@ -75,7 +75,7 @@ docker compose up -d
 docker compose logs -f
 
 # Index documents via the HTTP API
-curl -X POST http://localhost:8080/api/v1/index \
+curl -X POST http://localhost:8081/api/v1/index \
   -H "Content-Type: application/json" \
   -d '{
     "documents": [{
@@ -86,7 +86,7 @@ curl -X POST http://localhost:8080/api/v1/index \
   }'
 
 # Search
-curl -s http://localhost:8080/api/v1/search \
+curl -s http://localhost:8081/api/v1/search \
   -H "Content-Type: application/json" \
   -d '{"query": "your search query", "top_k": 10}' | jq
 
@@ -94,7 +94,7 @@ curl -s http://localhost:8080/api/v1/search \
 docker compose down
 ```
 
-The API is available at `http://localhost:8080` and P2P at port `4001`.
+The API is available at `http://localhost:8081` and P2P at port `4001`.
 
 ## Quick Start (Local Binary)
 
@@ -159,11 +159,11 @@ dindex scrape-stats
 # Import Wikipedia dump (auto-detects format)
 dindex import ./wiki.xml.bz2 --batch-size 100
 
-# Import ZIM file (Kiwix)
-dindex import ./file.zim --format zim
+# Import ZIM file (Kiwix) — coming soon
+# dindex import ./file.zim --format zim
 
-# Import WARC web archive
-dindex import ./archive.warc --format warc
+# Import WARC web archive — coming soon
+# dindex import ./archive.warc --format warc
 
 # Resume an interrupted import
 dindex import ./wiki.xml.bz2 --resume --checkpoint ./checkpoint.json
@@ -228,11 +228,13 @@ cors_enabled = true
 | `POST` | `/api/v1/search` | Search with optional filters |
 | `POST` | `/api/v1/index` | Index documents |
 | `POST` | `/api/v1/index/commit` | Force commit pending writes |
+| `POST` | `/api/v1/index/clear` | Clear all entries from the index |
+| `DELETE` | `/api/v1/documents` | Delete documents by IDs |
 
 ### Search with Metadata Filtering
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/search \
+curl -X POST http://localhost:8081/api/v1/search \
   -H "Content-Type: application/json" \
   -d '{
     "query": "machine learning",
@@ -251,7 +253,7 @@ curl -X POST http://localhost:8080/api/v1/search \
 ### Index Documents via API
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/index \
+curl -X POST http://localhost:8081/api/v1/index \
   -H "Content-Type: application/json" \
   -d '{
     "documents": [{
@@ -261,6 +263,18 @@ curl -X POST http://localhost:8080/api/v1/index \
       "metadata": {"category": "tech", "author": "Jane"}
     }]
   }'
+```
+
+### Delete Documents
+
+```bash
+# Delete specific documents by ID
+curl -X DELETE http://localhost:8081/api/v1/documents \
+  -H "Content-Type: application/json" \
+  -d '{"document_ids": ["doc123", "doc456"]}'
+
+# Clear the entire index
+curl -X POST http://localhost:8081/api/v1/index/clear
 ```
 
 ## Embedding Backends
@@ -274,7 +288,7 @@ Works with OpenAI, vLLM, Ollama, LM Studio, text-embeddings-inference, and more:
 ```toml
 [embedding]
 backend = "http"
-endpoint = "http://localhost:8000/v1/embeddings"
+endpoint = "http://localhost:8002/v1/embeddings"
 model = "BAAI/bge-m3"
 dimensions = 1024
 timeout_secs = 30
@@ -287,7 +301,7 @@ max_batch_size = 100
 | Provider | Endpoint |
 |----------|----------|
 | OpenAI | `https://api.openai.com/v1/embeddings` |
-| vLLM | `http://localhost:8000/v1/embeddings` |
+| vLLM | `http://localhost:8002/v1/embeddings` |
 | Ollama | `http://localhost:11434/v1/embeddings` |
 | LM Studio | `http://localhost:1234/v1/embeddings` |
 
@@ -308,7 +322,7 @@ dependencies: [
 ```swift
 import DIndexClient
 
-let client = DIndexClient(transport: HTTPTransport(baseURL: "http://localhost:8080"))
+let client = DIndexClient(baseURL: URL(string: "http://localhost:8081")!)
 
 // Search
 let results = try await client.search(query: "machine learning", topK: 10)
@@ -322,6 +336,12 @@ let filtered = try await client.search(query: "transformers", topK: 5, filters: 
 
 // Index a document
 try await client.index(content: "Document text...", title: "My Doc", url: "https://example.com")
+
+// Delete documents
+try await client.deleteDocuments(ids: ["doc123", "doc456"])
+
+// Clear the entire index
+try await client.clearAll()
 
 // Health check
 let healthy = try await client.health()
@@ -346,7 +366,7 @@ docker compose down
 
 This starts:
 - **vLLM** serving BGE-M3 embeddings on port 8002 (GPU-accelerated)
-- **DIndex** with HTTP API on port 8080 and P2P on port 4001
+- **DIndex** with HTTP API on port 8081 (mapped from container port 8080) and P2P on port 4001
 
 ### Building the Image
 
@@ -365,7 +385,7 @@ docker run --rm -v dindex-data:/data dindex init --data-dir /data
 docker run -d --name dindex \
   -p 4001:4001/udp \
   -p 4001:4001/tcp \
-  -p 8080:8080 \
+  -p 8081:8080 \
   -v dindex-data:/data \
   dindex start --listen /ip4/0.0.0.0/udp/4001/quic-v1
 
@@ -393,7 +413,7 @@ docker run --rm \
 |------|----------|-------------|
 | 4001 | UDP | P2P QUIC transport (primary) |
 | 4001 | TCP | P2P TCP fallback |
-| 8080 | TCP | HTTP API |
+| 8081 | TCP | HTTP API (mapped from container 8080) |
 
 ## Configuration
 
@@ -409,7 +429,7 @@ query_timeout_secs = 10
 
 [embedding]
 backend = "http"
-endpoint = "http://localhost:8000/v1/embeddings"
+endpoint = "http://localhost:8002/v1/embeddings"
 model = "BAAI/bge-m3"
 dimensions = 1024
 
