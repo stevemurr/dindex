@@ -312,6 +312,7 @@ mod tests {
                 candidate_count: 10,
                 enable_reranking,
                 reranker_model_path: None,
+                ..Default::default()
             };
             HybridRetriever::new(
                 self.vector_index.clone(),
@@ -399,6 +400,7 @@ mod tests {
             candidate_count: 10,
             enable_reranking: false,
             reranker_model_path: None,
+            ..Default::default()
         };
 
         let retriever = HybridRetriever::new(

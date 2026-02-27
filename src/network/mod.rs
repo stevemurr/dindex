@@ -9,7 +9,9 @@
 mod behaviour;
 mod messages;
 mod node;
+mod protocol;
 
 pub use behaviour::*;
 pub use messages::*;
 pub use node::*;
+pub use protocol::*;

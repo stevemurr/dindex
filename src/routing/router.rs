@@ -7,8 +7,6 @@ use crate::config::RoutingConfig;
 use crate::embedding::cosine_similarity;
 use crate::types::{Embedding, LshSignature, NodeAdvertisement, NodeCentroid, NodeId};
 
-/// Number of bands for LSH banding (divides 128-bit LSH into 8 bands of 16 bits)
-const LSH_NUM_BANDS: usize = 8;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use tracing::{debug, info};
@@ -117,7 +115,7 @@ impl QueryRouter {
                 }
 
                 // Track centroids above threshold
-                if similarity > 0.5 {
+                if similarity > self.config.centroid_similarity_threshold {
                     matching_centroids.push(centroid.centroid_id);
                 }
             }
@@ -195,15 +193,15 @@ impl AdvertisementBuilder {
     }
 
     /// Build the advertisement
-    pub fn build(self, lsh_bits: usize) -> NodeAdvertisement {
+    pub fn build(self, lsh_bits: usize, num_bands: usize, fp_rate: f64) -> NodeAdvertisement {
         // Create banded bloom filter from LSH signatures
         // Uses LSH banding technique for proper semantic filtering
         let bloom_filter = if !self.lsh_signatures.is_empty() {
             let mut bloom = BandedBloomFilter::new(
                 self.lsh_signatures.len(),
                 lsh_bits,
-                LSH_NUM_BANDS,
-                0.01, // 1% false positive rate per band
+                num_bands,
+                fp_rate,
             );
             for sig in &self.lsh_signatures {
                 bloom.insert(&sig.bits, sig.num_bits);
@@ -234,6 +232,9 @@ mod tests {
             lsh_num_hashes: 4,
             bloom_bits_per_item: 10,
             candidate_nodes: 3,
+            lsh_num_bands: 8,
+            centroid_similarity_threshold: 0.5,
+            bloom_false_positive_rate: 0.01,
         }
     }
 
@@ -253,7 +254,7 @@ mod tests {
 
         let ad = AdvertisementBuilder::new("node1".to_string())
             .with_centroids(&embeddings, 5, None)
-            .build(config.lsh_bits);
+            .build(config.lsh_bits, config.lsh_num_bands, config.bloom_false_positive_rate);
 
         router.register_node(ad);
 
@@ -288,6 +289,7 @@ mod tests {
             lsh_num_hashes: 4,
             bloom_bits_per_item: 10,
             candidate_nodes: 5,
+            ..Default::default()
         };
 
         let router = QueryRouter::new(64, &config);
@@ -311,7 +313,7 @@ mod tests {
         let ad = AdvertisementBuilder::new("node_with_bloom".to_string())
             .with_centroids(&embeddings, 5, None)
             .with_lsh(lsh_sigs)
-            .build(config.lsh_bits);
+            .build(config.lsh_bits, config.lsh_num_bands, config.bloom_false_positive_rate);
 
         router.register_node(ad);
 
@@ -352,7 +354,7 @@ mod tests {
 
         let ad = AdvertisementBuilder::new("small_node".to_string())
             .with_centroids(&small_embeddings, 3, None)
-            .build(config.lsh_bits);
+            .build(config.lsh_bits, config.lsh_num_bands, config.bloom_false_positive_rate);
 
         router.register_node(ad);
 
@@ -377,7 +379,7 @@ mod tests {
 
         let ad2 = AdvertisementBuilder::new("large_node".to_string())
             .with_centroids(&large_embeddings, 3, None)
-            .build(config.lsh_bits);
+            .build(config.lsh_bits, config.lsh_num_bands, config.bloom_false_positive_rate);
 
         router.register_node(ad2);
 

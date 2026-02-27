@@ -15,12 +15,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-/// Minimum quality score before triggering adaptive fan-out to additional peers
-const ADAPTIVE_FANOUT_QUALITY_THRESHOLD: f32 = 0.5;
-
-/// Minimum number of results before considering fan-out
-const ADAPTIVE_FANOUT_MIN_RESULTS: usize = 1;
-
 /// Query coordinator for distributed search
 pub struct QueryCoordinator {
     /// Local hybrid retriever
@@ -165,11 +159,21 @@ impl QueryCoordinator {
                 }
 
                 // Adaptive fan-out: if initial results are low quality, expand to more peers
-                let initial_quality = self.estimate_quality(&responding_nodes, &timed_out_nodes, &plan);
+                let initial_quality = self.estimate_quality(
+                    &responding_nodes, &timed_out_nodes, &plan, &all_results,
+                );
                 let total_results: usize = all_results.iter().map(|(_, r)| r.len()).sum();
+                let avg_score = if total_results > 0 {
+                    all_results.iter()
+                        .flat_map(|(_, r)| r.iter().map(|s| s.relevance_score))
+                        .sum::<f32>() / total_results as f32
+                } else {
+                    0.0
+                };
 
-                if initial_quality < ADAPTIVE_FANOUT_QUALITY_THRESHOLD
-                    || total_results < ADAPTIVE_FANOUT_MIN_RESULTS
+                if initial_quality < self.config.retrieval.fanout_quality_threshold
+                    || total_results < self.config.retrieval.fanout_min_results
+                    || avg_score < self.config.retrieval.fanout_score_threshold
                 {
                     if let Ok(all_peers) = network.get_peers().await {
                         let already_queried: std::collections::HashSet<PeerId> =
@@ -178,15 +182,19 @@ impl QueryCoordinator {
                             .into_iter()
                             .map(|p| p.peer_id)
                             .filter(|p| !already_queried.contains(p))
+                            .take(self.config.retrieval.max_fanout_peers)
                             .collect();
 
                         if !tier2_peers.is_empty() {
+                            let tier2_timeout = plan.timeout.mul_f32(
+                                self.config.retrieval.fanout_timeout_fraction,
+                            );
                             debug!(
-                                "Adaptive fan-out: expanding to {} additional peers (quality={:.2}, results={})",
-                                tier2_peers.len(), initial_quality, total_results
+                                "Adaptive fan-out: expanding to {} additional peers (quality={:.2}, results={}, avg_score={:.2})",
+                                tier2_peers.len(), initial_quality, total_results, avg_score
                             );
                             match network
-                                .query(tier2_peers.clone(), query.clone(), Some(embedding.clone()), plan.timeout)
+                                .query(tier2_peers.clone(), query.clone(), Some(embedding.clone()), tier2_timeout)
                                 .await
                             {
                                 Ok(responses) => {
@@ -208,6 +216,9 @@ impl QueryCoordinator {
             }
         }
 
+        // Calculate quality estimate (before aggregate_results consumes all_results)
+        let quality = self.estimate_quality(&responding_nodes, &timed_out_nodes, &plan, &all_results);
+
         // Aggregate results using RRF
         let aggregated = self.aggregate_results(all_results, query.top_k);
 
@@ -215,9 +226,6 @@ impl QueryCoordinator {
         let mut final_results = aggregated;
         SimpleReranker::rerank(&query.text, &mut final_results);
         final_results.truncate(query.top_k);
-
-        // Calculate quality estimate
-        let quality = self.estimate_quality(&responding_nodes, &timed_out_nodes, &plan);
 
         let total_time = start.elapsed().as_millis() as u64;
 
@@ -296,12 +304,17 @@ impl QueryCoordinator {
         };
         let fused = reciprocal_rank_fusion(&ranked_lists, &rrf_config);
 
-        // Map back to SearchResult
+        // Map back to SearchResult, keeping the highest-scored version of each chunk
         let mut chunk_map: HashMap<String, SearchResult> = HashMap::new();
         for (_, results) in node_results {
             for result in results {
                 chunk_map
                     .entry(result.chunk.metadata.chunk_id.clone())
+                    .and_modify(|existing| {
+                        if result.relevance_score > existing.relevance_score {
+                            *existing = result.clone();
+                        }
+                    })
                     .or_insert(result);
             }
         }
@@ -320,22 +333,28 @@ impl QueryCoordinator {
             .collect()
     }
 
-    /// Estimate query result quality
+    /// Estimate query result quality using response coverage, result scores, and sufficiency.
+    ///
+    /// Quality is a weighted combination of:
+    /// - Response coverage (40%): fraction of expected peers that responded, weighted by rank
+    /// - Average relevance score (40%): mean score of all returned results
+    /// - Result sufficiency (20%): total_results / expected (capped at 1.0)
     fn estimate_quality(
         &self,
         responding: &[NodeId],
         _timed_out: &[NodeId],
         plan: &QueryPlan,
+        results: &[(NodeId, Vec<SearchResult>)],
     ) -> f32 {
         let total_expected = plan.candidate_nodes.len() + if plan.query_local { 1 } else { 0 };
         if total_expected == 0 {
             return 1.0;
         }
 
+        // 1. Response coverage (weighted by candidate rank)
         let responded = responding.len();
         let response_ratio = responded as f32 / total_expected as f32;
 
-        // Weight by node relevance (top nodes matter more)
         let mut weighted_coverage = 0.0;
         let mut total_weight = 0.0;
 
@@ -348,11 +367,28 @@ impl QueryCoordinator {
             }
         }
 
-        if total_weight > 0.0 {
+        let coverage_score = if total_weight > 0.0 {
             (response_ratio + weighted_coverage / total_weight) / 2.0
         } else {
             response_ratio
-        }
+        };
+
+        // 2. Average relevance score of returned results
+        let total_results: usize = results.iter().map(|(_, r)| r.len()).sum();
+        let avg_score = if total_results > 0 {
+            results.iter()
+                .flat_map(|(_, r)| r.iter().map(|s| s.relevance_score))
+                .sum::<f32>() / total_results as f32
+        } else {
+            0.0
+        };
+
+        // 3. Result sufficiency: did we get enough results?
+        let expected_results = plan.candidate_nodes.len().max(1); // at least 1
+        let sufficiency = (total_results as f32 / expected_results as f32).min(1.0);
+
+        // Weighted combination
+        coverage_score * 0.4 + avg_score * 0.4 + sufficiency * 0.2
     }
 }
 
@@ -403,6 +439,21 @@ mod tests {
         assert_eq!(aggregated.len(), 2);
     }
 
+    fn make_test_results(scores: &[f32]) -> Vec<(NodeId, Vec<SearchResult>)> {
+        let results: Vec<SearchResult> = scores.iter().map(|&score| {
+            let chunk = Chunk {
+                metadata: crate::types::ChunkMetadata::new(
+                    format!("c_{}", score),
+                    "d1".to_string(),
+                ),
+                content: "test".to_string(),
+                token_count: 1,
+            };
+            SearchResult::new(chunk, score)
+        }).collect();
+        vec![("node1".to_string(), results)]
+    }
+
     #[test]
     fn test_quality_estimate_full_response() {
         let coordinator = make_coordinator();
@@ -418,8 +469,9 @@ mod tests {
 
         let responding = vec!["node1".to_string(), "node2".to_string()];
         let timed_out: Vec<NodeId> = vec![];
-        let quality = coordinator.estimate_quality(&responding, &timed_out, &plan);
-        assert!(quality >= 0.9, "full response should have high quality, got {}", quality);
+        let results = make_test_results(&[0.9, 0.8]);
+        let quality = coordinator.estimate_quality(&responding, &timed_out, &plan, &results);
+        assert!(quality >= 0.7, "full response with good scores should have high quality, got {}", quality);
     }
 
     #[test]
@@ -437,8 +489,9 @@ mod tests {
 
         let responding: Vec<NodeId> = vec![];
         let timed_out = vec!["node1".to_string(), "node2".to_string()];
-        let quality = coordinator.estimate_quality(&responding, &timed_out, &plan);
-        assert!(quality < ADAPTIVE_FANOUT_QUALITY_THRESHOLD,
+        let no_results: Vec<(NodeId, Vec<SearchResult>)> = vec![];
+        let quality = coordinator.estimate_quality(&responding, &timed_out, &plan, &no_results);
+        assert!(quality < coordinator.config.retrieval.fanout_quality_threshold,
             "no responses should trigger fan-out, got quality {}", quality);
     }
 
@@ -459,8 +512,57 @@ mod tests {
         // Only top candidate responded
         let responding = vec!["node1".to_string()];
         let timed_out = vec!["node2".to_string(), "node3".to_string()];
-        let quality = coordinator.estimate_quality(&responding, &timed_out, &plan);
+        let results = make_test_results(&[0.5]);
+        let quality = coordinator.estimate_quality(&responding, &timed_out, &plan, &results);
         assert!(quality > 0.0 && quality < 1.0,
             "partial response should have intermediate quality, got {}", quality);
+    }
+
+    #[test]
+    fn test_quality_estimate_high_scores_boost_quality() {
+        let coordinator = make_coordinator();
+        let plan = QueryPlan {
+            embedding: vec![0.0; 768],
+            candidate_nodes: vec![
+                CandidateNode { node_id: "node1".to_string(), similarity: 0.9, matching_centroids: vec![0] },
+            ],
+            query_local: false,
+            timeout: Duration::from_secs(10),
+        };
+
+        let responding = vec!["node1".to_string()];
+        let timed_out: Vec<NodeId> = vec![];
+
+        let high_results = make_test_results(&[0.95, 0.90, 0.85]);
+        let low_results = make_test_results(&[0.1, 0.05]);
+
+        let high_quality = coordinator.estimate_quality(&responding, &timed_out, &plan, &high_results);
+        let low_quality = coordinator.estimate_quality(&responding, &timed_out, &plan, &low_results);
+
+        assert!(high_quality > low_quality,
+            "high scoring results should produce higher quality: {} vs {}", high_quality, low_quality);
+    }
+
+    #[test]
+    fn test_aggregation_keeps_highest_score() {
+        let coordinator = make_coordinator();
+
+        let chunk = Chunk {
+            metadata: crate::types::ChunkMetadata::new("c1".to_string(), "d1".to_string()),
+            content: "content 1".to_string(),
+            token_count: 2,
+        };
+
+        // Same chunk from two nodes with different scores
+        let node1_results = vec![SearchResult::new(chunk.clone(), 0.5)];
+        let node2_results = vec![SearchResult::new(chunk.clone(), 0.9)];
+
+        let all_results = vec![
+            ("node1".to_string(), node1_results),
+            ("node2".to_string(), node2_results),
+        ];
+
+        let aggregated = coordinator.aggregate_results(all_results, 10);
+        assert_eq!(aggregated.len(), 1);
     }
 }

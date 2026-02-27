@@ -146,6 +146,27 @@ impl Config {
         if self.retrieval.candidate_count == 0 {
             errors.push("candidate_count must be positive".to_string());
         }
+        if self.retrieval.fanout_quality_threshold < 0.0
+            || self.retrieval.fanout_quality_threshold > 1.0
+        {
+            errors.push("fanout_quality_threshold must be between 0.0 and 1.0".to_string());
+        }
+        if self.retrieval.fanout_min_results == 0 {
+            errors.push("fanout_min_results must be positive".to_string());
+        }
+        if self.retrieval.max_fanout_peers == 0 {
+            errors.push("max_fanout_peers must be positive".to_string());
+        }
+        if self.retrieval.fanout_score_threshold < 0.0
+            || self.retrieval.fanout_score_threshold > 1.0
+        {
+            errors.push("fanout_score_threshold must be between 0.0 and 1.0".to_string());
+        }
+        if self.retrieval.fanout_timeout_fraction <= 0.0
+            || self.retrieval.fanout_timeout_fraction > 1.0
+        {
+            errors.push("fanout_timeout_fraction must be between 0.0 (exclusive) and 1.0".to_string());
+        }
 
         // Index validation
         if self.index.hnsw_ef_construction == 0 {
@@ -156,6 +177,29 @@ impl Config {
         }
         if self.index.hnsw_m == 0 {
             errors.push("HNSW M parameter must be positive".to_string());
+        }
+
+        // Routing validation
+        if self.routing.lsh_num_bands == 0 {
+            errors.push("lsh_num_bands must be positive".to_string());
+        }
+        if self.routing.lsh_bits > 0 && self.routing.lsh_num_bands > 0
+            && !self.routing.lsh_bits.is_multiple_of(self.routing.lsh_num_bands)
+        {
+            errors.push(format!(
+                "lsh_bits ({}) must be divisible by lsh_num_bands ({})",
+                self.routing.lsh_bits, self.routing.lsh_num_bands
+            ));
+        }
+        if self.routing.centroid_similarity_threshold < 0.0
+            || self.routing.centroid_similarity_threshold > 1.0
+        {
+            errors.push("centroid_similarity_threshold must be between 0.0 and 1.0".to_string());
+        }
+        if self.routing.bloom_false_positive_rate <= 0.0
+            || self.routing.bloom_false_positive_rate >= 1.0
+        {
+            errors.push("bloom_false_positive_rate must be between 0.0 (exclusive) and 1.0 (exclusive)".to_string());
         }
 
         // HTTP config validation
@@ -452,6 +496,41 @@ pub struct RetrievalConfig {
     pub enable_reranking: bool,
     /// Reranker model path
     pub reranker_model_path: Option<PathBuf>,
+    /// Minimum quality score before triggering adaptive fan-out (0.0-1.0)
+    #[serde(default = "default_fanout_quality_threshold")]
+    pub fanout_quality_threshold: f32,
+    /// Minimum number of results before considering fan-out
+    #[serde(default = "default_fanout_min_results")]
+    pub fanout_min_results: usize,
+    /// Maximum number of additional peers to query during fan-out
+    #[serde(default = "default_max_fanout_peers")]
+    pub max_fanout_peers: usize,
+    /// Minimum average result score before triggering fan-out (0.0-1.0)
+    #[serde(default = "default_fanout_score_threshold")]
+    pub fanout_score_threshold: f32,
+    /// Fraction of original timeout to use for tier-2 fan-out queries (0.0-1.0)
+    #[serde(default = "default_fanout_timeout_fraction")]
+    pub fanout_timeout_fraction: f32,
+}
+
+fn default_fanout_quality_threshold() -> f32 {
+    0.5
+}
+
+fn default_fanout_min_results() -> usize {
+    3
+}
+
+fn default_max_fanout_peers() -> usize {
+    10
+}
+
+fn default_fanout_score_threshold() -> f32 {
+    0.3
+}
+
+fn default_fanout_timeout_fraction() -> f32 {
+    0.5
 }
 
 impl Default for RetrievalConfig {
@@ -463,6 +542,11 @@ impl Default for RetrievalConfig {
             candidate_count: 50,
             enable_reranking: true,
             reranker_model_path: None,
+            fanout_quality_threshold: default_fanout_quality_threshold(),
+            fanout_min_results: default_fanout_min_results(),
+            max_fanout_peers: default_max_fanout_peers(),
+            fanout_score_threshold: default_fanout_score_threshold(),
+            fanout_timeout_fraction: default_fanout_timeout_fraction(),
         }
     }
 }
@@ -480,6 +564,27 @@ pub struct RoutingConfig {
     pub bloom_bits_per_item: usize,
     /// Number of candidate nodes for queries
     pub candidate_nodes: usize,
+    /// Number of LSH bands for banding technique
+    #[serde(default = "default_lsh_num_bands")]
+    pub lsh_num_bands: usize,
+    /// Centroid similarity threshold for matching (0.0-1.0)
+    #[serde(default = "default_centroid_similarity_threshold")]
+    pub centroid_similarity_threshold: f32,
+    /// Bloom filter false positive rate per band (0.0-1.0)
+    #[serde(default = "default_bloom_false_positive_rate")]
+    pub bloom_false_positive_rate: f64,
+}
+
+fn default_lsh_num_bands() -> usize {
+    8
+}
+
+fn default_centroid_similarity_threshold() -> f32 {
+    0.5
+}
+
+fn default_bloom_false_positive_rate() -> f64 {
+    0.01
 }
 
 impl Default for RoutingConfig {
@@ -490,6 +595,9 @@ impl Default for RoutingConfig {
             lsh_num_hashes: 8,
             bloom_bits_per_item: 10,
             candidate_nodes: 5,
+            lsh_num_bands: default_lsh_num_bands(),
+            centroid_similarity_threshold: default_centroid_similarity_threshold(),
+            bloom_false_positive_rate: default_bloom_false_positive_rate(),
         }
     }
 }
@@ -942,6 +1050,11 @@ mod tests {
         assert_eq!(ret.candidate_count, 50);
         assert!(ret.enable_reranking);
         assert!(ret.reranker_model_path.is_none());
+        assert!((ret.fanout_quality_threshold - 0.5).abs() < f32::EPSILON);
+        assert_eq!(ret.fanout_min_results, 3);
+        assert_eq!(ret.max_fanout_peers, 10);
+        assert!((ret.fanout_score_threshold - 0.3).abs() < f32::EPSILON);
+        assert!((ret.fanout_timeout_fraction - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -952,6 +1065,9 @@ mod tests {
         assert_eq!(rt.lsh_num_hashes, 8);
         assert_eq!(rt.bloom_bits_per_item, 10);
         assert_eq!(rt.candidate_nodes, 5);
+        assert_eq!(rt.lsh_num_bands, 8);
+        assert!((rt.centroid_similarity_threshold - 0.5).abs() < f32::EPSILON);
+        assert!((rt.bloom_false_positive_rate - 0.01).abs() < f64::EPSILON);
     }
 
     #[test]

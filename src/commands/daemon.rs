@@ -113,6 +113,7 @@ pub async fn start_node_inner(
         &config.routing,
     ));
     let query_router_for_events = query_router.clone();
+    let query_router_for_advert = query_router.clone();
 
     // Create QueryCoordinator for distributed search
     let query_coordinator = Arc::new(QueryCoordinator::new(
@@ -138,9 +139,19 @@ pub async fn start_node_inner(
     // Build and broadcast our node advertisement
     let embeddings = daemon.index_manager().all_embeddings();
     if !embeddings.is_empty() {
+        // Generate LSH signatures for bloom filter optimization
+        let lsh_sigs: Vec<dindex::types::LshSignature> = embeddings.iter()
+            .map(|emb| query_router_for_advert.hash_query(emb))
+            .collect();
+
         let advertisement = AdvertisementBuilder::new(handle.local_peer_id.to_string())
             .with_centroids(&embeddings, config.routing.num_centroids, Some(config.embedding.truncated_dimensions))
-            .build(config.routing.lsh_bits);
+            .with_lsh(lsh_sigs)
+            .build(
+                config.routing.lsh_bits,
+                config.routing.lsh_num_bands,
+                config.routing.bloom_false_positive_rate,
+            );
         info!(
             "Broadcasting advertisement: {} centroids, {} chunks",
             advertisement.centroids.len(),

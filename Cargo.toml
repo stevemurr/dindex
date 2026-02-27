@@ -27,11 +27,13 @@ libp2p = { version = "0.54", features = [
     "macros",
     "ping",
     "mdns",
+    "request-response",
 ] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
+async-trait = "0.1"
 
 # Vector index
 usearch = "2"

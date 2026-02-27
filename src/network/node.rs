@@ -14,6 +14,7 @@ use libp2p::{
     identity::Keypair,
     identify, kad,
     ping,
+    request_response::{self, ResponseChannel},
     swarm::SwarmEvent,
     Multiaddr, PeerId, Swarm,
 };
@@ -48,6 +49,10 @@ pub struct NetworkNode {
     node_advertisements: Arc<RwLock<HashMap<PeerId, NodeAdvertisement>>>,
     /// Pending distributed queries awaiting responses
     pending_queries: HashMap<String, PendingQuery>,
+    /// Response channels for incoming request-response queries (request_id -> channel)
+    pending_response_channels: HashMap<String, ResponseChannel<QueryResponse>>,
+    /// Mapping from outbound request-response IDs to our query request_ids
+    outbound_request_map: HashMap<request_response::OutboundRequestId, String>,
     /// Command receiver
     command_rx: mpsc::Receiver<NetworkCommand>,
     /// Event sender
@@ -266,6 +271,8 @@ impl NetworkNode {
             connected_peers: Arc::new(RwLock::new(HashMap::new())),
             node_advertisements: Arc::new(RwLock::new(HashMap::new())),
             pending_queries: HashMap::new(),
+            pending_response_channels: HashMap::new(),
+            outbound_request_map: HashMap::new(),
             command_rx,
             event_tx,
         };
@@ -459,20 +466,8 @@ impl NetworkNode {
                                 .await;
                         }
                         NetworkMessage::QueryResponse(response) => {
-                            // Check if we have a pending query for this response
-                            debug!("Received query response: {}", response.request_id);
-                            if let Some(pending) = self.pending_queries.get_mut(&response.request_id) {
-                                pending.responses.push(response.clone());
-
-                                // Check if we've received all expected responses
-                                if pending.responses.len() >= pending.expected_peers.len()
-                                    || Instant::now() >= pending.deadline {
-                                    // Complete the query
-                                    if let Some(pending) = self.pending_queries.remove(&response.request_id) {
-                                        let _ = pending.response_tx.send(pending.responses);
-                                    }
-                                }
-                            }
+                            debug!("Received GossipSub query response: {}", response.request_id);
+                            self.handle_query_response(response);
                         }
                     }
                 }
@@ -506,7 +501,141 @@ impl NetworkNode {
                     }
                 }
             }
+            DIndexBehaviourEvent::RequestResponse(
+                request_response::Event::Message { peer, message },
+            ) => {
+                match message {
+                    request_response::Message::Request {
+                        request,
+                        channel,
+                        ..
+                    } => {
+                        debug!(
+                            "Direct query from {}: {}",
+                            peer, request.request_id
+                        );
+                        // Store the response channel so we can reply directly
+                        self.pending_response_channels
+                            .insert(request.request_id.clone(), channel);
+                        let _ = self
+                            .event_tx
+                            .send(NetworkEvent::QueryReceived {
+                                peer_id: peer,
+                                request,
+                            })
+                            .await;
+                    }
+                    request_response::Message::Response {
+                        response,
+                        request_id: outbound_id,
+                    } => {
+                        debug!(
+                            "Direct response from {}: {}",
+                            peer, response.request_id
+                        );
+                        // Clean up the outbound mapping
+                        self.outbound_request_map.remove(&outbound_id);
+                        // Route to pending_queries (same path as GossipSub responses)
+                        self.handle_query_response(response);
+                    }
+                }
+            }
+            DIndexBehaviourEvent::RequestResponse(
+                request_response::Event::OutboundFailure {
+                    peer,
+                    request_id: outbound_id,
+                    error,
+                },
+            ) => {
+                warn!("Direct query to {} failed: {}", peer, error);
+                // Clean up and check if we should complete the pending query
+                if let Some(req_id) = self.outbound_request_map.remove(&outbound_id) {
+                    // Check if all expected peers have responded or failed
+                    if let Some(pending) = self.pending_queries.get(&req_id) {
+                        if pending.responses.len() + 1 >= pending.expected_peers.len()
+                            || Instant::now() >= pending.deadline
+                        {
+                            if let Some(pending) = self.pending_queries.remove(&req_id) {
+                                let _ = pending.response_tx.send(pending.responses);
+                            }
+                        }
+                    }
+                }
+            }
+            DIndexBehaviourEvent::RequestResponse(
+                request_response::Event::InboundFailure {
+                    peer, error, ..
+                },
+            ) => {
+                warn!("Inbound request from {} failed: {}", peer, error);
+            }
+            DIndexBehaviourEvent::RequestResponse(
+                request_response::Event::ResponseSent { peer, .. },
+            ) => {
+                debug!("Direct response sent to {}", peer);
+            }
             _ => {}
+        }
+    }
+
+    /// Publish a query response via GossipSub broadcast
+    fn publish_gossipsub_response(&mut self, response: &QueryResponse) {
+        let msg = NetworkMessage::QueryResponse(response.clone());
+        if let Ok(data) = bincode::serialize(&msg) {
+            debug!("Sending GossipSub query response: {}", response.request_id);
+            let topic = IdentTopic::new(topics::QUERY_RESPONSES);
+            if let Err(e) = self
+                .swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic, data)
+            {
+                warn!("Failed to publish query response: {}", e);
+            }
+        }
+    }
+
+    /// Handle a query response (shared between GossipSub and request-response paths)
+    fn handle_query_response(&mut self, response: QueryResponse) {
+        if let Some(pending) = self.pending_queries.get_mut(&response.request_id) {
+            // Validate responder: if responder_peer is set, check it's expected
+            if let Some(ref responder) = response.responder_peer {
+                let is_expected = pending
+                    .expected_peers
+                    .iter()
+                    .any(|p| p.to_string() == *responder);
+                if !is_expected {
+                    debug!(
+                        "Dropping response from unexpected peer {} for query {}",
+                        responder, response.request_id
+                    );
+                    return;
+                }
+
+                // Check for duplicate responses from the same peer
+                let already_responded = pending
+                    .responses
+                    .iter()
+                    .any(|r| r.responder_peer.as_deref() == Some(responder));
+                if already_responded {
+                    debug!(
+                        "Dropping duplicate response from {} for query {}",
+                        responder, response.request_id
+                    );
+                    return;
+                }
+            }
+
+            pending.responses.push(response.clone());
+
+            // Check if we've received all expected responses
+            if pending.responses.len() >= pending.expected_peers.len()
+                || Instant::now() >= pending.deadline
+            {
+                if let Some(pending) = self.pending_queries.remove(&response.request_id) {
+                    let _ = pending.response_tx.send(pending.responses);
+                }
+            }
         }
     }
 
@@ -526,50 +655,80 @@ impl NetworkNode {
                 response_tx,
                 timeout,
             } => {
-                let msg = NetworkMessage::QueryRequest(request.clone());
-                if let Ok(data) = bincode::serialize(&msg) {
-                    debug!("Sending query {} to {} peers", request.request_id, peers.len());
+                debug!("Sending query {} to {} peers", request.request_id, peers.len());
 
-                    // Store pending query
-                    self.pending_queries.insert(
-                        request.request_id.clone(),
-                        PendingQuery {
-                            response_tx,
-                            responses: Vec::new(),
-                            expected_peers: peers.clone(),
-                            deadline: Instant::now() + timeout,
-                        },
+                // Store pending query
+                self.pending_queries.insert(
+                    request.request_id.clone(),
+                    PendingQuery {
+                        response_tx,
+                        responses: Vec::new(),
+                        expected_peers: peers.clone(),
+                        deadline: Instant::now() + timeout,
+                    },
+                );
+
+                if !request.target_peers.is_empty() {
+                    // Targeted query: use request-response for direct delivery
+                    debug!(
+                        "Using request-response for targeted query {} to {} peers",
+                        request.request_id, peers.len()
                     );
-
-                    // Publish query via GossipSub
-                    let topic = IdentTopic::new(topics::QUERIES);
-                    if let Err(e) = self
-                        .swarm
-                        .behaviour_mut()
-                        .gossipsub
-                        .publish(topic, data)
-                    {
-                        warn!("Failed to publish query: {}", e);
-                        // Remove pending query and send empty response
-                        if let Some(pending) = self.pending_queries.remove(&request.request_id) {
-                            let _ = pending.response_tx.send(Vec::new());
+                    for peer_id in &peers {
+                        let outbound_id = self
+                            .swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_request(peer_id, request.clone());
+                        self.outbound_request_map
+                            .insert(outbound_id, request.request_id.clone());
+                    }
+                } else {
+                    // Broadcast query: use GossipSub
+                    let msg = NetworkMessage::QueryRequest(request.clone());
+                    if let Ok(data) = bincode::serialize(&msg) {
+                        let topic = IdentTopic::new(topics::QUERIES);
+                        if let Err(e) = self
+                            .swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .publish(topic, data)
+                        {
+                            warn!("Failed to publish query: {}", e);
+                            if let Some(pending) = self.pending_queries.remove(&request.request_id) {
+                                let _ = pending.response_tx.send(Vec::new());
+                            }
                         }
                     }
                 }
             }
             NetworkCommand::SendQueryResponse(response) => {
-                let msg = NetworkMessage::QueryResponse(response.clone());
-                if let Ok(data) = bincode::serialize(&msg) {
-                    debug!("Sending query response: {}", response.request_id);
-                    let topic = IdentTopic::new(topics::QUERY_RESPONSES);
-                    if let Err(e) = self
+                // Try to respond via request-response channel first (direct delivery)
+                if let Some(channel) = self
+                    .pending_response_channels
+                    .remove(&response.request_id)
+                {
+                    debug!(
+                        "Sending direct response for query {}",
+                        response.request_id
+                    );
+                    if self
                         .swarm
                         .behaviour_mut()
-                        .gossipsub
-                        .publish(topic, data)
+                        .request_response
+                        .send_response(channel, response.clone())
+                        .is_err()
                     {
-                        warn!("Failed to publish query response: {}", e);
+                        warn!(
+                            "Failed to send direct response for query {} (channel closed), falling back to GossipSub",
+                            response.request_id
+                        );
+                        // Fall back to GossipSub
+                        self.publish_gossipsub_response(&response);
                     }
+                } else {
+                    // No direct channel — query came via GossipSub, respond via GossipSub
+                    self.publish_gossipsub_response(&response);
                 }
             }
             NetworkCommand::BroadcastAdvertisement(advert) => {

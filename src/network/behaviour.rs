@@ -2,10 +2,13 @@
 
 use libp2p::{
     autonat, gossipsub, identify, identity::Keypair, kad, mdns, ping, relay,
+    request_response,
     swarm::NetworkBehaviour,
     PeerId, StreamProtocol,
 };
 use std::time::Duration;
+
+use super::protocol::DIndexCodec;
 
 /// Combined network behaviour for DIndex
 #[derive(NetworkBehaviour)]
@@ -24,6 +27,8 @@ pub struct DIndexBehaviour {
     pub autonat: autonat::Behaviour,
     /// Relay for NAT traversal
     pub relay: relay::client::Behaviour,
+    /// Request-response for direct peer queries (avoids GossipSub broadcast)
+    pub request_response: request_response::Behaviour<DIndexCodec>,
 }
 
 impl DIndexBehaviour {
@@ -88,6 +93,17 @@ impl DIndexBehaviour {
         // AutoNAT
         let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
 
+        // Request-response for direct queries
+        let rr_config = request_response::Config::default()
+            .with_request_timeout(Duration::from_secs(30));
+        let rr = request_response::Behaviour::new(
+            [(
+                StreamProtocol::new(super::protocol::DIRECT_QUERY_PROTOCOL),
+                request_response::ProtocolSupport::Full,
+            )],
+            rr_config,
+        );
+
         Ok(Self {
             kademlia,
             gossipsub,
@@ -96,6 +112,7 @@ impl DIndexBehaviour {
             ping,
             autonat,
             relay: relay_behaviour,
+            request_response: rr,
         })
     }
 }
