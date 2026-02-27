@@ -30,7 +30,7 @@ pub async fn search_index(
     // Try daemon first
     match client::search(&query_text, top_k, output_format.clone()).await {
         Ok(results) => {
-            output_search_results(&results, &format, top_k);
+            output_search_results(&results, &format, top_k, &query_text);
             return Ok(());
         }
         Err(ClientError::DaemonNotRunning) => {
@@ -78,13 +78,21 @@ pub async fn search_index(
     // Execute search
     let results = retriever.search(&query, Some(&query_embedding))?;
 
-    output_search_results(&results, &format, top_k);
+    output_search_results(&results, &format, top_k, &query_text);
     Ok(())
 }
 
 /// Output search results in the requested format, grouped by document
-fn output_search_results(results: &[dindex::types::SearchResult], format: &str, top_k: usize) {
-    let grouped = GroupedSearchResult::from_results(results.to_vec(), top_k);
+fn output_search_results(results: &[dindex::types::SearchResult], format: &str, top_k: usize, query: &str) {
+    let mut grouped = GroupedSearchResult::from_results(results.to_vec(), top_k);
+
+    // Generate snippets for each chunk
+    for group in &mut grouped {
+        for chunk in &mut group.chunks {
+            chunk.snippet = dindex::retrieval::extract_snippet(query, &chunk.content, 200);
+        }
+    }
+
     let total_chunks: usize = grouped.iter().map(|g| g.chunks.len()).sum();
 
     match format {
@@ -111,11 +119,14 @@ fn output_search_results(results: &[dindex::types::SearchResult], format: &str, 
                 println!("   Document: {}", group.document_id);
                 println!("   Chunks ({}):", group.chunks.len());
                 for (j, chunk) in group.chunks.iter().enumerate() {
+                    // Prefer snippet over truncated content
+                    let display_text = chunk.snippet.as_deref()
+                        .unwrap_or_else(|| &chunk.content);
                     println!(
-                        "     {}. [Score: {:.4}] {}...",
+                        "     {}. [Score: {:.4}] {}",
                         j + 1,
                         chunk.relevance_score,
-                        truncate_for_display(&chunk.content, 200),
+                        truncate_for_display(display_text, 200),
                     );
                     if !chunk.matched_by.is_empty() {
                         println!("        Matched by: {:?}", chunk.matched_by);

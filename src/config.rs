@@ -511,6 +511,10 @@ pub struct RetrievalConfig {
     /// Fraction of original timeout to use for tier-2 fan-out queries (0.0-1.0)
     #[serde(default = "default_fanout_timeout_fraction")]
     pub fanout_timeout_fraction: f32,
+    /// Minimum score multiplier for aggregator pages (0.0-1.0).
+    /// At aggregator_score=1.0, the result score is multiplied by this value.
+    #[serde(default = "default_aggregator_min_multiplier")]
+    pub aggregator_min_multiplier: f32,
 }
 
 fn default_fanout_quality_threshold() -> f32 {
@@ -533,6 +537,10 @@ fn default_fanout_timeout_fraction() -> f32 {
     0.5
 }
 
+fn default_aggregator_min_multiplier() -> f32 {
+    0.5
+}
+
 impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
@@ -547,6 +555,7 @@ impl Default for RetrievalConfig {
             max_fanout_peers: default_max_fanout_peers(),
             fanout_score_threshold: default_fanout_score_threshold(),
             fanout_timeout_fraction: default_fanout_timeout_fraction(),
+            aggregator_min_multiplier: default_aggregator_min_multiplier(),
         }
     }
 }

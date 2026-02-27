@@ -72,6 +72,7 @@ pub async fn search(
         ..Default::default()
     });
 
+    let query_text = request.query.clone();
     let ipc_request = Request::Search {
         query: request.query,
         top_k: request.top_k,
@@ -81,7 +82,15 @@ pub async fn search(
 
     match state.handler.handle(ipc_request).await {
         IpcResponse::SearchResults { results, query_time_ms } => {
-            let grouped = GroupedSearchResult::from_results(results, request.top_k);
+            let mut grouped = GroupedSearchResult::from_results(results, request.top_k);
+
+            // Generate snippets for each chunk
+            for group in &mut grouped {
+                for chunk in &mut group.chunks {
+                    chunk.snippet = crate::retrieval::extract_snippet(&query_text, &chunk.content, 200);
+                }
+            }
+
             let total_documents = grouped.len();
             let total_chunks: usize = grouped.iter().map(|g| g.chunks.len()).sum();
 
@@ -99,6 +108,7 @@ pub async fn search(
                         matched_by: c.matched_by,
                         section_hierarchy: c.section_hierarchy,
                         position_in_doc: c.position_in_doc,
+                        snippet: c.snippet,
                     }).collect(),
                 })
                 .collect();

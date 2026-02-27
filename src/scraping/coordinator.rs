@@ -572,6 +572,11 @@ impl ScrapingCoordinator {
         doc.metadata.insert("reading_time".to_string(), content.reading_time_minutes.to_string());
         doc.metadata.insert("domain".to_string(), metadata.domain.clone());
 
+        // Propagate extra metadata from extraction (e.g., aggregator_score)
+        for (key, value) in &metadata.extra {
+            doc.metadata.insert(key.clone(), value.clone());
+        }
+
         doc
     }
 

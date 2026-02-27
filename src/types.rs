@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// Unique identifier for a document
@@ -280,6 +280,9 @@ pub struct MatchingChunk {
     pub matched_by: Vec<String>,
     pub section_hierarchy: Vec<String>,
     pub position_in_doc: f32,
+    /// Best-matching sentence snippet for citations
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
 }
 
 /// Search results grouped by document, with matching chunks as sub-items
@@ -308,6 +311,7 @@ impl GroupedSearchResult {
                 matched_by: result.matched_by,
                 section_hierarchy: result.chunk.metadata.section_hierarchy.clone(),
                 position_in_doc: result.chunk.metadata.position_in_doc,
+                snippet: None,
             };
 
             groups
@@ -328,6 +332,45 @@ impl GroupedSearchResult {
         }
 
         let mut grouped: Vec<GroupedSearchResult> = groups.into_values().collect();
+
+        // Merge groups that share the same source_url (handles legacy duplicates
+        // where the same URL was indexed with different document_ids)
+        let mut url_to_primary: HashMap<String, usize> = HashMap::new();
+        let mut merge_targets: Vec<(usize, usize)> = Vec::new(); // (absorbed, primary)
+        for (i, group) in grouped.iter().enumerate() {
+            if let Some(ref url) = group.source_url {
+                if let Some(&primary_idx) = url_to_primary.get(url) {
+                    merge_targets.push((i, primary_idx));
+                } else {
+                    url_to_primary.insert(url.clone(), i);
+                }
+            }
+        }
+        // Merge absorbed groups into their primary (collect chunks, take max score)
+        // Process in reverse so indices remain valid when we remove later
+        let mut absorbed_indices: HashSet<usize> = HashSet::new();
+        for (absorbed_idx, primary_idx) in &merge_targets {
+            let absorbed_chunks = std::mem::take(&mut grouped[*absorbed_idx].chunks);
+            let absorbed_score = grouped[*absorbed_idx].relevance_score;
+            let primary = &mut grouped[*primary_idx];
+            // Dedup chunks by chunk_id
+            let existing_ids: HashSet<String> = primary.chunks.iter().map(|c| c.chunk_id.clone()).collect();
+            for chunk in absorbed_chunks {
+                if !existing_ids.contains(&chunk.chunk_id) {
+                    primary.chunks.push(chunk);
+                }
+            }
+            if absorbed_score > primary.relevance_score {
+                primary.relevance_score = absorbed_score;
+            }
+            absorbed_indices.insert(*absorbed_idx);
+        }
+        // Remove absorbed groups (in reverse order to preserve indices)
+        let mut absorbed_sorted: Vec<usize> = absorbed_indices.into_iter().collect();
+        absorbed_sorted.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in absorbed_sorted {
+            grouped.remove(idx);
+        }
 
         // Sort groups by max score descending
         grouped.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap_or(std::cmp::Ordering::Equal));

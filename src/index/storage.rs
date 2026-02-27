@@ -18,6 +18,8 @@ pub struct ChunkStorage {
     db: sled::Db,
     /// Secondary index: document_id -> chunk_ids (for document queries)
     doc_index: sled::Tree,
+    /// Secondary index: source_url -> document_id (for URL-based dedup)
+    url_index: sled::Tree,
 }
 
 /// Stored chunk data
@@ -56,7 +58,11 @@ impl ChunkStorage {
             .open_tree("doc_index")
             .context("Failed to open document index tree")?;
 
-        Ok(Self { db, doc_index })
+        let url_index = db
+            .open_tree("url_index")
+            .context("Failed to open URL index tree")?;
+
+        Ok(Self { db, doc_index, url_index })
     }
 
     /// Save storage to disk (flushes sled buffers)
@@ -85,6 +91,12 @@ impl ChunkStorage {
                 }
                 // Update document index
                 self.add_to_doc_index(doc_id, chunk_id);
+                // Update URL index
+                if let Some(ref url) = chunk.chunk.metadata.source_url {
+                    if let Err(e) = self.url_index.insert(url.as_bytes(), doc_id.as_bytes()) {
+                        warn!("Failed to update URL index for {}: {}", url, e);
+                    }
+                }
             }
             Err(e) => {
                 warn!("Failed to serialize chunk {}: {}", chunk_id, e);
@@ -155,6 +167,24 @@ impl ChunkStorage {
         let doc_id = &stored.chunk.metadata.document_id;
 
         self.remove_from_doc_index(doc_id, chunk_id);
+        // Clean up URL index if this was the last chunk for this document
+        if let Some(ref url) = stored.chunk.metadata.source_url {
+            // Only remove URL index entry if no more chunks exist for this document
+            let remaining: Vec<String> = self
+                .doc_index
+                .get(doc_id.as_bytes())
+                .ok()
+                .flatten()
+                .and_then(|data| bincode::deserialize(&data).ok())
+                .unwrap_or_default();
+            // remaining still includes this chunk_id since remove_from_doc_index was called above
+            // but remove_from_doc_index already removed it, so check if empty
+            if remaining.is_empty() {
+                if let Err(e) = self.url_index.remove(url.as_bytes()) {
+                    warn!("Failed to remove URL index entry for {}: {}", url, e);
+                }
+            }
+        }
         if let Err(e) = self.db.remove(chunk_id.as_bytes()) {
             warn!("Failed to remove chunk {} from database: {}", chunk_id, e);
         }
@@ -194,6 +224,15 @@ impl ChunkStorage {
                 Some((id, stored.embedding))
             })
             .collect()
+    }
+
+    /// Find a document ID by its source URL
+    pub fn find_document_id_by_url(&self, url: &str) -> Option<String> {
+        self.url_index
+            .get(url.as_bytes())
+            .ok()
+            .flatten()
+            .and_then(|data| String::from_utf8(data.to_vec()).ok())
     }
 
     /// Get chunks by document ID (uses secondary index)

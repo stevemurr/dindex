@@ -212,6 +212,20 @@ impl IndexManager {
         Ok(total)
     }
 
+    /// Replace an existing document indexed under the given URL.
+    /// Returns the old document ID if one was found and removed.
+    pub fn replace_by_url(&self, url: &str) -> Result<Option<String>> {
+        if let Some(old_doc_id) = self.chunk_storage.find_document_id_by_url(url) {
+            let count = self.indexer.remove_document(&old_doc_id)?;
+            if count > 0 {
+                debug!("Replacing existing document {} ({} chunks) for URL {}", old_doc_id, count, url);
+            }
+            Ok(Some(old_doc_id))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Commit pending changes to disk
     pub fn commit(&self) -> Result<()> {
         info!("Committing index changes");

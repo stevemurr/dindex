@@ -150,6 +150,16 @@ impl HybridRetriever {
             }
         }
 
+        // Apply aggregator score demotion
+        for result in &mut results {
+            if let Some(score_str) = result.chunk.metadata.extra.get("aggregator_score") {
+                if let Ok(aggregator_score) = score_str.parse::<f32>() {
+                    let multiplier = 1.0 - (aggregator_score * (1.0 - self.config.aggregator_min_multiplier));
+                    result.relevance_score *= multiplier;
+                }
+            }
+        }
+
         // Apply reranking if enabled
         if self.config.enable_reranking {
             debug!("Reranking {} results", results.len());

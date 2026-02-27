@@ -20,6 +20,9 @@ public struct MatchingChunk: Codable, Sendable, Equatable {
     /// Position in document (0.0 to 1.0)
     public let positionInDoc: Float
 
+    /// Best-matching sentence snippet for citations
+    public let snippet: String?
+
     enum CodingKeys: String, CodingKey {
         case chunkId = "chunk_id"
         case content
@@ -27,6 +30,7 @@ public struct MatchingChunk: Codable, Sendable, Equatable {
         case matchedBy = "matched_by"
         case sectionHierarchy = "section_hierarchy"
         case positionInDoc = "position_in_doc"
+        case snippet
     }
 
     public init(
@@ -35,7 +39,8 @@ public struct MatchingChunk: Codable, Sendable, Equatable {
         relevanceScore: Float,
         matchedBy: [String] = [],
         sectionHierarchy: [String] = [],
-        positionInDoc: Float = 0.0
+        positionInDoc: Float = 0.0,
+        snippet: String? = nil
     ) {
         self.chunkId = chunkId
         self.content = content
@@ -43,6 +48,7 @@ public struct MatchingChunk: Codable, Sendable, Equatable {
         self.matchedBy = matchedBy
         self.sectionHierarchy = sectionHierarchy
         self.positionInDoc = positionInDoc
+        self.snippet = snippet
     }
 }
 

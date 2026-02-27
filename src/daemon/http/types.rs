@@ -107,6 +107,9 @@ pub struct MatchingChunkJson {
     pub section_hierarchy: Vec<String>,
     /// Position in document (0.0 to 1.0)
     pub position_in_doc: f32,
+    /// Best-matching sentence snippet for citations
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
 }
 
 /// Search results grouped by document (JSON)

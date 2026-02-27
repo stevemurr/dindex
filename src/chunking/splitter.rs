@@ -56,6 +56,8 @@ impl TextSplitter {
         for chunk in &mut chunks {
             chunk.metadata.source_url = document.url.clone();
             chunk.metadata.source_title = document.title.clone();
+            // Propagate document metadata to chunk extra fields
+            chunk.metadata.extra.extend(document.metadata.clone());
         }
 
         debug!(

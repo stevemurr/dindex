@@ -486,7 +486,7 @@ async fn run_scrape_job(
                 info!("Scrape job {} stopped due to shutdown", job_id);
                 return Err(anyhow::anyhow!("Shutdown"));
             }
-            result = fetch_and_index_url(&client, &url, &splitter, &write_pipeline, job_id) => {
+            result = fetch_and_index_url(&client, &url, &splitter, &write_pipeline, &index_manager, job_id) => {
                 match result {
                     Ok(chunk_count) => {
                         chunks_indexed += chunk_count;
@@ -534,9 +534,15 @@ async fn fetch_and_index_url(
     url: &str,
     splitter: &TextSplitter,
     write_pipeline: &WritePipeline,
+    index_manager: &IndexManager,
     stream_id: Uuid,
 ) -> anyhow::Result<usize> {
     debug!("Fetching: {}", url);
+
+    // Remove any existing document for this URL (upsert behavior)
+    if let Err(e) = index_manager.replace_by_url(url) {
+        warn!("Failed to check/replace existing document for URL {}: {}", url, e);
+    }
 
     let response = client.get(url).send().await?;
     let html = response.text().await?;
