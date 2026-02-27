@@ -102,6 +102,16 @@ pub fn reciprocal_rank_fusion(
     let mut results: Vec<FusedResult> = chunk_scores.into_values().collect();
     results.sort_by(|a, b| b.rrf_score.total_cmp(&a.rrf_score));
 
+    // Normalize scores to [0, 1] range.
+    // Theoretical max is num_lists/(k+1), achieved when a doc is rank 1 in all lists.
+    let num_lists = ranked_lists.len();
+    if num_lists > 0 {
+        let theoretical_max = num_lists as f32 / (config.k as f32 + 1.0);
+        for result in &mut results {
+            result.rrf_score /= theoretical_max;
+        }
+    }
+
     results
 }
 
@@ -205,12 +215,12 @@ mod tests {
         let fused = reciprocal_rank_fusion(&[results], &config);
 
         assert_eq!(fused.len(), 2);
-        // "a" at rank 1 gets score 1/(60+1), "b" at rank 2 gets 1/(60+2)
+        // Scores are normalized: rank 1 in single list = 1.0, rank 2 = (k+1)/(k+2)
         assert_eq!(fused[0].chunk_id, "a");
         assert_eq!(fused[1].chunk_id, "b");
 
-        let expected_a = 1.0 / 61.0;
-        let expected_b = 1.0 / 62.0;
+        let expected_a = 1.0;
+        let expected_b = 61.0 / 62.0;
         assert!((fused[0].rrf_score - expected_a).abs() < 1e-6);
         assert!((fused[1].rrf_score - expected_b).abs() < 1e-6);
 
@@ -321,8 +331,8 @@ mod tests {
         assert_eq!(result.rank_per_method[&RetrievalMethod::Dense], 3);
         assert_eq!(result.rank_per_method[&RetrievalMethod::Bm25], 1);
 
-        // RRF score should be sum of 1/(60+3) + 1/(60+1)
-        let expected = 1.0 / 63.0 + 1.0 / 61.0;
+        // Normalized RRF: (1/63 + 1/61) / (2/61) = 62/63
+        let expected = 62.0 / 63.0;
         assert!((result.rrf_score - expected).abs() < 1e-6);
     }
 }
