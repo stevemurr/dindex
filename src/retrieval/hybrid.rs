@@ -8,10 +8,10 @@ use super::{
 use crate::config::RetrievalConfig;
 use crate::embedding::EmbeddingEngine;
 use crate::index::{ChunkStorage, VectorIndex};
-use crate::types::{Chunk, ChunkId, Embedding, Query, SearchResult};
+use crate::types::{Chunk, ChunkId, Embedding, Query, QueryFilters, SearchResult};
 use crate::util::truncate_str;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -58,7 +58,14 @@ impl HybridRetriever {
             return Ok(Vec::new()); // No results requested
         }
 
-        let candidate_count = self.config.candidate_count;
+        let has_filters = query.filters.as_ref().is_some_and(|f| !Self::filters_empty(f));
+
+        // Over-fetch when filtering so we have enough results after filtering
+        let candidate_count = if has_filters {
+            self.config.candidate_count * 3
+        } else {
+            self.config.candidate_count
+        };
         let mut ranked_lists: Vec<Vec<RankedResult>> = Vec::new();
 
         // Dense search
@@ -106,8 +113,13 @@ impl HybridRetriever {
         let fused = reciprocal_rank_fusion(&ranked_lists, &rrf_config);
 
         // Retrieve chunk content and build final results
-        let top_k = query.top_k.min(fused.len());
-        let top_fused = &fused[..top_k];
+        // When filtering, fetch more candidates to have enough after filtering
+        let fetch_k = if has_filters {
+            (query.top_k * 3).min(fused.len())
+        } else {
+            query.top_k.min(fused.len())
+        };
+        let top_fused = &fused[..fetch_k];
 
         let chunk_ids: Vec<String> = top_fused.iter().map(|f| f.chunk_id.clone()).collect();
         let stored_chunks = self.chunk_storage.get_batch(&chunk_ids);
@@ -119,12 +131,22 @@ impl HybridRetriever {
             .collect();
 
         // Build search results
-        let mut results: Vec<SearchResult> = Vec::with_capacity(top_k);
+        let mut results: Vec<SearchResult> = Vec::with_capacity(fetch_k);
         for fused_result in top_fused {
             if let Some(stored) = chunk_map.get(fused_result.chunk_id.as_str()) {
                 let mut result = SearchResult::new(stored.chunk.clone(), fused_result.rrf_score);
                 result.matched_by = fused_result.contributing_methods.iter().map(|m| m.to_string()).collect();
                 results.push(result);
+            }
+        }
+
+        // Apply query filters
+        if let Some(filters) = &query.filters {
+            if !Self::filters_empty(filters) {
+                let pre_filter_count = results.len();
+                results = Self::apply_filters(results, filters);
+                results.truncate(query.top_k);
+                debug!("Filtered {} → {} results", pre_filter_count, results.len());
             }
         }
 
@@ -143,6 +165,83 @@ impl HybridRetriever {
         Ok(results)
     }
 
+    /// Check if all filter fields are empty/None
+    fn filters_empty(filters: &QueryFilters) -> bool {
+        filters.source_url_prefix.is_none()
+            && filters.min_timestamp.is_none()
+            && filters.max_timestamp.is_none()
+            && filters.document_ids.is_none()
+            && filters.metadata_equals.is_none()
+            && filters.metadata_contains.is_none()
+    }
+
+    /// Apply query filters to search results
+    fn apply_filters(results: Vec<SearchResult>, filters: &QueryFilters) -> Vec<SearchResult> {
+        let document_id_set: Option<HashSet<&str>> = filters.document_ids.as_ref().map(|ids| {
+            ids.iter().map(|s| s.as_str()).collect()
+        });
+
+        results
+            .into_iter()
+            .filter(|result| {
+                let meta = &result.chunk.metadata;
+                let extra = &meta.extra;
+
+                // Filter by document IDs
+                if let Some(ref id_set) = document_id_set {
+                    if !id_set.contains(meta.document_id.as_str()) {
+                        return false;
+                    }
+                }
+
+                // Filter by source URL prefix
+                if let Some(ref prefix) = filters.source_url_prefix {
+                    match &meta.source_url {
+                        Some(url) if url.starts_with(prefix) => {}
+                        _ => return false,
+                    }
+                }
+
+                // Filter by timestamp range
+                if let Some(ref min_ts) = filters.min_timestamp {
+                    if meta.timestamp < *min_ts {
+                        return false;
+                    }
+                }
+                if let Some(ref max_ts) = filters.max_timestamp {
+                    if meta.timestamp > *max_ts {
+                        return false;
+                    }
+                }
+
+                // Filter by metadata exact match (all must match)
+                if let Some(ref equals) = filters.metadata_equals {
+                    for (key, value) in equals {
+                        if extra.get(key) != Some(value) {
+                            return false;
+                        }
+                    }
+                }
+
+                // Filter by metadata contains (value must be in allowed list)
+                if let Some(ref contains) = filters.metadata_contains {
+                    for (key, allowed_values) in contains {
+                        if let Some(actual) = extra.get(key) {
+                            let actual_values: HashSet<&str> =
+                                actual.split(',').map(|s| s.trim()).collect();
+                            if !allowed_values.iter().any(|v| actual_values.contains(v.as_str())) {
+                                return false;
+                            }
+                        } else {
+                            return false;
+                        }
+                    }
+                }
+
+                true
+            })
+            .collect()
+    }
 }
 
 /// Builder for creating a hybrid retriever with indexing support
@@ -550,5 +649,219 @@ mod tests {
         let chunk = make_chunk("c1", "doc1", "valid content");
         let result = harness.indexer.index_chunk(&chunk, &vec![]);
         assert!(result.is_err(), "Should reject empty embedding");
+    }
+
+    fn make_chunk_with_url(id: &str, doc_id: &str, content: &str, url: &str) -> Chunk {
+        let mut meta = ChunkMetadata::new(id.to_string(), doc_id.to_string());
+        meta.source_url = Some(url.to_string());
+        Chunk {
+            metadata: meta,
+            content: content.to_string(),
+            token_count: content.split_whitespace().count(),
+        }
+    }
+
+    fn make_chunk_with_metadata(id: &str, doc_id: &str, content: &str, extra: HashMap<String, String>) -> Chunk {
+        let mut meta = ChunkMetadata::new(id.to_string(), doc_id.to_string());
+        meta.extra = extra;
+        Chunk {
+            metadata: meta,
+            content: content.to_string(),
+            token_count: content.split_whitespace().count(),
+        }
+    }
+
+    #[test]
+    fn test_filter_by_document_ids() {
+        let harness = TestHarness::new(64);
+
+        let c1 = make_chunk("c1", "doc-a", "machine learning artificial intelligence");
+        let c2 = make_chunk("c2", "doc-b", "machine learning deep neural networks");
+
+        harness.indexer.index_batch(&[
+            (c1, create_test_embedding(1, 64)),
+            (c2, create_test_embedding(2, 64)),
+        ]).unwrap();
+
+        let retriever = harness.retriever(false);
+        let mut query = Query::new("machine learning", 10);
+        query.filters = Some(QueryFilters {
+            document_ids: Some(vec!["doc-a".to_string()]),
+            ..Default::default()
+        });
+
+        let embedding = create_test_embedding(1, 64);
+        let results = retriever.search(&query, Some(&embedding)).unwrap();
+
+        assert!(!results.is_empty());
+        for r in &results {
+            assert_eq!(r.chunk.metadata.document_id, "doc-a");
+        }
+    }
+
+    #[test]
+    fn test_filter_by_source_url_prefix() {
+        let harness = TestHarness::new(64);
+
+        let c1 = make_chunk_with_url("c1", "doc1", "machine learning algorithms overview", "https://example.com/ml");
+        let c2 = make_chunk_with_url("c2", "doc2", "machine learning deep networks overview", "https://other.com/dl");
+
+        harness.indexer.index_batch(&[
+            (c1, create_test_embedding(1, 64)),
+            (c2, create_test_embedding(2, 64)),
+        ]).unwrap();
+
+        let retriever = harness.retriever(false);
+        let mut query = Query::new("machine learning", 10);
+        query.filters = Some(QueryFilters {
+            source_url_prefix: Some("https://example.com".to_string()),
+            ..Default::default()
+        });
+
+        let embedding = create_test_embedding(1, 64);
+        let results = retriever.search(&query, Some(&embedding)).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk.metadata.source_url.as_deref(), Some("https://example.com/ml"));
+    }
+
+    #[test]
+    fn test_filter_by_metadata_equals() {
+        let harness = TestHarness::new(64);
+
+        let mut extra1 = HashMap::new();
+        extra1.insert("lang".to_string(), "en".to_string());
+        let c1 = make_chunk_with_metadata("c1", "doc1", "machine learning english content", extra1);
+
+        let mut extra2 = HashMap::new();
+        extra2.insert("lang".to_string(), "fr".to_string());
+        let c2 = make_chunk_with_metadata("c2", "doc2", "machine learning french content", extra2);
+
+        harness.indexer.index_batch(&[
+            (c1, create_test_embedding(1, 64)),
+            (c2, create_test_embedding(2, 64)),
+        ]).unwrap();
+
+        let retriever = harness.retriever(false);
+        let mut query = Query::new("machine learning", 10);
+        let mut equals = HashMap::new();
+        equals.insert("lang".to_string(), "en".to_string());
+        query.filters = Some(QueryFilters {
+            metadata_equals: Some(equals),
+            ..Default::default()
+        });
+
+        let embedding = create_test_embedding(1, 64);
+        let results = retriever.search(&query, Some(&embedding)).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk.metadata.extra.get("lang").unwrap(), "en");
+    }
+
+    #[test]
+    fn test_filter_by_metadata_contains() {
+        let harness = TestHarness::new(64);
+
+        let mut extra1 = HashMap::new();
+        extra1.insert("category".to_string(), "science, tech".to_string());
+        let c1 = make_chunk_with_metadata("c1", "doc1", "machine learning algorithms science", extra1);
+
+        let mut extra2 = HashMap::new();
+        extra2.insert("category".to_string(), "sports".to_string());
+        let c2 = make_chunk_with_metadata("c2", "doc2", "machine learning sports analytics", extra2);
+
+        harness.indexer.index_batch(&[
+            (c1, create_test_embedding(1, 64)),
+            (c2, create_test_embedding(2, 64)),
+        ]).unwrap();
+
+        let retriever = harness.retriever(false);
+        let mut query = Query::new("machine learning", 10);
+        let mut contains = HashMap::new();
+        contains.insert("category".to_string(), vec!["science".to_string(), "art".to_string()]);
+        query.filters = Some(QueryFilters {
+            metadata_contains: Some(contains),
+            ..Default::default()
+        });
+
+        let embedding = create_test_embedding(1, 64);
+        let results = retriever.search(&query, Some(&embedding)).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].chunk.metadata.extra.get("category").unwrap().contains("science"));
+    }
+
+    #[test]
+    fn test_filter_by_timestamp_range() {
+        use chrono::{TimeZone, Utc};
+
+        let harness = TestHarness::new(64);
+
+        let mut c1 = make_chunk("c1", "doc1", "machine learning old content article");
+        c1.metadata.timestamp = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+
+        let mut c2 = make_chunk("c2", "doc2", "machine learning recent content article");
+        c2.metadata.timestamp = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
+
+        harness.indexer.index_batch(&[
+            (c1, create_test_embedding(1, 64)),
+            (c2, create_test_embedding(2, 64)),
+        ]).unwrap();
+
+        let retriever = harness.retriever(false);
+        let mut query = Query::new("machine learning", 10);
+        query.filters = Some(QueryFilters {
+            min_timestamp: Some(Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap()),
+            ..Default::default()
+        });
+
+        let embedding = create_test_embedding(1, 64);
+        let results = retriever.search(&query, Some(&embedding)).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk.metadata.chunk_id, "c2");
+    }
+
+    #[test]
+    fn test_no_filters_returns_all() {
+        let harness = TestHarness::new(64);
+
+        let c1 = make_chunk("c1", "doc1", "machine learning algorithms overview");
+        let c2 = make_chunk("c2", "doc2", "machine learning neural networks overview");
+
+        harness.indexer.index_batch(&[
+            (c1, create_test_embedding(1, 64)),
+            (c2, create_test_embedding(2, 64)),
+        ]).unwrap();
+
+        let retriever = harness.retriever(false);
+        let query = Query::new("machine learning", 10);
+
+        let embedding = create_test_embedding(1, 64);
+        let results = retriever.search(&query, Some(&embedding)).unwrap();
+
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_empty_filters_returns_all() {
+        let harness = TestHarness::new(64);
+
+        let c1 = make_chunk("c1", "doc1", "machine learning algorithms overview");
+        let c2 = make_chunk("c2", "doc2", "machine learning neural networks overview");
+
+        harness.indexer.index_batch(&[
+            (c1, create_test_embedding(1, 64)),
+            (c2, create_test_embedding(2, 64)),
+        ]).unwrap();
+
+        let retriever = harness.retriever(false);
+        let mut query = Query::new("machine learning", 10);
+        query.filters = Some(QueryFilters::default());
+
+        let embedding = create_test_embedding(1, 64);
+        let results = retriever.search(&query, Some(&embedding)).unwrap();
+
+        assert_eq!(results.len(), 2, "Empty filters should not exclude any results");
     }
 }

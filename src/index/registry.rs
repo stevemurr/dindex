@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Entry in the document registry
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,8 +332,13 @@ impl DocumentRegistry {
 
         // Persist to sled (outside lock)
         if let Some(ref db) = self.db {
-            if let Ok(data) = bincode::serialize(&entry) {
-                let _ = db.insert(content_id_str.as_bytes(), data);
+            match bincode::serialize(&entry) {
+                Ok(data) => {
+                    if let Err(e) = db.insert(content_id_str.as_bytes(), data) {
+                        warn!("Failed to persist registry entry {}: {}", content_id_str, e);
+                    }
+                }
+                Err(e) => warn!("Failed to serialize registry entry {}: {}", content_id_str, e),
             }
         }
 
@@ -371,8 +376,13 @@ impl DocumentRegistry {
 
             // Persist to sled
             if let Some(ref db) = self.db {
-                if let Ok(data) = bincode::serialize(&result) {
-                    let _ = db.insert(content_id_str.as_bytes(), data);
+                match bincode::serialize(&result) {
+                    Ok(data) => {
+                        if let Err(e) = db.insert(content_id_str.as_bytes(), data) {
+                            warn!("Failed to persist registry entry {}: {}", content_id_str, e);
+                        }
+                    }
+                    Err(e) => warn!("Failed to serialize registry entry {}: {}", content_id_str, e),
                 }
             }
 
@@ -403,8 +413,13 @@ impl DocumentRegistry {
 
             // Persist to sled
             if let Some(ref db) = self.db {
-                if let Ok(data) = bincode::serialize(&result) {
-                    let _ = db.insert(content_id_str.as_bytes(), data);
+                match bincode::serialize(&result) {
+                    Ok(data) => {
+                        if let Err(e) = db.insert(content_id_str.as_bytes(), data) {
+                            warn!("Failed to persist registry entry {}: {}", content_id_str, e);
+                        }
+                    }
+                    Err(e) => warn!("Failed to serialize registry entry {}: {}", content_id_str, e),
                 }
             }
 
@@ -433,9 +448,11 @@ impl DocumentRegistry {
             inner.url_index.remove(url);
         }
 
-        // Remove from sled (outside lock would be fine, but entry is already removed)
+        // Remove from sled
         if let Some(ref db) = self.db {
-            let _ = db.remove(content_id_str.as_bytes());
+            if let Err(e) = db.remove(content_id_str.as_bytes()) {
+                warn!("Failed to remove registry entry {} from database: {}", content_id_str, e);
+            }
         }
 
         Some(entry)

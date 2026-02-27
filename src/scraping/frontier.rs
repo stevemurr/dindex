@@ -245,7 +245,7 @@ impl UrlFrontier {
         for domain in ready_domains {
             if let Some(queue) = self.domain_queues.get(domain) {
                 if let Some(top) = queue.peek() {
-                    if best_url.is_none() || top > best_url.as_ref().unwrap() {
+                    if best_url.as_ref().is_none_or(|best| top > best) {
                         best_url = Some(top.clone());
                         best_domain = Some(domain.clone());
                     }

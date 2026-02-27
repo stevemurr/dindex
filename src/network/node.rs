@@ -26,6 +26,17 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+/// Maximum number of connected peers tracked
+const MAX_CONNECTED_PEERS: usize = 500;
+/// Maximum number of cached node advertisements
+const MAX_NODE_ADVERTISEMENTS: usize = 1000;
+/// Maximum number of pending response channels before cleanup
+const MAX_PENDING_RESPONSE_CHANNELS: usize = 500;
+/// How long stale response channels are kept before cleanup (seconds)
+const STALE_RESPONSE_CHANNEL_SECS: u64 = 60;
+/// How long node advertisements are kept before expiration (seconds)
+const ADVERTISEMENT_EXPIRY_SECS: i64 = 3600; // 1 hour
+
 /// Pending query state
 struct PendingQuery {
     response_tx: oneshot::Sender<Vec<QueryResponse>>,
@@ -49,8 +60,8 @@ pub struct NetworkNode {
     node_advertisements: Arc<RwLock<HashMap<PeerId, NodeAdvertisement>>>,
     /// Pending distributed queries awaiting responses
     pending_queries: HashMap<String, PendingQuery>,
-    /// Response channels for incoming request-response queries (request_id -> channel)
-    pending_response_channels: HashMap<String, ResponseChannel<QueryResponse>>,
+    /// Response channels for incoming request-response queries (request_id -> (channel, created_at))
+    pending_response_channels: HashMap<String, (ResponseChannel<QueryResponse>, Instant)>,
     /// Mapping from outbound request-response IDs to our query request_ids
     outbound_request_map: HashMap<request_response::OutboundRequestId, String>,
     /// Command receiver
@@ -352,15 +363,30 @@ impl NetworkNode {
                 info!("Connected to peer: {}", peer_id);
                 let addr = endpoint.get_remote_address().clone();
 
-                self.connected_peers.write().insert(
-                    peer_id,
-                    PeerInfo {
+                {
+                    let mut peers = self.connected_peers.write();
+                    peers.insert(
                         peer_id,
-                        addresses: vec![addr],
-                        connected_at: Instant::now(),
-                        last_seen: Instant::now(),
-                    },
-                );
+                        PeerInfo {
+                            peer_id,
+                            addresses: vec![addr],
+                            connected_at: Instant::now(),
+                            last_seen: Instant::now(),
+                        },
+                    );
+
+                    // Enforce max connected peers by removing oldest
+                    if peers.len() > MAX_CONNECTED_PEERS {
+                        let oldest = peers
+                            .iter()
+                            .min_by_key(|(_, info)| info.last_seen)
+                            .map(|(pid, _)| *pid);
+                        if let Some(oldest_pid) = oldest {
+                            peers.remove(&oldest_pid);
+                            warn!("Evicted oldest peer {} to stay within max peer limit", oldest_pid);
+                        }
+                    }
+                }
 
                 // Add to Kademlia
                 self.swarm
@@ -516,7 +542,7 @@ impl NetworkNode {
                         );
                         // Store the response channel so we can reply directly
                         self.pending_response_channels
-                            .insert(request.request_id.clone(), channel);
+                            .insert(request.request_id.clone(), (channel, Instant::now()));
                         let _ = self
                             .event_tx
                             .send(NetworkEvent::QueryReceived {
@@ -704,7 +730,7 @@ impl NetworkNode {
             }
             NetworkCommand::SendQueryResponse(response) => {
                 // Try to respond via request-response channel first (direct delivery)
-                if let Some(channel) = self
+                if let Some((channel, _created)) = self
                     .pending_response_channels
                     .remove(&response.request_id)
                 {
@@ -755,9 +781,11 @@ impl NetworkNode {
         }
     }
 
-    /// Check for timed-out queries and complete them with whatever responses we have
+    /// Check for timed-out queries, stale response channels, and expired advertisements
     fn check_query_timeouts(&mut self) {
         let now = Instant::now();
+
+        // Complete timed-out queries with whatever responses we have
         let timed_out: Vec<String> = self
             .pending_queries
             .iter()
@@ -773,6 +801,89 @@ impl NetworkNode {
                     pending.responses.len()
                 );
                 let _ = pending.response_tx.send(pending.responses);
+            }
+        }
+
+        // Clean up stale response channels (application never sent a response)
+        let stale_threshold = Duration::from_secs(STALE_RESPONSE_CHANNEL_SECS);
+        let stale_channels: Vec<String> = self
+            .pending_response_channels
+            .iter()
+            .filter(|(_, (_, created))| now.duration_since(*created) > stale_threshold)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &stale_channels {
+            self.pending_response_channels.remove(id);
+        }
+        if !stale_channels.is_empty() {
+            debug!("Cleaned up {} stale response channels", stale_channels.len());
+        }
+
+        // Enforce max pending response channels by removing oldest
+        if self.pending_response_channels.len() > MAX_PENDING_RESPONSE_CHANNELS {
+            let mut entries: Vec<(String, Instant)> = self
+                .pending_response_channels
+                .iter()
+                .map(|(id, (_, created))| (id.clone(), *created))
+                .collect();
+            entries.sort_by_key(|(_, created)| *created);
+            let to_remove = self.pending_response_channels.len() - MAX_PENDING_RESPONSE_CHANNELS;
+            for (id, _) in entries.into_iter().take(to_remove) {
+                self.pending_response_channels.remove(&id);
+            }
+            warn!("Evicted {} response channels exceeding max capacity", to_remove);
+        }
+
+        // Clean up orphaned outbound request mappings (no matching pending query)
+        let orphaned: Vec<request_response::OutboundRequestId> = self
+            .outbound_request_map
+            .iter()
+            .filter(|(_, req_id)| !self.pending_queries.contains_key(*req_id))
+            .map(|(outbound_id, _)| *outbound_id)
+            .collect();
+        for id in &orphaned {
+            self.outbound_request_map.remove(id);
+        }
+        if !orphaned.is_empty() {
+            debug!("Cleaned up {} orphaned outbound request mappings", orphaned.len());
+        }
+
+        // Expire stale node advertisements
+        let expiry = chrono::Duration::seconds(ADVERTISEMENT_EXPIRY_SECS);
+        let cutoff = chrono::Utc::now() - expiry;
+        let mut expired_ads = Vec::new();
+        {
+            let ads = self.node_advertisements.read();
+            for (peer_id, ad) in ads.iter() {
+                if ad.last_updated < cutoff {
+                    expired_ads.push(*peer_id);
+                }
+            }
+        }
+        if !expired_ads.is_empty() {
+            let mut ads = self.node_advertisements.write();
+            for peer_id in &expired_ads {
+                ads.remove(peer_id);
+            }
+            debug!("Expired {} stale node advertisements", expired_ads.len());
+        }
+
+        // Enforce max advertisement count by removing oldest
+        {
+            let ads = self.node_advertisements.read();
+            if ads.len() > MAX_NODE_ADVERTISEMENTS {
+                drop(ads);
+                let mut ads = self.node_advertisements.write();
+                let mut entries: Vec<(PeerId, chrono::DateTime<chrono::Utc>)> = ads
+                    .iter()
+                    .map(|(pid, ad)| (*pid, ad.last_updated))
+                    .collect();
+                entries.sort_by_key(|(_, ts)| *ts);
+                let to_remove = ads.len() - MAX_NODE_ADVERTISEMENTS;
+                for (pid, _) in entries.into_iter().take(to_remove) {
+                    ads.remove(&pid);
+                }
+                warn!("Evicted {} advertisements exceeding max capacity", to_remove);
             }
         }
     }

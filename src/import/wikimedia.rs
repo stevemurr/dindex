@@ -204,7 +204,8 @@ impl WikimediaSource {
                             }
                             "page" => {
                                 // Page complete, convert to document
-                                let page = self.current_page.take().unwrap();
+                                let page = self.current_page.take()
+                                    .ok_or_else(|| ImportError::XmlParse("</page> without matching <page>".to_string()))?;
                                 return Ok(self.page_to_document(page));
                             }
                             _ => {}

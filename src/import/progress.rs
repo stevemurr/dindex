@@ -238,7 +238,9 @@ impl Drop for ImportProgress {
                 self.bytes_processed.load(Ordering::Relaxed),
                 &stats,
             );
-            let _ = checkpoint.save(path);
+            if let Err(e) = checkpoint.save(path) {
+                eprintln!("Warning: failed to save final import checkpoint: {}", e);
+            }
         }
     }
 }

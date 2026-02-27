@@ -5,6 +5,7 @@
 
 use crate::types::{Chunk, IndexedChunk};
 use anyhow::{Context, Result};
+use tracing::warn;
 
 #[cfg(test)]
 use crate::types::ChunkMetadata;
@@ -76,11 +77,18 @@ impl ChunkStorage {
         let doc_id = &chunk.chunk.metadata.document_id;
 
         // Serialize and store the chunk
-        if let Ok(data) = bincode::serialize(&stored) {
-            let _ = self.db.insert(chunk_id.as_bytes(), data);
-
-            // Update document index
-            self.add_to_doc_index(doc_id, chunk_id);
+        match bincode::serialize(&stored) {
+            Ok(data) => {
+                if let Err(e) = self.db.insert(chunk_id.as_bytes(), data) {
+                    warn!("Failed to store chunk {}: {}", chunk_id, e);
+                    return;
+                }
+                // Update document index
+                self.add_to_doc_index(doc_id, chunk_id);
+            }
+            Err(e) => {
+                warn!("Failed to serialize chunk {}: {}", chunk_id, e);
+            }
         }
     }
 
@@ -97,8 +105,13 @@ impl ChunkStorage {
 
         if !chunk_ids.contains(&chunk_id.to_string()) {
             chunk_ids.push(chunk_id.to_string());
-            if let Ok(data) = bincode::serialize(&chunk_ids) {
-                let _ = self.doc_index.insert(key, data);
+            match bincode::serialize(&chunk_ids) {
+                Ok(data) => {
+                    if let Err(e) = self.doc_index.insert(key, data) {
+                        warn!("Failed to update doc index for {}: {}", doc_id, e);
+                    }
+                }
+                Err(e) => warn!("Failed to serialize doc index for {}: {}", doc_id, e),
             }
         }
     }
@@ -110,9 +123,13 @@ impl ChunkStorage {
             if let Ok(mut chunk_ids) = bincode::deserialize::<Vec<String>>(&data) {
                 chunk_ids.retain(|id| id != chunk_id);
                 if chunk_ids.is_empty() {
-                    let _ = self.doc_index.remove(key);
+                    if let Err(e) = self.doc_index.remove(key) {
+                        warn!("Failed to remove doc index entry for {}: {}", doc_id, e);
+                    }
                 } else if let Ok(data) = bincode::serialize(&chunk_ids) {
-                    let _ = self.doc_index.insert(key, data);
+                    if let Err(e) = self.doc_index.insert(key, data) {
+                        warn!("Failed to update doc index for {}: {}", doc_id, e);
+                    }
                 }
             }
         }
@@ -138,7 +155,9 @@ impl ChunkStorage {
         let doc_id = &stored.chunk.metadata.document_id;
 
         self.remove_from_doc_index(doc_id, chunk_id);
-        let _ = self.db.remove(chunk_id.as_bytes());
+        if let Err(e) = self.db.remove(chunk_id.as_bytes()) {
+            warn!("Failed to remove chunk {} from database: {}", chunk_id, e);
+        }
 
         Some(stored)
     }

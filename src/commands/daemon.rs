@@ -112,8 +112,19 @@ pub async fn start_node_inner(
         config.embedding.dimensions,
         &config.routing,
     ));
+
+    // Load persisted routing state (node advertisements from previous sessions)
+    let routing_state_path = config.node.data_dir.join("routing_state.json");
+    match query_router.load(&routing_state_path) {
+        Ok(count) if count > 0 => info!("Restored {} node advertisements from previous session", count),
+        Ok(_) => {}
+        Err(e) => warn!("Failed to load routing state: {} (starting fresh)", e),
+    }
+
     let query_router_for_events = query_router.clone();
     let query_router_for_advert = query_router.clone();
+    let query_router_for_shutdown = query_router.clone();
+    let routing_state_path_shutdown = routing_state_path.clone();
 
     // Create QueryCoordinator for distributed search
     let query_coordinator = Arc::new(QueryCoordinator::new(
@@ -234,6 +245,13 @@ pub async fn start_node_inner(
 
     // Run daemon (this blocks until shutdown)
     daemon.run().await?;
+
+    // Save routing state for next startup
+    if query_router_for_shutdown.node_count() > 0 {
+        if let Err(e) = query_router_for_shutdown.save(&routing_state_path_shutdown) {
+            warn!("Failed to save routing state: {}", e);
+        }
+    }
 
     Ok(())
 }

@@ -290,7 +290,7 @@ fn main() -> Result<()> {
                 let spinner_style = ProgressStyle::default_spinner()
                     .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
                     .template("{spinner:.cyan} {msg}")
-                    .unwrap();
+                    .expect("static spinner template is valid");
 
                 let spinner = ProgressBar::new_spinner();
                 spinner.set_style(spinner_style);

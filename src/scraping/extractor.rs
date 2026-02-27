@@ -668,10 +668,9 @@ impl ContentExtractor {
 
         for format in &formats {
             if let Ok(naive) = chrono::NaiveDate::parse_from_str(date_str, format) {
-                return Some(DateTime::from_naive_utc_and_offset(
-                    naive.and_hms_opt(0, 0, 0).unwrap(),
-                    Utc,
-                ));
+                if let Some(naive_dt) = naive.and_hms_opt(0, 0, 0) {
+                    return Some(DateTime::from_naive_utc_and_offset(naive_dt, Utc));
+                }
             }
             if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(date_str, format) {
                 return Some(DateTime::from_naive_utc_and_offset(naive, Utc));

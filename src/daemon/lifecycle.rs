@@ -312,8 +312,15 @@ impl Daemon {
     #[cfg(unix)]
     async fn wait_for_sigterm() {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM");
-        sigterm.recv().await;
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                sigterm.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to register SIGTERM handler: {}. Falling back to pending future.", e);
+                std::future::pending::<()>().await;
+            }
+        }
     }
 
     #[cfg(not(unix))]

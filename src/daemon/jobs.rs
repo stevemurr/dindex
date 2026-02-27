@@ -571,12 +571,20 @@ async fn fetch_and_index_url(
 fn extract_text_from_html(html: &str) -> String {
     // Use scraper crate for proper HTML parsing
     use scraper::{Html, Selector};
+    use std::sync::OnceLock;
+
+    static BODY_SELECTOR: OnceLock<Selector> = OnceLock::new();
+    static TEXT_SELECTOR: OnceLock<Selector> = OnceLock::new();
 
     let document = Html::parse_document(html);
 
-    // Remove script and style elements
-    let body_selector = Selector::parse("body").unwrap();
-    let text_selector = Selector::parse("p, h1, h2, h3, h4, h5, h6, li, td, th, span, div").unwrap();
+    let body_selector = BODY_SELECTOR.get_or_init(|| {
+        Selector::parse("body").expect("static 'body' CSS selector is valid")
+    });
+    let text_selector = TEXT_SELECTOR.get_or_init(|| {
+        Selector::parse("p, h1, h2, h3, h4, h5, h6, li, td, th, span, div")
+            .expect("static text CSS selector is valid")
+    });
 
     let mut text = String::new();
 

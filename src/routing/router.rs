@@ -9,6 +9,7 @@ use crate::types::{Embedding, LshSignature, NodeAdvertisement, NodeCentroid, Nod
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::path::Path;
 use tracing::{debug, info};
 
 /// Query router for finding relevant nodes
@@ -145,6 +146,33 @@ impl QueryRouter {
     /// Generate LSH signature for a query
     pub fn hash_query(&self, embedding: &Embedding) -> LshSignature {
         self.lsh_index.hash(embedding)
+    }
+
+    /// Save node advertisements to disk for persistence across restarts
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        let ads = self.node_ads.read();
+        let data = serde_json::to_vec(&*ads)?;
+        std::fs::write(path, data)?;
+        info!("Saved {} node advertisements to {}", ads.len(), path.display());
+        Ok(())
+    }
+
+    /// Load node advertisements from disk
+    pub fn load(&self, path: &Path) -> anyhow::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+        let data = std::fs::read(path)?;
+        let loaded: HashMap<NodeId, NodeAdvertisement> = serde_json::from_slice(&data)?;
+        let count = loaded.len();
+        *self.node_ads.write() = loaded;
+        info!("Loaded {} node advertisements from {}", count, path.display());
+        Ok(count)
+    }
+
+    /// Get the number of registered nodes
+    pub fn node_count(&self) -> usize {
+        self.node_ads.read().len()
     }
 }
 

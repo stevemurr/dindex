@@ -11,8 +11,6 @@ use anyhow::Result;
 use parking_lot::RwLock;
 use tracing::{debug, info};
 
-use std::collections::HashSet;
-
 use crate::config::Config;
 use crate::embedding::{generate_with_fallback, EmbeddingEngine};
 use crate::index::{ChunkStorage, VectorIndex};
@@ -112,24 +110,11 @@ impl IndexManager {
         // Generate query embedding (uses real engine if available, hash-based fallback otherwise)
         let query_embedding = self.generate_embedding(query_text);
 
-        // Create query with filters
+        // Create query with filters — HybridRetriever handles filtering internally
         let mut query = Query::new(query_text, top_k);
         query.filters = filters.cloned();
 
-        // Execute search - request more results if filtering
-        let fetch_k = if filters.is_some() { top_k * 3 } else { top_k };
-        let search_query = Query {
-            top_k: fetch_k,
-            ..query.clone()
-        };
-
-        let mut results = self.retriever.search(&search_query, Some(&query_embedding))?;
-
-        // Apply metadata filtering if specified
-        if let Some(filters) = filters {
-            results = Self::filter_by_metadata(results, filters);
-            results.truncate(top_k);
-        }
+        let results = self.retriever.search(&query, Some(&query_embedding))?;
 
         let query_time_ms = start.elapsed().as_millis() as u64;
         debug!(
@@ -139,67 +124,6 @@ impl IndexManager {
         );
 
         Ok((results, query_time_ms))
-    }
-
-    /// Filter search results by metadata constraints
-    fn filter_by_metadata(results: Vec<SearchResult>, filters: &QueryFilters) -> Vec<SearchResult> {
-        // Pre-build HashSet for O(1) document_ids lookup
-        let document_id_set: Option<HashSet<&str>> = filters.document_ids.as_ref().map(|ids| {
-            ids.iter().map(|s| s.as_str()).collect()
-        });
-
-        results
-            .into_iter()
-            .filter(|result| {
-                let extra = &result.chunk.metadata.extra;
-
-                // Check document_ids filter
-                if let Some(ref id_set) = document_id_set {
-                    if !id_set.contains(result.chunk.metadata.document_id.as_str()) {
-                        return false;
-                    }
-                }
-
-                // Check source_url_prefix
-                if let Some(ref prefix) = filters.source_url_prefix {
-                    if let Some(ref url) = result.chunk.metadata.source_url {
-                        if !url.starts_with(prefix) {
-                            return false;
-                        }
-                    } else {
-                        return false;
-                    }
-                }
-
-                // Check metadata_equals (all must match)
-                if let Some(ref equals) = filters.metadata_equals {
-                    for (key, value) in equals {
-                        if extra.get(key) != Some(value) {
-                            return false;
-                        }
-                    }
-                }
-
-                // Check metadata_contains (value must be in allowed list)
-                if let Some(ref contains) = filters.metadata_contains {
-                    for (key, allowed_values) in contains {
-                        if let Some(actual) = extra.get(key) {
-                            // For comma-separated category values, check if any allowed value is present
-                            let actual_values: std::collections::HashSet<&str> =
-                                actual.split(',').map(|s| s.trim()).collect();
-                            let has_match = allowed_values.iter().any(|v| actual_values.contains(v.as_str()));
-                            if !has_match {
-                                return false;
-                            }
-                        } else {
-                            return false;
-                        }
-                    }
-                }
-
-                true
-            })
-            .collect()
     }
 
     /// Index a batch of chunks with their embeddings
