@@ -284,7 +284,7 @@ mod tests {
         let embedding = create_test_embedding(1, 64);
 
         // Index the chunk
-        let key = indexer.index_chunk(&chunk, &embedding).unwrap();
+        let _key = indexer.index_chunk(&chunk, &embedding).unwrap();
         indexer.save().unwrap();
 
         // Key was assigned (any u64 value is valid)
