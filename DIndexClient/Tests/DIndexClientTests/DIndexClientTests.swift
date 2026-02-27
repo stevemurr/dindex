@@ -1,5 +1,44 @@
 import XCTest
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @testable import DIndexClient
+
+// MARK: - Mock URL Protocol
+
+private final class MockURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = Self.requestHandler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private func makeMockClient() -> DIndexClient {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [MockURLProtocol.self]
+    let session = URLSession(configuration: config)
+    return DIndexClient(
+        baseURL: URL(string: "http://localhost:8080")!,
+        session: session
+    )
+}
 
 final class DIndexClientTests: XCTestCase {
 
@@ -205,5 +244,131 @@ final class DIndexClientTests: XCTestCase {
 
         XCTAssertEqual(response.chunksDeleted, 500)
         XCTAssertEqual(response.durationMs, 1234)
+    }
+
+    // MARK: - Client-Level Deletion Tests
+
+    func testDeleteDocumentsSendsCorrectRequest() async throws {
+        let client = makeMockClient()
+        var capturedRequest: URLRequest?
+
+        MockURLProtocol.requestHandler = { request in
+            capturedRequest = request
+            let json = #"{"documents_deleted":2,"chunks_deleted":10,"duration_ms":50}"#
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200,
+                httpVersion: nil, headerFields: nil
+            )!
+            return (response, json.data(using: .utf8)!)
+        }
+
+        let result = try await client.deleteDocuments(ids: ["doc1", "doc2"])
+
+        // Verify request
+        XCTAssertEqual(capturedRequest?.httpMethod, "DELETE")
+        XCTAssertTrue(capturedRequest!.url!.path.hasSuffix("/api/v1/documents"))
+        XCTAssertEqual(capturedRequest?.value(forHTTPHeaderField: "Content-Type"), "application/json")
+
+        // Verify body contains the document IDs
+        let bodyData = capturedRequest!.httpBody!
+        let body = try JSONDecoder().decode(DeleteRequest.self, from: bodyData)
+        XCTAssertEqual(body.documentIds, ["doc1", "doc2"])
+
+        // Verify response
+        XCTAssertEqual(result.documentsDeleted, 2)
+        XCTAssertEqual(result.chunksDeleted, 10)
+        XCTAssertEqual(result.durationMs, 50)
+    }
+
+    func testDeleteSingleDocument() async throws {
+        let client = makeMockClient()
+        var capturedBody: DeleteRequest?
+
+        MockURLProtocol.requestHandler = { request in
+            capturedBody = try JSONDecoder().decode(DeleteRequest.self, from: request.httpBody!)
+            let json = #"{"documents_deleted":1,"chunks_deleted":5,"duration_ms":12}"#
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200,
+                httpVersion: nil, headerFields: nil
+            )!
+            return (response, json.data(using: .utf8)!)
+        }
+
+        let result = try await client.deleteDocument(id: "single-doc")
+
+        XCTAssertEqual(capturedBody?.documentIds, ["single-doc"])
+        XCTAssertEqual(result.documentsDeleted, 1)
+        XCTAssertEqual(result.chunksDeleted, 5)
+    }
+
+    func testClearAll() async throws {
+        let client = makeMockClient()
+        var capturedRequest: URLRequest?
+
+        MockURLProtocol.requestHandler = { request in
+            capturedRequest = request
+            let json = #"{"chunks_deleted":500,"duration_ms":1234}"#
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200,
+                httpVersion: nil, headerFields: nil
+            )!
+            return (response, json.data(using: .utf8)!)
+        }
+
+        let result = try await client.clearAll()
+
+        XCTAssertEqual(capturedRequest?.httpMethod, "POST")
+        XCTAssertTrue(capturedRequest!.url!.path.hasSuffix("/api/v1/index/clear"))
+        XCTAssertNil(capturedRequest?.httpBody)
+        XCTAssertEqual(result.chunksDeleted, 500)
+        XCTAssertEqual(result.durationMs, 1234)
+    }
+
+    func testDeleteReturnsServerError() async throws {
+        let client = makeMockClient()
+
+        MockURLProtocol.requestHandler = { request in
+            let json = #"{"code":"NOT_FOUND","message":"Document not found"}"#
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 404,
+                httpVersion: nil, headerFields: nil
+            )!
+            return (response, json.data(using: .utf8)!)
+        }
+
+        do {
+            _ = try await client.deleteDocuments(ids: ["nonexistent"])
+            XCTFail("Expected error to be thrown")
+        } catch let error as DIndexError {
+            if case .serverError(let code, let message) = error {
+                XCTAssertEqual(code, "NOT_FOUND")
+                XCTAssertEqual(message, "Document not found")
+            } else {
+                XCTFail("Expected serverError, got \(error)")
+            }
+        }
+    }
+
+    func testDeleteReturnsUnauthorized() async throws {
+        let client = makeMockClient()
+
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 401,
+                httpVersion: nil, headerFields: nil
+            )!
+            return (response, Data())
+        }
+
+        do {
+            _ = try await client.deleteDocuments(ids: ["doc1"])
+            XCTFail("Expected error to be thrown")
+        } catch let error as DIndexError {
+            if case .unauthorized = error {
+                // expected
+            } else {
+                XCTFail("Expected unauthorized, got \(error)")
+            }
+        }
     }
 }
