@@ -37,28 +37,6 @@ pub fn truncate_to_tokens(text: &str, max_tokens: usize) -> String {
     words[..max_tokens].join(" ")
 }
 
-/// Calculate overlap region between two texts
-pub fn calculate_overlap(text1: &str, text2: &str) -> Option<String> {
-    let words1: Vec<&str> = text1.unicode_words().collect();
-    let words2: Vec<&str> = text2.unicode_words().collect();
-
-    if words1.is_empty() || words2.is_empty() {
-        return None;
-    }
-
-    // Find longest common suffix of text1 that is prefix of text2
-    let max_overlap = words1.len().min(words2.len());
-    for len in (1..=max_overlap).rev() {
-        let suffix = &words1[words1.len() - len..];
-        let prefix = &words2[..len];
-        if suffix == prefix {
-            return Some(suffix.join(" "));
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

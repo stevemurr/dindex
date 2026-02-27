@@ -246,24 +246,6 @@ impl JobManager {
         self.jobs.get(&job_id).map(|job| job.progress.clone())
     }
 
-    /// Get job info (returns a summary without internal fields)
-    pub fn get_job(&self, job_id: Uuid) -> Option<(JobType, JobState, Progress, Option<JobStats>, Option<String>)> {
-        self.jobs.get(&job_id).map(|job| {
-            (
-                job.job_type.clone(),
-                job.state.clone(),
-                job.progress.clone(),
-                job.stats.clone(),
-                job.error.clone(),
-            )
-        })
-    }
-
-    /// Check if a job exists
-    pub fn exists(&self, job_id: Uuid) -> bool {
-        self.jobs.contains_key(&job_id)
-    }
-
     /// Get count of active jobs
     pub fn active_count(&self) -> usize {
         self.jobs
@@ -272,17 +254,6 @@ impl JobManager {
             .count()
     }
 
-    /// Clean up completed jobs older than the given duration
-    pub fn cleanup_old_jobs(&self, max_age: Duration) {
-        let now = Instant::now();
-        self.jobs.retain(|_, job| {
-            if let Some(completed_at) = job.completed_at {
-                now.duration_since(completed_at) < max_age
-            } else {
-                true
-            }
-        });
-    }
 }
 
 /// Run an import job

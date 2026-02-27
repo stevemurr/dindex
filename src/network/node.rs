@@ -103,13 +103,6 @@ pub enum NetworkEvent {
     PeerDisconnected(PeerId),
 }
 
-/// Command to send a query response
-#[derive(Debug)]
-pub struct SendQueryResponse {
-    pub request_id: String,
-    pub response: QueryResponse,
-}
-
 /// Handle for interacting with the network node
 #[derive(Clone)]
 pub struct NetworkHandle {
@@ -470,7 +463,6 @@ impl NetworkNode {
                                 }
                             }
                         }
-                        _ => {}
                     }
                 }
             }

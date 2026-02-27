@@ -248,18 +248,6 @@ impl VectorIndex {
         Ok(key)
     }
 
-    /// Add multiple embeddings in batch
-    pub fn add_batch(&self, items: &[(ChunkId, Embedding)]) -> Result<Vec<u64>> {
-        let mut keys = Vec::with_capacity(items.len());
-
-        for (chunk_id, embedding) in items {
-            let key = self.add(chunk_id, embedding)?;
-            keys.push(key);
-        }
-
-        Ok(keys)
-    }
-
     /// Search for nearest neighbors
     pub fn search(&self, query: &Embedding, k: usize) -> Result<Vec<VectorSearchResult>> {
         anyhow::ensure!(

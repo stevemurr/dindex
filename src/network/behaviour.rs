@@ -100,20 +100,3 @@ impl DIndexBehaviour {
     }
 }
 
-/// Events emitted by the DIndex behaviour
-#[derive(Debug)]
-pub enum DIndexEvent {
-    /// Peer discovered via mDNS
-    PeerDiscovered(PeerId),
-    /// Message received via GossipSub
-    GossipMessage {
-        source: Option<PeerId>,
-        topic: String,
-        data: Vec<u8>,
-    },
-    /// Kademlia query completed
-    KademliaQueryCompleted {
-        id: kad::QueryId,
-        result: kad::QueryResult,
-    },
-}

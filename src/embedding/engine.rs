@@ -107,13 +107,6 @@ pub fn normalize_embedding(embedding: &Embedding) -> Embedding {
     }
 }
 
-/// Truncate embedding for Matryoshka models
-/// Earlier dimensions contain more important information
-pub fn truncate_matryoshka(embedding: &Embedding, target_dims: usize) -> Embedding {
-    let truncated: Vec<f32> = embedding.iter().take(target_dims).copied().collect();
-    normalize_embedding(&truncated)
-}
-
 /// Compute cosine similarity between two embeddings
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len(), "Embeddings must have same dimension");
@@ -151,11 +144,4 @@ mod tests {
         assert!((cosine_similarity(&a, &c) - 1.0).abs() < 1e-6);
     }
 
-    #[test]
-    fn test_truncate_matryoshka() {
-        // Use 1024 dimensions to match the new default (bge-m3)
-        let embedding: Vec<f32> = (0..1024).map(|i| i as f32).collect();
-        let truncated = truncate_matryoshka(&embedding, 256);
-        assert_eq!(truncated.len(), 256);
-    }
 }

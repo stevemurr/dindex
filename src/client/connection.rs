@@ -91,26 +91,6 @@ impl DaemonClient {
         Ok(response)
     }
 
-    /// Check if connected to daemon
-    pub fn is_connected(&self) -> bool {
-        // For Unix streams, we can't really check without sending
-        true
-    }
-}
-
-/// Try to connect to daemon, returning None if not running
-pub async fn try_connect() -> Option<DaemonClient> {
-    DaemonClient::connect().await.ok()
-}
-
-/// Check if daemon is reachable
-pub async fn is_daemon_reachable() -> bool {
-    if let Ok(mut client) = DaemonClient::connect().await {
-        if let Ok(Response::Pong) = client.send(Request::Ping).await {
-            return true;
-        }
-    }
-    false
 }
 
 #[cfg(test)]
@@ -122,10 +102,5 @@ mod tests {
         // Should fail gracefully when daemon is not running
         let result = DaemonClient::connect().await;
         assert!(matches!(result, Err(ClientError::DaemonNotRunning)));
-    }
-
-    #[tokio::test]
-    async fn test_is_daemon_reachable_when_not_running() {
-        assert!(!is_daemon_reachable().await);
     }
 }

@@ -63,41 +63,6 @@ impl LshIndex {
         LshSignature::new(bits, self.num_bits)
     }
 
-    /// Hash multiple embeddings
-    pub fn hash_batch(&self, embeddings: &[Embedding]) -> Vec<LshSignature> {
-        embeddings.iter().map(|e| self.hash(e)).collect()
-    }
-
-    /// Estimate cosine similarity from LSH signatures
-    /// Uses the relationship: cos(θ) ≈ 1 - 2 * hamming_distance / num_bits
-    pub fn estimate_similarity(&self, a: &LshSignature, b: &LshSignature) -> f32 {
-        let hamming = a.hamming_distance(b);
-        // Cosine similarity estimate based on angular distance
-        let theta = std::f32::consts::PI * (hamming as f32 / self.num_bits as f32);
-        theta.cos()
-    }
-
-    /// Find candidates above a similarity threshold
-    pub fn find_candidates(
-        &self,
-        query: &LshSignature,
-        signatures: &[(String, LshSignature)],
-        min_similarity: f32,
-    ) -> Vec<(String, f32)> {
-        let max_hamming = ((1.0 - min_similarity.acos() / std::f32::consts::PI) * self.num_bits as f32) as usize;
-
-        signatures
-            .iter()
-            .filter_map(|(id, sig)| {
-                let hamming = query.hamming_distance(sig);
-                if hamming <= max_hamming {
-                    Some((id.clone(), self.estimate_similarity(query, sig)))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -123,7 +88,7 @@ mod tests {
         let distance = sig1.hamming_distance(&sig2);
         assert!(distance < 10, "Similar vectors should have low hamming distance");
 
-        let estimated_sim = lsh.estimate_similarity(&sig1, &sig2);
+        let estimated_sim = sig1.similarity(&sig2);
         assert!(estimated_sim > 0.9, "Estimated similarity should be high");
     }
 

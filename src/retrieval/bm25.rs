@@ -116,14 +116,6 @@ impl Bm25Index {
         Ok(())
     }
 
-    /// Add multiple chunks
-    pub fn add_batch(&self, chunks: &[Chunk]) -> Result<()> {
-        for chunk in chunks {
-            self.add(chunk)?;
-        }
-        Ok(())
-    }
-
     /// Commit pending changes
     pub fn commit(&self) -> Result<()> {
         self.writer.lock().commit()?;
@@ -177,17 +169,6 @@ impl Bm25Index {
         Ok(())
     }
 
-    /// Delete all chunks for a document
-    pub fn delete_document(&self, document_id: &str) -> Result<()> {
-        let term = tantivy::Term::from_field_text(self.schema.document_id, document_id);
-        self.writer.lock().delete_term(term);
-        Ok(())
-    }
-
-    /// Get the number of documents in the index
-    pub fn num_docs(&self) -> u64 {
-        self.reader.searcher().num_docs()
-    }
 }
 
 #[cfg(test)]

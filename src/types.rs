@@ -18,9 +18,6 @@ pub type NodeId = String;
 /// Embedding vector type
 pub type Embedding = Vec<f32>;
 
-/// Quantized embedding (INT8)
-pub type QuantizedEmbedding = Vec<i8>;
-
 // ============================================================================
 // Content Identity Types
 // ============================================================================

@@ -21,10 +21,6 @@ pub enum NetworkMessage {
     QueryResponse(QueryResponse),
     /// Node advertisement (centroids, bloom filter)
     Advertisement(NodeAdvertisement),
-    /// Ping/keepalive
-    Ping,
-    /// Pong response
-    Pong,
 }
 
 /// Query request message

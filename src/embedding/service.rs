@@ -7,7 +7,6 @@
 //! for backward compatibility.
 
 use crate::config::Config;
-use crate::embedding::backend::{create_backend, create_backend_from_legacy, EmbeddingBackend};
 use crate::embedding::EmbeddingEngine;
 use crate::embedding::model::ModelRegistry;
 use anyhow::{Context, Result};
@@ -50,21 +49,6 @@ pub fn init_embedding_engine(config: &Config) -> Result<Arc<EmbeddingEngine>> {
     );
 
     Ok(Arc::new(engine))
-}
-
-/// Initialize embedding backend directly (without engine wrapper)
-///
-/// Use this when you need direct access to the backend trait.
-pub fn init_embedding_backend(config: &Config) -> Result<Arc<dyn EmbeddingBackend>> {
-    if let Some(ref backend_config) = config.embedding.resolve_backend() {
-        create_backend(backend_config)
-            .map_err(|e| anyhow::anyhow!("{}", e))
-            .context("Failed to create embedding backend")
-    } else {
-        create_backend_from_legacy(&config.embedding)
-            .map_err(|e| anyhow::anyhow!("{}", e))
-            .context("Failed to create embedding backend from legacy config")
-    }
 }
 
 /// Print embedding execution status

@@ -34,7 +34,6 @@ pub enum IngestItem {
 /// Write pipeline for batched indexing and periodic commits
 pub struct WritePipeline {
     ingest_tx: mpsc::Sender<IngestItem>,
-    batch_size: usize,
 }
 
 impl WritePipeline {
@@ -63,7 +62,6 @@ impl WritePipeline {
 
         Self {
             ingest_tx,
-            batch_size,
         }
     }
 
@@ -76,10 +74,6 @@ impl WritePipeline {
         Ok(())
     }
 
-    /// Get the configured batch size
-    pub fn batch_size(&self) -> usize {
-        self.batch_size
-    }
 }
 
 /// Background worker that processes the write queue
@@ -226,23 +220,6 @@ mod tests {
         let mut config = Config::default();
         config.node.data_dir = data_dir.to_path_buf();
         config
-    }
-
-    #[tokio::test]
-    async fn test_write_pipeline_creation() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(temp_dir.path());
-        let index_manager = Arc::new(IndexManager::load(&config).unwrap());
-
-        let (_shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        let pipeline = WritePipeline::start(
-            index_manager,
-            None,
-            100,
-            Duration::from_secs(60),
-            shutdown_rx,
-        );
-        assert_eq!(pipeline.batch_size(), 100);
     }
 
     #[tokio::test]

@@ -199,10 +199,6 @@ impl ErrorResponse {
         Self::new("INTERNAL_ERROR", message)
     }
 
-    pub fn bad_request(message: impl Into<String>) -> Self {
-        Self::new("BAD_REQUEST", message)
-    }
-
     pub fn unauthorized() -> Self {
         Self::new("UNAUTHORIZED", "Invalid or missing API key")
     }

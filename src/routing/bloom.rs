@@ -111,16 +111,6 @@ impl BloomFilter {
         })
     }
 
-    /// Get the size in bytes
-    pub fn size_bytes(&self) -> usize {
-        self.bits.len()
-    }
-
-    /// Get fill ratio (fraction of bits set)
-    pub fn fill_ratio(&self) -> f64 {
-        let set_bits: usize = self.bits.iter().map(|b| b.count_ones() as usize).sum();
-        set_bits as f64 / self.num_bits as f64
-    }
 }
 
 /// LSH Banded Bloom Filter for semantic routing
@@ -250,15 +240,6 @@ impl BandedBloomFilter {
         })
     }
 
-    /// Get size in bytes
-    pub fn size_bytes(&self) -> usize {
-        8 + self.bloom.size_bytes()
-    }
-
-    /// Get fill ratio
-    pub fn fill_ratio(&self) -> f64 {
-        self.bloom.fill_ratio()
-    }
 }
 
 #[cfg(test)]

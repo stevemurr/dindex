@@ -24,11 +24,6 @@ impl CentroidGenerator {
         }
     }
 
-    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
-        self.max_iterations = max_iterations;
-        self
-    }
-
     /// Generate centroids from embeddings using k-means++
     pub fn generate(&self, embeddings: &[Embedding]) -> Vec<NodeCentroid> {
         if embeddings.is_empty() {

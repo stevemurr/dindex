@@ -11,7 +11,7 @@ default = []
 local = ["dep:embed_anything"]
 cuda = ["local", "embed_anything/cuda"]
 metal = ["local", "embed_anything/metal"]
-onnx = ["dep:ort", "dep:tokenizers"]
+onnx = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 
 [dependencies]
 # P2P Networking
@@ -41,7 +41,7 @@ usearch = "2"
 
 # Embedding inference (optional - only needed for local backend)
 embed_anything = { git = "https://github.com/StarlightSearch/EmbedAnything", branch = "main", optional = true }
-ndarray = "0.17"
+ndarray = { version = "0.17", optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -67,9 +67,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 parking_lot = "0.12"
 dashmap = "6"
-bytes = "1"
 hex = "0.4"
-base64 = "0.22"
 tempfile = "3"
 directories = "5"
 sha2 = "0.10"

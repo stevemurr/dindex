@@ -233,49 +233,10 @@ impl ContentDeduplicator {
         self.local_cache.put(simhash.0, document_id);
     }
 
-    /// Get cache statistics
-    pub fn stats(&self) -> DedupStats {
-        DedupStats {
-            cached_hashes: self.local_cache.len(),
-            max_distance: self.max_distance,
-        }
-    }
-
     /// Clear the cache
     pub fn clear(&mut self) {
         self.local_cache.clear();
     }
-}
-
-/// Statistics from the deduplicator
-#[derive(Debug, Clone)]
-pub struct DedupStats {
-    pub cached_hashes: usize,
-    pub max_distance: u32,
-}
-
-/// SimHash query for DHT lookup
-#[derive(Debug, Clone)]
-pub struct SimHashQuery {
-    /// The SimHash to query
-    pub simhash: SimHash,
-    /// Maximum Hamming distance
-    pub max_distance: u32,
-    /// Requesting node
-    pub from_node: String,
-}
-
-/// SimHash registration for DHT storage
-#[derive(Debug, Clone)]
-pub struct SimHashRegistration {
-    /// The SimHash value
-    pub simhash: SimHash,
-    /// Document ID
-    pub document_id: DocumentId,
-    /// Source node
-    pub source_node: String,
-    /// Registration timestamp
-    pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 #[cfg(test)]

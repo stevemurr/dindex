@@ -278,13 +278,6 @@ impl UrlFrontier {
             .collect()
     }
 
-    /// Force flush all outbound batches
-    pub fn flush_all_batches(&mut self) -> Vec<UrlExchangeBatch> {
-        std::mem::take(&mut self.outbound_batches)
-            .into_values()
-            .collect()
-    }
-
     /// Receive URLs from another node
     pub fn receive_batch(&mut self, batch: UrlExchangeBatch) {
         for (hostname, scored_url) in batch.urls {
@@ -296,11 +289,6 @@ impl UrlFrontier {
     /// Get total number of pending URLs
     pub fn pending_count(&self) -> usize {
         self.domain_queues.values().map(|q| q.len()).sum()
-    }
-
-    /// Get number of seen URLs
-    pub fn seen_count(&self) -> usize {
-        self.seen_urls.len()
     }
 
     /// Get number of domains being crawled
@@ -318,12 +306,6 @@ impl UrlFrontier {
         for url in seeds {
             self.add_discovered_url(url, 0);
         }
-    }
-
-    /// Check if a URL has been seen
-    pub fn is_seen(&self, url: &Url) -> bool {
-        let normalized = Self::normalize_url(url);
-        self.seen_urls.contains(&Self::hash_url(&normalized))
     }
 
     /// Update domain assignment (when network topology changes)
