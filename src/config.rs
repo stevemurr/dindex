@@ -1,7 +1,8 @@
 //! Configuration for DIndex
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ============================================================================
 // Embedding Backend Configuration
@@ -115,6 +116,98 @@ impl Default for Config {
             dedup: DedupConfig::default(),
             daemon: DaemonConfig::default(),
             http: HttpConfig::default(),
+        }
+    }
+}
+
+impl Config {
+    /// Load configuration from a TOML file.
+    ///
+    /// After deserializing, this validates all fields and resolves embedding
+    /// model paths from the data directory so callers don't need to remember
+    /// to call `resolve_paths` themselves.
+    pub fn load(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read config file '{}': {}", path.display(), e))?;
+        let mut config: Config = toml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config file '{}': {}", path.display(), e))?;
+        config.validate()?;
+        config.embedding.resolve_paths(&config.node.data_dir);
+        Ok(config)
+    }
+
+    /// Validate all configuration fields.
+    ///
+    /// Collects all validation errors and reports them together so the user
+    /// can fix everything in one pass rather than playing whack-a-mole.
+    pub fn validate(&self) -> Result<()> {
+        let mut errors: Vec<String> = Vec::new();
+
+        // Embedding validation
+        if self.embedding.dimensions == 0 {
+            errors.push("embedding dimensions must be positive".to_string());
+        }
+        if self.embedding.dimensions > 4096 {
+            errors.push("embedding dimensions must be <= 4096".to_string());
+        }
+
+        // Chunking validation
+        if self.chunking.chunk_size == 0 {
+            errors.push("chunk_size must be positive".to_string());
+        }
+        if self.chunking.chunk_size > 8192 {
+            errors.push("chunk_size must be <= 8192".to_string());
+        }
+        if self.chunking.overlap_fraction >= 1.0 {
+            errors.push("overlap_fraction must be less than 1.0".to_string());
+        }
+
+        // Retrieval validation
+        if self.retrieval.rrf_k == 0 {
+            errors.push("rrf_k must be positive".to_string());
+        }
+        if self.retrieval.candidate_count == 0 {
+            errors.push("candidate_count must be positive".to_string());
+        }
+
+        // Index validation
+        if self.index.hnsw_ef_construction == 0 {
+            errors.push("ef_construction must be positive".to_string());
+        }
+        if self.index.hnsw_ef_search == 0 {
+            errors.push("ef_search must be positive".to_string());
+        }
+        if self.index.hnsw_m == 0 {
+            errors.push("HNSW M parameter must be positive".to_string());
+        }
+
+        // HTTP config validation
+        if self.http.enabled && !self.http.listen_addr.is_empty() {
+            // Extract port from listen_addr (format: "host:port")
+            if let Some(port_str) = self.http.listen_addr.rsplit(':').next() {
+                if let Ok(port) = port_str.parse::<u32>() {
+                    if port == 0 || port > 65535 {
+                        errors.push(format!(
+                            "HTTP listen port must be between 1 and 65535, got {}",
+                            port
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Node validation
+        if self.node.data_dir.as_os_str().is_empty() {
+            errors.push("data_dir must not be empty".to_string());
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "Configuration validation failed:\n  - {}",
+                errors.join("\n  - ")
+            );
         }
     }
 }
@@ -240,7 +333,10 @@ fn default_max_seq_length() -> usize {
 }
 
 fn default_num_threads() -> usize {
-    num_cpus::get().min(8)
+    std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4)
+        .min(8)
 }
 
 /// Default for use_gpu - true when cuda or metal feature is enabled
@@ -291,7 +387,10 @@ impl Default for EmbeddingConfig {
             truncated_dimensions: 384,
             max_sequence_length: 256,
             quantize_int8: false,
-            num_threads: num_cpus::get().min(8),
+            num_threads: std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(4)
+                .min(8),
             use_gpu: default_use_gpu(),
             gpu_device_id: 0,
         }
@@ -604,11 +703,3 @@ impl Default for HttpConfig {
     }
 }
 
-// Add num_cpus as a simple function since we're using it
-mod num_cpus {
-    pub fn get() -> usize {
-        std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(4)
-    }
-}

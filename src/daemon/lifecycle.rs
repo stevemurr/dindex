@@ -37,15 +37,12 @@ pub struct Daemon {
 
 impl Daemon {
     /// Start the daemon
-    pub async fn start(mut config: Config) -> Result<Self> {
+    pub async fn start(config: Config) -> Result<Self> {
         info!("Starting DIndex daemon");
 
         // Acquire single-instance lock
         let pid_file_path = config.node.data_dir.join(PID_FILE_NAME);
         Self::acquire_lock(&pid_file_path)?;
-
-        // Resolve model paths from data directory
-        config.embedding.resolve_paths(&config.node.data_dir);
 
         // Initialize embedding engine in a blocking task with timeout
         // This prevents blocking the async runtime during model loading
