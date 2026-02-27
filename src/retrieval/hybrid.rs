@@ -3,6 +3,7 @@
 use super::{
     bm25::Bm25Index,
     fusion::{reciprocal_rank_fusion, to_ranked_results, RankedResult, RetrievalMethod, RrfConfig},
+    reranker::SimpleReranker,
 };
 use crate::config::RetrievalConfig;
 use crate::embedding::EmbeddingEngine;
@@ -125,6 +126,12 @@ impl HybridRetriever {
                 result.matched_by = fused_result.contributing_methods.iter().map(|m| m.to_string()).collect();
                 results.push(result);
             }
+        }
+
+        // Apply reranking if enabled
+        if self.config.enable_reranking {
+            debug!("Reranking {} results", results.len());
+            SimpleReranker::rerank(&query.text, &mut results);
         }
 
         info!(

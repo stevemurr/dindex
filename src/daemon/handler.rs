@@ -17,6 +17,7 @@ use crate::types::Chunk;
 
 use super::index_manager::IndexManager;
 use super::jobs::JobManager;
+use super::metrics::{DaemonMetrics, Timer};
 use super::protocol::*;
 use super::write_pipeline::{IngestItem, WritePipeline};
 
@@ -31,6 +32,7 @@ pub struct RequestHandler {
     index_manager: Arc<IndexManager>,
     write_pipeline: Arc<WritePipeline>,
     job_manager: Arc<JobManager>,
+    metrics: Arc<DaemonMetrics>,
     start_time: Instant,
     shutdown_tx: broadcast::Sender<()>,
 
@@ -48,6 +50,7 @@ impl RequestHandler {
         write_pipeline: Arc<WritePipeline>,
         config: Config,
         shutdown_tx: broadcast::Sender<()>,
+        metrics: Arc<DaemonMetrics>,
     ) -> Self {
         let job_manager = Arc::new(JobManager::new(
             index_manager.clone(),
@@ -60,11 +63,17 @@ impl RequestHandler {
             index_manager,
             write_pipeline,
             job_manager,
+            metrics,
             start_time: Instant::now(),
             shutdown_tx,
             active_streams: DashMap::new(),
             query_coordinator: RwLock::new(None),
         }
+    }
+
+    /// Get a reference to the daemon metrics
+    pub fn metrics(&self) -> &Arc<DaemonMetrics> {
+        &self.metrics
     }
 
     /// Set the query coordinator for distributed search
@@ -109,6 +118,7 @@ impl RequestHandler {
             Request::Ping => Response::Pong,
             Request::Status => self.handle_status().await,
             Request::Stats => self.handle_stats().await,
+            Request::Metrics => self.handle_metrics().await,
             Request::ForceCommit => self.handle_force_commit().await,
             Request::Shutdown => self.handle_shutdown().await,
         }
@@ -122,10 +132,13 @@ impl RequestHandler {
         top_k: usize,
         filters: Option<crate::types::QueryFilters>,
     ) -> Response {
+        self.metrics.queries_total.inc();
+        let timer = Timer::start();
+
         // Check if we have a query coordinator for distributed search
         let coordinator = self.query_coordinator.read().clone();
 
-        if let Some(coordinator) = coordinator {
+        let response = if let Some(coordinator) = coordinator {
             // Distributed search via QueryCoordinator
             let mut query_obj = crate::types::Query::new(query, top_k);
             query_obj.filters = filters;
@@ -144,6 +157,7 @@ impl RequestHandler {
                 }
                 Err(e) => {
                     error!("Distributed search failed: {}", e);
+                    self.metrics.queries_failed.inc();
                     Response::error(ErrorCode::SearchFailed, e.to_string())
                 }
             }
@@ -156,10 +170,14 @@ impl RequestHandler {
                 },
                 Err(e) => {
                     error!("Search failed: {}", e);
+                    self.metrics.queries_failed.inc();
                     Response::error(ErrorCode::SearchFailed, e.to_string())
                 }
             }
-        }
+        };
+
+        timer.record(&self.metrics.query_latency);
+        response
     }
 
     // ============ Write Handlers ============
@@ -229,6 +247,7 @@ impl RequestHandler {
                 .await
             {
                 error!("Failed to ingest chunk: {}", e);
+                self.metrics.writes_failed.inc();
                 return Response::error(ErrorCode::IndexFailed, e.to_string());
             }
         }
@@ -244,25 +263,34 @@ impl RequestHandler {
             .await
         {
             error!("Failed to request commit: {}", e);
+            self.metrics.writes_failed.inc();
             return Response::error(ErrorCode::IndexFailed, e.to_string());
         }
 
         // Wait for commit to complete
         match rx.await {
-            Ok(Ok(())) => Response::JobComplete {
-                job_id: stream_id,
-                stats: JobStats {
-                    documents_processed: 1,
-                    chunks_indexed: chunk_count,
-                    duration_ms,
-                    errors: 0,
-                },
-            },
+            Ok(Ok(())) => {
+                self.metrics.chunks_indexed.add(chunk_count as u64);
+                self.metrics.documents_indexed.inc();
+                Response::JobComplete {
+                    job_id: stream_id,
+                    stats: JobStats {
+                        documents_processed: 1,
+                        chunks_indexed: chunk_count,
+                        duration_ms,
+                        errors: 0,
+                    },
+                }
+            }
             Ok(Err(e)) => {
                 error!("Commit failed: {}", e);
+                self.metrics.writes_failed.inc();
                 Response::error(ErrorCode::IndexFailed, e.to_string())
             }
-            Err(_) => Response::error(ErrorCode::InternalError, "Commit channel closed"),
+            Err(_) => {
+                self.metrics.writes_failed.inc();
+                Response::error(ErrorCode::InternalError, "Commit channel closed")
+            }
         }
     }
 
@@ -328,6 +356,12 @@ impl RequestHandler {
             active_jobs,
             pending_writes,
         })
+    }
+
+    async fn handle_metrics(&self) -> Response {
+        self.metrics.update_memory_usage();
+        let snapshot = self.metrics.snapshot();
+        Response::Metrics { snapshot }
     }
 
     async fn handle_stats(&self) -> Response {
@@ -405,7 +439,8 @@ mod tests {
             shutdown_rx,
         ));
 
-        let handler = RequestHandler::new(index_manager, write_pipeline, config, shutdown_tx);
+        let metrics = DaemonMetrics::shared();
+        let handler = RequestHandler::new(index_manager, write_pipeline, config, shutdown_tx, metrics);
         (handler, temp_dir)
     }
 

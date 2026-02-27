@@ -19,6 +19,8 @@ use crate::embedding::EmbeddingEngine;
 use super::handler::RequestHandler;
 use super::http::HttpServer;
 use super::index_manager::IndexManager;
+use super::metrics::DaemonMetrics;
+use super::recovery::{RecoveryManager, RecoveryResult};
 use super::server::IpcServer;
 use super::write_pipeline::WritePipeline;
 
@@ -64,6 +66,17 @@ impl Daemon {
             }
         };
 
+        // Run crash recovery before loading indices
+        let data_dir = &config.node.data_dir;
+        let mut recovery = RecoveryManager::new(data_dir.to_path_buf())?;
+        match recovery.recover()? {
+            RecoveryResult::NoRecoveryNeeded => info!("Clean shutdown detected, no recovery needed"),
+            RecoveryResult::RolledBackWrite { stream_id, chunks } => {
+                warn!("Recovered from interrupted write: rolled back stream {} ({} chunks)", stream_id, chunks);
+            }
+            RecoveryResult::CompletedCommit => info!("Completed interrupted commit during recovery"),
+        }
+
         // Initialize index manager
         let index_manager = Arc::new(
             IndexManager::load(&config).context("Failed to load index manager")?,
@@ -86,12 +99,16 @@ impl Daemon {
             shutdown_rx,
         ));
 
+        // Create daemon metrics
+        let metrics = DaemonMetrics::shared();
+
         // Create request handler
         let handler = Arc::new(RequestHandler::new(
             index_manager.clone(),
             write_pipeline.clone(),
             config.clone(),
             shutdown_tx.clone(),
+            metrics,
         ));
 
         // Create IPC server

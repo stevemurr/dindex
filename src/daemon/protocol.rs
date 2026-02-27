@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::types::{Chunk, ChunkMetadata, QueryFilters, SearchResult};
+use super::metrics::MetricsSnapshot;
 
 /// Output format for search results
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -138,6 +139,9 @@ pub enum Request {
     /// Get index statistics
     Stats,
 
+    /// Get daemon metrics snapshot
+    Metrics,
+
     /// Force a commit of pending writes
     ForceCommit,
 
@@ -238,6 +242,9 @@ pub enum Response {
 
     /// Index statistics
     Stats(IndexStats),
+
+    /// Daemon metrics snapshot
+    Metrics { snapshot: MetricsSnapshot },
 
     // ============ Generic Responses ============
     /// Operation succeeded
