@@ -12,14 +12,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
+/// Bidirectional mapping between internal keys and chunk IDs,
+/// protected by a single lock to ensure consistency.
+struct IndexMappings {
+    key_to_chunk: HashMap<u64, ChunkId>,
+    chunk_to_key: HashMap<ChunkId, u64>,
+}
+
 /// Vector index for storing and querying embeddings
 pub struct VectorIndex {
     /// USearch index
     index: Index,
-    /// Mapping from internal key to chunk ID (in-memory for fast lookup)
-    key_to_chunk: RwLock<HashMap<u64, ChunkId>>,
-    /// Mapping from chunk ID to internal key (in-memory for fast lookup)
-    chunk_to_key: RwLock<HashMap<ChunkId, u64>>,
+    /// Bidirectional mappings under a single lock for consistency
+    mappings: RwLock<IndexMappings>,
     /// Next available key
     next_key: AtomicU64,
     /// Sled database for persistent mappings
@@ -65,8 +70,10 @@ impl VectorIndex {
 
         Ok(Self {
             index,
-            key_to_chunk: RwLock::new(HashMap::new()),
-            chunk_to_key: RwLock::new(HashMap::new()),
+            mappings: RwLock::new(IndexMappings {
+                key_to_chunk: HashMap::new(),
+                chunk_to_key: HashMap::new(),
+            }),
             next_key: AtomicU64::new(0),
             mappings_db: None, // Will be set on first save/load
             config: config.clone(),
@@ -185,8 +192,10 @@ impl VectorIndex {
 
         Ok(Self {
             index,
-            key_to_chunk: RwLock::new(key_to_chunk),
-            chunk_to_key: RwLock::new(chunk_to_key),
+            mappings: RwLock::new(IndexMappings {
+                key_to_chunk,
+                chunk_to_key,
+            }),
             next_key: AtomicU64::new(next_key),
             mappings_db,
             config: config.clone(),
@@ -211,8 +220,8 @@ impl VectorIndex {
         };
 
         // Write all mappings (in case of new index or changes)
-        let key_to_chunk = self.key_to_chunk.read();
-        for (key, chunk_id) in key_to_chunk.iter() {
+        let mappings = self.mappings.read();
+        for (key, chunk_id) in mappings.key_to_chunk.iter() {
             db.insert(&key.to_le_bytes(), chunk_id.as_bytes())?;
         }
 
@@ -222,7 +231,7 @@ impl VectorIndex {
 
         db.flush().context("Failed to flush mappings database")?;
 
-        info!("Saved {} mappings to sled", key_to_chunk.len());
+        info!("Saved {} mappings to sled", mappings.key_to_chunk.len());
         Ok(())
     }
 
@@ -241,8 +250,11 @@ impl VectorIndex {
             .add(key, embedding)
             .context("Failed to add to index")?;
 
-        self.key_to_chunk.write().insert(key, chunk_id.clone());
-        self.chunk_to_key.write().insert(chunk_id.clone(), key);
+        {
+            let mut mappings = self.mappings.write();
+            mappings.key_to_chunk.insert(key, chunk_id.clone());
+            mappings.chunk_to_key.insert(chunk_id.clone(), key);
+        }
 
         debug!("Added chunk {} with key {}", chunk_id, key);
         Ok(key)
@@ -259,13 +271,13 @@ impl VectorIndex {
 
         let results = self.index.search(query, k).context("Search failed")?;
 
-        let key_to_chunk = self.key_to_chunk.read();
+        let mappings = self.mappings.read();
         let search_results: Vec<VectorSearchResult> = results
             .keys
             .iter()
             .zip(results.distances.iter())
             .filter_map(|(&key, &distance)| {
-                key_to_chunk.get(&key).map(|chunk_id| VectorSearchResult {
+                mappings.key_to_chunk.get(&key).map(|chunk_id| VectorSearchResult {
                     chunk_id: chunk_id.clone(),
                     key,
                     distance,
@@ -280,12 +292,16 @@ impl VectorIndex {
 
     /// Remove an embedding by chunk ID
     pub fn remove(&self, chunk_id: &ChunkId) -> Result<bool> {
-        let key = match self.chunk_to_key.write().remove(chunk_id) {
-            Some(key) => key,
-            None => return Ok(false),
+        let key = {
+            let mut mappings = self.mappings.write();
+            let key = match mappings.chunk_to_key.remove(chunk_id) {
+                Some(key) => key,
+                None => return Ok(false),
+            };
+            mappings.key_to_chunk.remove(&key);
+            key
         };
 
-        self.key_to_chunk.write().remove(&key);
         self.index.remove(key).context("Failed to remove from index")?;
 
         debug!("Removed chunk {} with key {}", chunk_id, key);
@@ -294,7 +310,7 @@ impl VectorIndex {
 
     /// Check if a chunk exists in the index
     pub fn contains(&self, chunk_id: &ChunkId) -> bool {
-        self.chunk_to_key.read().contains_key(chunk_id)
+        self.mappings.read().chunk_to_key.contains_key(chunk_id)
     }
 
     /// Get the number of items in the index
@@ -314,12 +330,12 @@ impl VectorIndex {
 
     /// Get the key for a chunk ID
     pub fn get_key(&self, chunk_id: &ChunkId) -> Option<u64> {
-        self.chunk_to_key.read().get(chunk_id).copied()
+        self.mappings.read().chunk_to_key.get(chunk_id).copied()
     }
 
     /// Get the chunk ID for a key
     pub fn get_chunk_id(&self, key: u64) -> Option<ChunkId> {
-        self.key_to_chunk.read().get(&key).cloned()
+        self.mappings.read().key_to_chunk.get(&key).cloned()
     }
 }
 

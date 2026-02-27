@@ -192,15 +192,15 @@ impl DocumentIdentity {
     }
 }
 
-/// LSH signature for fast similarity estimation
+/// LSH signature for fast similarity estimation (fixed 128-bit)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct LshSignature {
-    pub bits: Vec<u64>,
+    pub bits: [u64; 2],
     pub num_bits: usize,
 }
 
 impl LshSignature {
-    pub fn new(bits: Vec<u64>, num_bits: usize) -> Self {
+    pub fn new(bits: [u64; 2], num_bits: usize) -> Self {
         Self { bits, num_bits }
     }
 

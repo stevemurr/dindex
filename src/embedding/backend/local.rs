@@ -130,28 +130,19 @@ impl EmbeddingBackend for LocalBackend {
         let batch_size = texts.len().min(32);
         let dimensions = self.config.dimensions;
 
-        // Run the embedding operation
-        // We need to handle both cases: called from async context (daemon) or sync context (CLI)
-        let results = if tokio::runtime::Handle::try_current().is_ok() {
-            // We're in a tokio runtime - use spawn_blocking to run in a separate thread pool
-            // This avoids any potential issues with blocking the async runtime
-            std::thread::scope(|s| {
-                s.spawn(|| {
-                    let text_refs: Vec<&str> = texts_owned.iter().map(|s| s.as_str()).collect();
-                    futures::executor::block_on(async {
-                        embedder.embed(&text_refs, Some(batch_size), None).await
-                    })
+        // Run the embedding operation on a scoped thread to avoid blocking
+        // any async runtime. The EmbeddingBackend trait is synchronous by design,
+        // so this is always safe regardless of calling context.
+        let results = std::thread::scope(|s| {
+            s.spawn(|| {
+                let text_refs: Vec<&str> = texts_owned.iter().map(|s| s.as_str()).collect();
+                futures::executor::block_on(async {
+                    embedder.embed(&text_refs, Some(batch_size), None).await
                 })
-                .join()
-                .expect("Embedding thread panicked")
             })
-        } else {
-            // Not in a tokio runtime - use futures executor directly
-            let text_refs: Vec<&str> = texts_owned.iter().map(|s| s.as_str()).collect();
-            futures::executor::block_on(async {
-                embedder.embed(&text_refs, Some(batch_size), None).await
-            })
-        }
+            .join()
+        })
+        .map_err(|_| EmbeddingError::EmbeddingFailed("Embedding thread panicked".to_string()))?
         .map_err(|e| EmbeddingError::EmbeddingFailed(format!("Embedding failed: {}", e)))?;
 
         // Convert EmbeddingResult to Vec<f32> and normalize

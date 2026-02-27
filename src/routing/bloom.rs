@@ -276,7 +276,7 @@ mod tests {
         let mut bbf = BandedBloomFilter::new(100, 128, 8, 0.01);
 
         // Create a test signature (2 x u64 = 128 bits)
-        let sig1 = vec![0x1234567890ABCDEFu64, 0xFEDCBA0987654321u64];
+        let sig1 = [0x1234567890ABCDEFu64, 0xFEDCBA0987654321u64];
 
         bbf.insert(&sig1, 128);
 
@@ -290,12 +290,12 @@ mod tests {
         let mut bbf = BandedBloomFilter::new(100, 128, 8, 0.01);
 
         // Create original signature
-        let sig1 = vec![0x1234567890ABCDEFu64, 0xFEDCBA0987654321u64];
+        let sig1 = [0x1234567890ABCDEFu64, 0xFEDCBA0987654321u64];
         bbf.insert(&sig1, 128);
 
         // Create similar signature (flip a few bits - simulates similar vectors)
         // Flip bits 0, 64, 65 (affects 2 bands)
-        let sig2 = vec![0x1234567890ABCDEEu64, 0xFEDCBA0987654320u64];
+        let sig2 = [0x1234567890ABCDEEu64, 0xFEDCBA0987654320u64];
 
         // Should still match (most bands unchanged)
         assert!(bbf.might_contain_similar(&sig2, 128));
@@ -308,11 +308,11 @@ mod tests {
         let mut bbf = BandedBloomFilter::new(10, 128, 8, 0.01);
 
         // Only insert one signature
-        let sig1 = vec![0x1234567890ABCDEFu64, 0xFEDCBA0987654321u64];
+        let sig1 = [0x1234567890ABCDEFu64, 0xFEDCBA0987654321u64];
         bbf.insert(&sig1, 128);
 
         // Completely different signature
-        let sig2 = vec![0x0000000000000000u64, 0x0000000000000000u64];
+        let sig2 = [0x0000000000000000u64, 0x0000000000000000u64];
 
         // Should have very few matching bands (only false positives)
         let matches = bbf.count_matching_bands(&sig2, 128);
@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn test_banded_bloom_filter_serialization() {
         let mut bbf = BandedBloomFilter::new(100, 128, 8, 0.01);
-        let sig = vec![0x1234567890ABCDEFu64, 0xFEDCBA0987654321u64];
+        let sig = [0x1234567890ABCDEFu64, 0xFEDCBA0987654321u64];
         bbf.insert(&sig, 128);
 
         let bytes = bbf.to_bytes();

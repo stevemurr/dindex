@@ -40,9 +40,9 @@ impl LshIndex {
     /// Compute LSH signature for an embedding
     pub fn hash(&self, embedding: &Embedding) -> LshSignature {
         assert_eq!(embedding.len(), self.dimensions);
+        assert!(self.num_bits <= 128, "LSH signature supports at most 128 bits");
 
-        let num_u64s = (self.num_bits + 63) / 64;
-        let mut bits = vec![0u64; num_u64s];
+        let mut bits = [0u64; 2];
 
         for (i, hyperplane) in self.hyperplanes.iter().enumerate() {
             // Compute dot product with hyperplane
