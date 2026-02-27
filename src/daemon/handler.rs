@@ -81,6 +81,14 @@ impl RequestHandler {
         *self.query_coordinator.write() = Some(coordinator);
     }
 
+    /// Subscribe to SSE events for a scrape job
+    pub fn subscribe_job_events(
+        &self,
+        job_id: uuid::Uuid,
+    ) -> Option<broadcast::Receiver<super::scrape_events::ScrapeEvent>> {
+        self.job_manager.subscribe_events(job_id)
+    }
+
     /// Handle an incoming request and return a response
     pub async fn handle(&self, request: Request) -> Response {
         debug!("Handling request: {:?}", std::mem::discriminant(&request));

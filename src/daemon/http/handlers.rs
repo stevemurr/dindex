@@ -5,11 +5,17 @@
 use axum::{
     extract::State,
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
     Json,
 };
+use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as _;
 use tracing::{debug, error};
 use uuid::Uuid;
 
@@ -618,4 +624,61 @@ pub async fn cancel_job(
         )
             .into_response(),
     }
+}
+
+// ============ SSE Event Stream ============
+
+/// SSE endpoint for real-time scrape job events
+pub async fn job_events_sse(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> impl IntoResponse {
+    let uuid = match uuid::Uuid::parse_str(&job_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "INVALID_JOB_ID".to_string(),
+                    "Invalid job ID format".to_string(),
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let rx = match state.handler.subscribe_job_events(uuid) {
+        Some(rx) => rx,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new(
+                    "JOB_NOT_FOUND".to_string(),
+                    format!("Job {} not found or not a scrape job", job_id),
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+        Ok(event) => {
+            let event_name = event.event_name().to_string();
+            match serde_json::to_string(&event) {
+                Ok(json) => Some(Ok::<_, Infallible>(
+                    Event::default().event(event_name).data(json),
+                )),
+                Err(_) => None,
+            }
+        }
+        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => Some(Ok(
+            Event::default()
+                .event("lagged")
+                .data(format!(r#"{{"missed":{}}}"#, n)),
+        )),
+    });
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default().interval(Duration::from_secs(15)))
+        .into_response()
 }

@@ -57,6 +57,7 @@ pub mod lifecycle;
 pub mod metrics;
 pub mod protocol;
 pub mod recovery;
+pub mod scrape_events;
 pub mod server;
 pub mod write_pipeline;
 

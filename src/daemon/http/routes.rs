@@ -28,6 +28,7 @@ pub fn create_router(app_state: AppState, auth_state: AuthState) -> Router {
         // Scrape routes
         .route("/scrape", post(handlers::start_scrape))
         .route("/jobs/:job_id", get(handlers::get_job_progress))
+        .route("/jobs/:job_id/events", get(handlers::job_events_sse))
         .route("/jobs/:job_id/cancel", post(handlers::cancel_job))
         .layer(middleware::from_fn_with_state(
             auth_state.clone(),
