@@ -16,6 +16,7 @@ services:
       - ~/.cache:/root/.cache
     environment:
       - HF_TOKEN=${HF_TOKEN}
+      - HF_HUB_OFFLINE=1
     ipc: host
     restart: unless-stopped
     healthcheck:
