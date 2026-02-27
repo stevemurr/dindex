@@ -26,7 +26,7 @@ use dindex::{
         politeness::PolitenessConfig,
     },
     types::{Document, DocumentIdentity, Query},
-    util::truncate_str,
+    util::{truncate_for_display, truncate_str},
 };
 use std::fs::File;
 use std::path::PathBuf;
@@ -979,7 +979,7 @@ fn output_search_results(results: &[dindex::types::SearchResult], format: &str) 
                 if let Some(title) = &result.chunk.metadata.source_title {
                     println!("   Title: {}", title);
                 }
-                println!("   Content: {}...", truncate_content(&result.chunk.content, 200));
+                println!("   Content: {}...", truncate_for_display(&result.chunk.content, 200));
                 println!("   Matched by: {:?}", result.matched_by);
                 println!();
             }
@@ -1031,7 +1031,7 @@ async fn download_model(mut config: Config, model: String) -> Result<()> {
     info!("Downloading model: {}", model);
 
     // Validate model name
-    if ModelRegistry::get(&model).is_none() {
+    if !ModelRegistry::is_valid(&model) {
         println!("Unknown model: {}", model);
         println!("\nAvailable models:");
         for name in ModelRegistry::list() {
@@ -1060,7 +1060,7 @@ async fn check_model(mut config: Config, model: String, download_if_missing: boo
     use dindex::embedding::model::{check_model_cached_detailed, format_size, get_cached_model_size, ModelRegistry};
 
     // Validate model name
-    if ModelRegistry::get(&model).is_none() {
+    if !ModelRegistry::is_valid(&model) {
         println!("Unknown model: {}", model);
         println!("\nAvailable models:");
         for name in ModelRegistry::list() {
@@ -1238,20 +1238,6 @@ candidate_nodes = {}
     println!("Created data directory: {}", data_dir.display());
 
     Ok(())
-}
-
-fn truncate_content(s: &str, max_len: usize) -> String {
-    let s = s.replace('\n', " ");
-    if s.len() > max_len {
-        // Find a valid char boundary at or before max_len
-        let mut end = max_len;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        s[..end].to_string()
-    } else {
-        s
-    }
 }
 
 async fn scrape_urls(
@@ -1442,7 +1428,7 @@ async fn scrape_urls(
                         "[{}/{}] {} - {} words, {} links found",
                         pages_scraped,
                         max_pages,
-                        truncate_content(result.url.as_str(), 60),
+                        truncate_for_display(result.url.as_str(), 60),
                         word_count,
                         urls_found
                     );
@@ -1488,7 +1474,7 @@ async fn scrape_urls(
                                     embedding_errors += 1;
                                     tracing::warn!(
                                         "Embedding failed for {} ({} chunks): {}",
-                                        truncate_content(result.url.as_str(), 40),
+                                        truncate_for_display(result.url.as_str(), 40),
                                         num_chunks,
                                         e
                                     );

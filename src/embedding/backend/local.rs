@@ -73,38 +73,32 @@ impl LocalBackend {
 
     /// Resolve model name to HuggingFace model ID
     fn resolve_model_id(model_name: &str) -> EmbeddingResult<String> {
-        match model_name {
-            // Sentence transformers (default, fast)
-            "all-MiniLM-L6-v2" => Ok("sentence-transformers/all-MiniLM-L6-v2".to_string()),
-            "all-MiniLM-L12-v2" => Ok("sentence-transformers/all-MiniLM-L12-v2".to_string()),
+        use crate::embedding::ModelRegistry;
 
-            // BGE models (English, BertModel architecture)
-            "bge-base-en-v1.5" => Ok("BAAI/bge-base-en-v1.5".to_string()),
-            "bge-large-en-v1.5" => Ok("BAAI/bge-large-en-v1.5".to_string()),
-            "bge-small-en-v1.5" => Ok("BAAI/bge-small-en-v1.5".to_string()),
+        // Direct HuggingFace model IDs pass through
+        if model_name.contains('/') {
+            return Ok(model_name.to_string());
+        }
 
-            // E5 models
-            "e5-small-v2" => Ok("intfloat/e5-small-v2".to_string()),
-            "e5-base-v2" => Ok("intfloat/e5-base-v2".to_string()),
-            "e5-large-v2" => Ok("intfloat/e5-large-v2".to_string()),
-
-            // Note: bge-m3 uses XLMRobertaModel which is not supported by embed_anything
-            "bge-m3" => Err(EmbeddingError::Config(
+        // bge-m3 uses XLMRobertaModel which is not supported by embed_anything
+        if model_name == "bge-m3" {
+            return Err(EmbeddingError::Config(
                 "bge-m3 is not supported (uses XLMRobertaModel architecture). \
                  Use bge-base-en-v1.5 or all-MiniLM-L6-v2 instead."
                     .to_string(),
-            )),
-
-            // Allow direct HuggingFace model IDs (must use BertModel architecture)
-            name if name.contains('/') => Ok(name.to_string()),
-
-            _ => Err(EmbeddingError::Config(format!(
-                "Unknown model: {}. Supported models: all-MiniLM-L6-v2, bge-base-en-v1.5, \
-                 bge-large-en-v1.5, e5-base-v2, e5-large-v2, or a HuggingFace model ID \
-                 with BertModel architecture",
-                model_name
-            ))),
+            ));
         }
+
+        ModelRegistry::get(model_name)
+            .map(|info| info.huggingface_id.to_string())
+            .ok_or_else(|| {
+                EmbeddingError::Config(format!(
+                    "Unknown model: {}. Supported models: all-MiniLM-L6-v2, bge-base-en-v1.5, \
+                     bge-large-en-v1.5, e5-base-v2, e5-large-v2, or a HuggingFace model ID \
+                     with BertModel architecture",
+                    model_name
+                ))
+            })
     }
 }
 

@@ -100,7 +100,7 @@ pub fn check_model_exists(config: &Config) -> Result<bool> {
     // With embed_anything, models are downloaded on demand
     // We just check if the model is in our registry or looks like a valid HF ID
     let model_name = &config.embedding.model_name;
-    Ok(ModelRegistry::get(model_name).is_some())
+    Ok(ModelRegistry::is_valid(model_name))
 }
 
 /// Print a helpful error message if model is not found

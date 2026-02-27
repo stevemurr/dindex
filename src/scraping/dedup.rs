@@ -121,35 +121,7 @@ impl SimHash {
 
     /// Compute SimHash from feature hashes
     fn compute_from_features(features: &[String]) -> u64 {
-        if features.is_empty() {
-            return 0;
-        }
-
-        // Initialize 64-bit vector of counts
-        let mut v: [i32; 64] = [0; 64];
-
-        // For each feature, hash it and update counts
-        for feature in features {
-            let feature_hash = xxhash_rust::xxh3::xxh3_64(feature.as_bytes());
-
-            for i in 0..64 {
-                if (feature_hash >> i) & 1 == 1 {
-                    v[i] += 1;
-                } else {
-                    v[i] -= 1;
-                }
-            }
-        }
-
-        // Convert to final hash
-        let mut result: u64 = 0;
-        for (i, &count) in v.iter().enumerate() {
-            if count > 0 {
-                result |= 1 << i;
-            }
-        }
-
-        result
+        crate::util::compute_simhash(features.iter().map(|s| s.as_str()))
     }
 
     /// Calculate Hamming distance between two SimHashes

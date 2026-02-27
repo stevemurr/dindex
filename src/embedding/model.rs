@@ -10,9 +10,9 @@ pub struct ModelRegistry;
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     /// Short model name
-    pub name: String,
+    pub name: &'static str,
     /// HuggingFace model ID
-    pub huggingface_id: String,
+    pub huggingface_id: &'static str,
     /// Embedding dimensions
     pub dimensions: usize,
     /// Maximum sequence length in tokens
@@ -21,111 +21,109 @@ pub struct ModelInfo {
     pub supports_matryoshka: bool,
 }
 
+/// All known models as a static data table
+const MODELS: &[ModelInfo] = &[
+    // BGE models - English optimized
+    ModelInfo {
+        name: "bge-large-en-v1.5",
+        huggingface_id: "BAAI/bge-large-en-v1.5",
+        dimensions: 1024,
+        max_sequence_length: 512,
+        supports_matryoshka: false,
+    },
+    ModelInfo {
+        name: "bge-base-en-v1.5",
+        huggingface_id: "BAAI/bge-base-en-v1.5",
+        dimensions: 768,
+        max_sequence_length: 512,
+        supports_matryoshka: false,
+    },
+    ModelInfo {
+        name: "bge-small-en-v1.5",
+        huggingface_id: "BAAI/bge-small-en-v1.5",
+        dimensions: 384,
+        max_sequence_length: 512,
+        supports_matryoshka: false,
+    },
+    // E5 models
+    ModelInfo {
+        name: "e5-large-v2",
+        huggingface_id: "intfloat/e5-large-v2",
+        dimensions: 1024,
+        max_sequence_length: 512,
+        supports_matryoshka: false,
+    },
+    ModelInfo {
+        name: "e5-base-v2",
+        huggingface_id: "intfloat/e5-base-v2",
+        dimensions: 768,
+        max_sequence_length: 512,
+        supports_matryoshka: false,
+    },
+    ModelInfo {
+        name: "e5-small-v2",
+        huggingface_id: "intfloat/e5-small-v2",
+        dimensions: 384,
+        max_sequence_length: 512,
+        supports_matryoshka: false,
+    },
+    // Sentence Transformers
+    ModelInfo {
+        name: "all-MiniLM-L6-v2",
+        huggingface_id: "sentence-transformers/all-MiniLM-L6-v2",
+        dimensions: 384,
+        max_sequence_length: 256,
+        supports_matryoshka: false,
+    },
+    ModelInfo {
+        name: "all-MiniLM-L12-v2",
+        huggingface_id: "sentence-transformers/all-MiniLM-L12-v2",
+        dimensions: 384,
+        max_sequence_length: 256,
+        supports_matryoshka: false,
+    },
+    // Jina models
+    ModelInfo {
+        name: "jina-embeddings-v2-small-en",
+        huggingface_id: "jinaai/jina-embeddings-v2-small-en",
+        dimensions: 512,
+        max_sequence_length: 8192,
+        supports_matryoshka: false,
+    },
+    ModelInfo {
+        name: "jina-embeddings-v2-base-en",
+        huggingface_id: "jinaai/jina-embeddings-v2-base-en",
+        dimensions: 768,
+        max_sequence_length: 8192,
+        supports_matryoshka: false,
+    },
+    // Legacy nomic model
+    ModelInfo {
+        name: "nomic-embed-text-v1.5",
+        huggingface_id: "nomic-ai/nomic-embed-text-v1.5",
+        dimensions: 768,
+        max_sequence_length: 8192,
+        supports_matryoshka: true,
+    },
+];
+
 impl ModelRegistry {
-    /// Get info for a known model
-    pub fn get(model_name: &str) -> Option<ModelInfo> {
-        match model_name {
-            // BGE-M3 - NOTE: Currently unsupported (uses XLMRobertaModel architecture)
-            // "bge-m3" => unsupported - use bge-base-en-v1.5 instead
-            // BGE models - English optimized
-            "bge-large-en-v1.5" => Some(ModelInfo {
-                name: "bge-large-en-v1.5".to_string(),
-                huggingface_id: "BAAI/bge-large-en-v1.5".to_string(),
-                dimensions: 1024,
-                max_sequence_length: 512,
-                supports_matryoshka: false,
-            }),
-            "bge-base-en-v1.5" => Some(ModelInfo {
-                name: "bge-base-en-v1.5".to_string(),
-                huggingface_id: "BAAI/bge-base-en-v1.5".to_string(),
-                dimensions: 768,
-                max_sequence_length: 512,
-                supports_matryoshka: false,
-            }),
-            "bge-small-en-v1.5" => Some(ModelInfo {
-                name: "bge-small-en-v1.5".to_string(),
-                huggingface_id: "BAAI/bge-small-en-v1.5".to_string(),
-                dimensions: 384,
-                max_sequence_length: 512,
-                supports_matryoshka: false,
-            }),
-            // E5 models
-            "e5-large-v2" => Some(ModelInfo {
-                name: "e5-large-v2".to_string(),
-                huggingface_id: "intfloat/e5-large-v2".to_string(),
-                dimensions: 1024,
-                max_sequence_length: 512,
-                supports_matryoshka: false,
-            }),
-            "e5-base-v2" => Some(ModelInfo {
-                name: "e5-base-v2".to_string(),
-                huggingface_id: "intfloat/e5-base-v2".to_string(),
-                dimensions: 768,
-                max_sequence_length: 512,
-                supports_matryoshka: false,
-            }),
-            "e5-small-v2" => Some(ModelInfo {
-                name: "e5-small-v2".to_string(),
-                huggingface_id: "intfloat/e5-small-v2".to_string(),
-                dimensions: 384,
-                max_sequence_length: 512,
-                supports_matryoshka: false,
-            }),
-            // Sentence Transformers
-            "all-MiniLM-L6-v2" => Some(ModelInfo {
-                name: "all-MiniLM-L6-v2".to_string(),
-                huggingface_id: "sentence-transformers/all-MiniLM-L6-v2".to_string(),
-                dimensions: 384,
-                max_sequence_length: 256,
-                supports_matryoshka: false,
-            }),
-            "all-MiniLM-L12-v2" => Some(ModelInfo {
-                name: "all-MiniLM-L12-v2".to_string(),
-                huggingface_id: "sentence-transformers/all-MiniLM-L12-v2".to_string(),
-                dimensions: 384,
-                max_sequence_length: 256,
-                supports_matryoshka: false,
-            }),
-            // Jina models
-            "jina-embeddings-v2-small-en" => Some(ModelInfo {
-                name: "jina-embeddings-v2-small-en".to_string(),
-                huggingface_id: "jinaai/jina-embeddings-v2-small-en".to_string(),
-                dimensions: 512,
-                max_sequence_length: 8192,
-                supports_matryoshka: false,
-            }),
-            "jina-embeddings-v2-base-en" => Some(ModelInfo {
-                name: "jina-embeddings-v2-base-en".to_string(),
-                huggingface_id: "jinaai/jina-embeddings-v2-base-en".to_string(),
-                dimensions: 768,
-                max_sequence_length: 8192,
-                supports_matryoshka: false,
-            }),
-            // Legacy nomic model
-            "nomic-embed-text-v1.5" => Some(ModelInfo {
-                name: "nomic-embed-text-v1.5".to_string(),
-                huggingface_id: "nomic-ai/nomic-embed-text-v1.5".to_string(),
-                dimensions: 768,
-                max_sequence_length: 8192,
-                supports_matryoshka: true,
-            }),
-            // Allow direct HuggingFace IDs
-            name if name.contains('/') => {
-                // Return a generic info for direct HF IDs
-                // The actual dimensions will be determined at runtime
-                Some(ModelInfo {
-                    name: "custom".to_string(),
-                    huggingface_id: name.to_string(),
-                    dimensions: 768, // Default, will be overridden
-                    max_sequence_length: 512,
-                    supports_matryoshka: false,
-                })
-            }
-            _ => None,
-        }
+    /// Get info for a known model by short name
+    pub fn get(model_name: &str) -> Option<&'static ModelInfo> {
+        MODELS.iter().find(|m| m.name == model_name)
+    }
+
+    /// Check if a model name is valid (either a known model or a direct HuggingFace ID)
+    pub fn is_valid(model_name: &str) -> bool {
+        Self::get(model_name).is_some() || model_name.contains('/')
     }
 
     /// List all known models
+    pub fn list_models() -> &'static [ModelInfo] {
+        MODELS
+    }
+
+    /// List all known model names (for backward compatibility)
     pub fn list() -> Vec<&'static str> {
         vec![
             "all-MiniLM-L6-v2",  // Default - fast and reliable
@@ -140,7 +138,6 @@ impl ModelRegistry {
             // Note: jina models may have compatibility issues
         ]
     }
-
 }
 
 /// Check if a model is cached in HuggingFace hub
@@ -161,7 +158,7 @@ pub fn check_model_cached(model_name: &str) -> Option<std::path::PathBuf> {
 /// Returns (cache_path, is_complete)
 pub fn check_model_cached_detailed(model_name: &str) -> Option<(std::path::PathBuf, bool)> {
     let model_info = ModelRegistry::get(model_name)?;
-    let hf_id = &model_info.huggingface_id;
+    let hf_id = model_info.huggingface_id;
 
     // HuggingFace cache structure: ~/.cache/huggingface/hub/models--{org}--{model}
     let home = std::env::var("HOME").ok()?;

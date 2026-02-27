@@ -212,12 +212,7 @@ fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
 
 /// Normalize vector in place
 fn normalize_in_place(v: &mut [f32]) {
-    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for val in v.iter_mut() {
-            *val /= norm;
-        }
-    }
+    crate::util::normalize_in_place(v);
 }
 
 #[cfg(test)]

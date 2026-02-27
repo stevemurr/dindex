@@ -99,12 +99,7 @@ impl EmbeddingEngine {
 
 /// Normalize an embedding vector to unit length
 pub fn normalize_embedding(embedding: &Embedding) -> Embedding {
-    let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        embedding.iter().map(|x| x / norm).collect()
-    } else {
-        embedding.clone()
-    }
+    crate::util::normalize_embedding(embedding)
 }
 
 /// Compute cosine similarity between two embeddings
