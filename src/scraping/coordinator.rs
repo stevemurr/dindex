@@ -472,10 +472,11 @@ impl ScrapingCoordinator {
     pub async fn get_next_url(&self) -> Option<ScoredUrl> {
         let politeness = self.politeness.read().await;
         let ready_domains: HashSet<String> = politeness.ready_domains().into_iter().collect();
+        let tracked_domains = politeness.tracked_domains();
         drop(politeness);
 
         let mut frontier = self.frontier.write().await;
-        frontier.pop_next(&ready_domains)
+        frontier.pop_next(&ready_domains, &tracked_domains)
     }
 
     /// Run the scraping loop

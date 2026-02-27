@@ -626,18 +626,14 @@ async fn run_scrape_job(
 
     // Main scraping loop
     loop {
-        // Check for cancellation or shutdown (non-blocking)
-        tokio::select! {
-            biased;
-            _ = &mut cancel_rx => {
-                info!("Scrape job {} cancelled", job_id);
-                return Err(anyhow::anyhow!("Job cancelled"));
-            }
-            _ = shutdown_rx.recv() => {
-                info!("Scrape job {} stopped due to shutdown", job_id);
-                return Err(anyhow::anyhow!("Shutdown"));
-            }
-            else => {}
+        // Check for cancellation (non-blocking)
+        if cancel_rx.try_recv().is_ok() {
+            info!("Scrape job {} cancelled", job_id);
+            return Err(anyhow::anyhow!("Job cancelled"));
+        }
+        if let Ok(_) | Err(broadcast::error::TryRecvError::Closed) = shutdown_rx.try_recv() {
+            info!("Scrape job {} stopped due to shutdown", job_id);
+            return Err(anyhow::anyhow!("Shutdown"));
         }
 
         // Check max_pages limit

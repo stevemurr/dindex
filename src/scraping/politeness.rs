@@ -4,7 +4,7 @@
 //! Ensures the scraper is a good citizen of the web.
 
 use lru::LruCache;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 use url::Url;
@@ -445,6 +445,11 @@ impl PolitenessController {
         state.last_fetch = Instant::now();
         // Small backoff on errors
         state.backoff_until = Some(Instant::now() + Duration::from_secs(5));
+    }
+
+    /// Get all domains tracked by the politeness controller (fetched at least once).
+    pub fn tracked_domains(&self) -> HashSet<String> {
+        self.domain_state.keys().cloned().collect()
     }
 
     /// Get all domains that are ready to crawl

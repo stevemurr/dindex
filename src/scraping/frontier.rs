@@ -236,19 +236,37 @@ impl UrlFrontier {
         batch.add(hostname, url);
     }
 
-    /// Get the next URL to crawl, respecting domain politeness
-    pub fn pop_next(&mut self, ready_domains: &HashSet<String>) -> Option<ScoredUrl> {
-        // Find the highest priority URL from any ready domain
+    /// Get the next URL to crawl, respecting domain politeness.
+    ///
+    /// `ready_domains` contains domains tracked by the politeness controller that
+    /// are currently eligible for fetching. `tracked_domains` contains all domains
+    /// the politeness controller knows about (fetched at least once). Domains in
+    /// the frontier that are NOT in `tracked_domains` have never been fetched and
+    /// are implicitly ready.
+    pub fn pop_next(
+        &mut self,
+        ready_domains: &HashSet<String>,
+        tracked_domains: &HashSet<String>,
+    ) -> Option<ScoredUrl> {
         let mut best_url: Option<ScoredUrl> = None;
         let mut best_domain: Option<String> = None;
 
-        for domain in ready_domains {
-            if let Some(queue) = self.domain_queues.get(domain) {
-                if let Some(top) = queue.peek() {
-                    if best_url.as_ref().is_none_or(|best| top > best) {
-                        best_url = Some(top.clone());
-                        best_domain = Some(domain.clone());
-                    }
+        for (domain, queue) in &self.domain_queues {
+            // A domain is eligible if:
+            // 1. The politeness controller says it's ready, OR
+            // 2. The politeness controller hasn't seen it yet (new domain)
+            let is_tracked = tracked_domains.contains(domain);
+            let is_ready = ready_domains.contains(domain);
+
+            if is_tracked && !is_ready {
+                // Known to politeness but not ready (rate limited / delay) — skip
+                continue;
+            }
+
+            if let Some(top) = queue.peek() {
+                if best_url.as_ref().is_none_or(|best| top > best) {
+                    best_url = Some(top.clone());
+                    best_domain = Some(domain.clone());
                 }
             }
         }
@@ -358,7 +376,8 @@ mod tests {
         assert!(frontier.pending_count() > 0);
 
         let ready: HashSet<_> = vec!["example.com".to_string()].into_iter().collect();
-        let next = frontier.pop_next(&ready);
+        let tracked = ready.clone();
+        let next = frontier.pop_next(&ready, &tracked);
 
         assert!(next.is_some());
     }
