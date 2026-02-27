@@ -519,9 +519,13 @@ fn build_coordinator_config(
     }
 }
 
-/// Emit an SSE event (ignores send failures when no subscribers are connected).
+/// Emit an SSE event, logging whether any subscribers received it.
 fn emit(tx: &broadcast::Sender<ScrapeEvent>, event: ScrapeEvent) {
-    let _ = tx.send(event);
+    let event_name = event.event_name();
+    match tx.send(event) {
+        Ok(n) => debug!("SSE emit {}: {} subscriber(s)", event_name, n),
+        Err(_) => debug!("SSE emit {}: no subscribers connected", event_name),
+    }
 }
 
 /// Update per-URL status tracking.

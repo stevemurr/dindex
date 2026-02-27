@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use axum::extract::Path;
@@ -648,8 +648,12 @@ pub async fn job_events_sse(
     };
 
     let rx = match state.handler.subscribe_job_events(uuid) {
-        Some(rx) => rx,
+        Some(rx) => {
+            info!("SSE client connected for job {}", job_id);
+            rx
+        }
         None => {
+            warn!("SSE subscribe failed: job {} not found", job_id);
             return (
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse::new(
@@ -661,22 +665,33 @@ pub async fn job_events_sse(
         }
     };
 
-    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
-        Ok(event) => {
-            let event_name = event.event_name().to_string();
-            match serde_json::to_string(&event) {
-                Ok(json) => Some(Ok::<_, Infallible>(
-                    Event::default().event(event_name).data(json),
-                )),
-                Err(_) => None,
+    let job_id_log = job_id.clone();
+    let stream = BroadcastStream::new(rx)
+        .filter_map(move |result| match result {
+            Ok(event) => {
+                let event_name = event.event_name().to_string();
+                match serde_json::to_string(&event) {
+                    Ok(json) => {
+                        debug!("SSE streaming {} to client for job {}", event_name, job_id_log);
+                        Some(Ok::<_, Infallible>(
+                            Event::default().event(event_name).data(json),
+                        ))
+                    }
+                    Err(e) => {
+                        warn!("SSE serialization error for job {}: {}", job_id_log, e);
+                        None
+                    }
+                }
             }
-        }
-        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => Some(Ok(
-            Event::default()
-                .event("lagged")
-                .data(format!(r#"{{"missed":{}}}"#, n)),
-        )),
-    });
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                warn!("SSE client lagged for job {}: missed {} events", job_id_log, n);
+                Some(Ok(
+                    Event::default()
+                        .event("lagged")
+                        .data(format!(r#"{{"missed":{}}}"#, n)),
+                ))
+            }
+        });
 
     Sse::new(stream)
         .keep_alive(KeepAlive::default().interval(Duration::from_secs(15)))
