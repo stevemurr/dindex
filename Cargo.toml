@@ -73,6 +73,7 @@ base64 = "0.22"
 tempfile = "3"
 directories = "5"
 sha2 = "0.10"
+subtle = "2"
 daemonize = "0.5"
 libc = "0.2"
 

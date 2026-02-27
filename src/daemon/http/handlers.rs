@@ -19,6 +19,12 @@ use crate::types::Document;
 
 use super::types::*;
 
+/// Maximum allowed query length (10KB)
+const MAX_QUERY_LENGTH: usize = 10_000;
+
+/// Maximum allowed document content size (10MB)
+const MAX_DOCUMENT_SIZE: usize = 10 * 1024 * 1024;
+
 /// Shared application state
 #[derive(Clone)]
 pub struct AppState {
@@ -38,6 +44,22 @@ pub async fn search(
     State(state): State<AppState>,
     Json(request): Json<SearchRequest>,
 ) -> impl IntoResponse {
+    // Validate query length
+    if request.query.len() > MAX_QUERY_LENGTH {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "QUERY_TOO_LARGE".to_string(),
+                format!(
+                    "Query length {} exceeds maximum allowed length of {} bytes",
+                    request.query.len(),
+                    MAX_QUERY_LENGTH
+                ),
+            )),
+        )
+            .into_response();
+    }
+
     debug!("HTTP search request: query={}, top_k={}", request.query, request.top_k);
 
     // Convert HTTP filters to QueryFilters
@@ -154,6 +176,25 @@ pub async fn index_documents(
     let stream_id = Uuid::new_v4();
 
     debug!("HTTP index request: {} documents", request.documents.len());
+
+    // Validate document content sizes
+    for (i, doc) in request.documents.iter().enumerate() {
+        if doc.content.len() > MAX_DOCUMENT_SIZE {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "DOCUMENT_TOO_LARGE".to_string(),
+                    format!(
+                        "Document {} content length {} exceeds maximum allowed size of {} bytes",
+                        i,
+                        doc.content.len(),
+                        MAX_DOCUMENT_SIZE
+                    ),
+                )),
+            )
+                .into_response();
+        }
+    }
 
     // Start the indexing stream
     match state.handler.handle(Request::IndexDocuments { stream_id }).await {

@@ -11,6 +11,7 @@ use axum::{
     Json,
 };
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 use super::types::ErrorResponse;
 
@@ -33,12 +34,14 @@ impl AuthState {
         !self.api_keys.is_empty()
     }
 
-    /// Validate an API key
+    /// Validate an API key using constant-time comparison to prevent timing attacks
     pub fn validate_key(&self, key: &str) -> bool {
         if self.api_keys.is_empty() {
             return true;
         }
-        self.api_keys.iter().any(|k| k == key)
+        self.api_keys
+            .iter()
+            .any(|k| k.as_bytes().ct_eq(key.as_bytes()).into())
     }
 }
 

@@ -12,7 +12,7 @@ use crate::util::truncate_str;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Hybrid retrieval engine combining multiple search methods
 pub struct HybridRetriever {
@@ -64,9 +64,14 @@ impl HybridRetriever {
         if self.config.enable_dense {
             // Try to get embedding from parameter or generate it
             let generated_embedding = if query_embedding.is_none() {
-                self.embedding_engine
-                    .as_ref()
-                    .and_then(|e| e.embed(&query.text).ok())
+                self.embedding_engine.as_ref().and_then(|e| {
+                    e.embed(&query.text)
+                        .map_err(|err| {
+                            warn!("Failed to generate query embedding for dense search: {}", err);
+                            err
+                        })
+                        .ok()
+                })
             } else {
                 None
             };
