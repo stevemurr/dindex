@@ -238,7 +238,7 @@ impl From<quick_xml::Error> for ImportError {
 }
 
 /// Dump format enumeration
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 pub enum DumpFormat {
     /// Wikimedia XML dump (compressed with bzip2)
     WikimediaXml,
@@ -247,6 +247,7 @@ pub enum DumpFormat {
     /// WARC web archive
     Warc,
     /// Plain text files
+    #[value(skip)]
     PlainText,
 }
 
