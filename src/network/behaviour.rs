@@ -1,7 +1,7 @@
 //! libp2p behaviour composition
 
 use libp2p::{
-    autonat, gossipsub, identify, kad, mdns, ping, relay,
+    autonat, gossipsub, identify, identity::Keypair, kad, mdns, ping, relay,
     swarm::NetworkBehaviour,
     PeerId, StreamProtocol,
 };
@@ -31,6 +31,7 @@ impl DIndexBehaviour {
     pub fn new(
         local_peer_id: PeerId,
         local_public_key: libp2p::identity::PublicKey,
+        keypair: Keypair,
         relay_behaviour: relay::client::Behaviour,
     ) -> anyhow::Result<Self> {
         // Kademlia configuration
@@ -67,10 +68,7 @@ impl DIndexBehaviour {
             .map_err(|e| anyhow::anyhow!("Failed to build gossipsub config: {}", e))?;
 
         let gossipsub = gossipsub::Behaviour::new(
-            gossipsub::MessageAuthenticity::Signed(
-                // We'll set this up properly when creating the swarm
-                libp2p::identity::Keypair::generate_ed25519(),
-            ),
+            gossipsub::MessageAuthenticity::Signed(keypair),
             gossipsub_config,
         )
         .map_err(|e| anyhow::anyhow!("Failed to create gossipsub: {}", e))?;

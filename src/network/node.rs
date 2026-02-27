@@ -19,6 +19,7 @@ use libp2p::{
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
@@ -193,13 +194,45 @@ impl NetworkHandle {
     }
 }
 
+/// Maximum allowed size for incoming network messages (16 MB).
+/// Messages exceeding this limit are dropped to prevent memory exhaustion attacks.
+const MAX_NETWORK_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
+/// Load an existing node keypair from disk, or generate and persist a new one.
+///
+/// The keypair is stored at `{data_dir}/node_key` using libp2p's protobuf encoding.
+/// This ensures the node retains a stable PeerId across restarts.
+fn load_or_generate_keypair(data_dir: &Path) -> Result<Keypair> {
+    let key_path = data_dir.join("node_key");
+
+    if key_path.exists() {
+        let bytes = std::fs::read(&key_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read keypair from {}: {}", key_path.display(), e))?;
+        let keypair = Keypair::from_protobuf_encoding(&bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to decode keypair from {}: {}", key_path.display(), e))?;
+        info!("Loaded existing node keypair from {}", key_path.display());
+        Ok(keypair)
+    } else {
+        let keypair = Keypair::generate_ed25519();
+        // Ensure the data directory exists
+        std::fs::create_dir_all(data_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to create data directory {}: {}", data_dir.display(), e))?;
+        let bytes = keypair.to_protobuf_encoding()
+            .map_err(|e| anyhow::anyhow!("Failed to encode keypair: {}", e))?;
+        std::fs::write(&key_path, &bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to write keypair to {}: {}", key_path.display(), e))?;
+        info!("Generated new node keypair, saved to {}", key_path.display());
+        Ok(keypair)
+    }
+}
+
 impl NetworkNode {
     /// Create a new network node
     pub async fn new(
         _config: &NodeConfig,
     ) -> Result<(Self, NetworkHandle, mpsc::Receiver<NetworkEvent>)> {
-        // Generate or load keypair
-        let keypair = Keypair::generate_ed25519();
+        // Load persisted keypair or generate a new one
+        let keypair = load_or_generate_keypair(&_config.data_dir)?;
         let local_peer_id = PeerId::from(keypair.public());
 
         info!("Local peer ID: {}", local_peer_id);
@@ -213,6 +246,7 @@ impl NetworkNode {
                 DIndexBehaviour::new(
                     PeerId::from(key.public()),
                     key.public(),
+                    key.clone(),
                     relay_behaviour,
                 )
                 .expect("Failed to create behaviour")
@@ -386,6 +420,16 @@ impl NetworkNode {
                     "GossipSub message from {}: {:?}",
                     propagation_source, message_id
                 );
+
+                if message.data.len() > MAX_NETWORK_MESSAGE_SIZE {
+                    warn!(
+                        "Dropping oversized network message from {}: {} bytes exceeds {} byte limit",
+                        propagation_source,
+                        message.data.len(),
+                        MAX_NETWORK_MESSAGE_SIZE,
+                    );
+                    return;
+                }
 
                 if let Ok(msg) = bincode::deserialize::<NetworkMessage>(&message.data) {
                     match msg {
