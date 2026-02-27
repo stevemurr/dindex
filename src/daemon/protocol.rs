@@ -142,6 +142,12 @@ pub enum Request {
     /// Get daemon metrics snapshot
     Metrics,
 
+    /// Delete documents by ID
+    DeleteDocuments { document_ids: Vec<String> },
+
+    /// Clear all entries from the index
+    ClearIndex,
+
     /// Force a commit of pending writes
     ForceCommit,
 
@@ -198,6 +204,7 @@ pub enum ErrorCode {
     ImportFailed,
     ScrapeFailed,
     JobNotFound,
+    DeleteFailed,
     InvalidRequest,
     ShuttingDown,
     StreamNotFound,
@@ -245,6 +252,16 @@ pub enum Response {
 
     /// Daemon metrics snapshot
     Metrics { snapshot: MetricsSnapshot },
+
+    // ============ Delete Responses ============
+    /// Delete operation completed
+    DeleteComplete {
+        documents_deleted: usize,
+        chunks_deleted: usize,
+    },
+
+    /// Clear operation completed
+    ClearComplete { chunks_deleted: usize },
 
     // ============ Generic Responses ============
     /// Operation succeeded

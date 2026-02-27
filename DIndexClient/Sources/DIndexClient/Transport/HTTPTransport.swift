@@ -1,12 +1,16 @@
 import Foundation
 
 /// HTTP transport for communicating with dindex server
-public final class HTTPTransport: Transport, Sendable {
+///
+/// Thread safety: `baseURL` and `apiKey` are immutable, `URLSession` is thread-safe,
+/// and `JSONDecoder`/`JSONEncoder` are shared static instances.
+public final class HTTPTransport: @unchecked Sendable {
+    private static let decoder = JSONDecoder()
+    private static let encoder = JSONEncoder()
+
     private let baseURL: URL
     private let apiKey: String?
     private let session: URLSession
-    private let decoder: JSONDecoder
-    private let encoder: JSONEncoder
 
     /// Create a new HTTP transport
     /// - Parameters:
@@ -17,8 +21,6 @@ public final class HTTPTransport: Transport, Sendable {
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.session = session
-        self.decoder = JSONDecoder()
-        self.encoder = JSONEncoder()
     }
 
     public func get<T: Decodable>(path: String) async throws -> T {
@@ -38,7 +40,7 @@ public final class HTTPTransport: Transport, Sendable {
         addHeaders(to: &request)
 
         do {
-            request.httpBody = try encoder.encode(body)
+            request.httpBody = try Self.encoder.encode(body)
         } catch {
             throw DIndexError.encodingError(underlying: error)
         }
@@ -51,6 +53,22 @@ public final class HTTPTransport: Transport, Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         addHeaders(to: &request)
+
+        return try await performRequest(request)
+    }
+
+    public func delete<T: Decodable, B: Encodable>(path: String, body: B) async throws -> T {
+        let url = baseURL.appendingPathComponent(path)
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        addHeaders(to: &request)
+
+        do {
+            request.httpBody = try Self.encoder.encode(body)
+        } catch {
+            throw DIndexError.encodingError(underlying: error)
+        }
 
         return try await performRequest(request)
     }
@@ -86,7 +104,7 @@ public final class HTTPTransport: Transport, Sendable {
 
         if httpResponse.statusCode >= 400 {
             // Try to decode error response
-            if let errorResponse = try? decoder.decode(ErrorResponse.self, from: data) {
+            if let errorResponse = try? Self.decoder.decode(ErrorResponse.self, from: data) {
                 throw DIndexError.serverError(code: errorResponse.code, message: errorResponse.message)
             }
             throw DIndexError.serverError(
@@ -97,7 +115,7 @@ public final class HTTPTransport: Transport, Sendable {
 
         // Decode successful response
         do {
-            return try decoder.decode(T.self, from: data)
+            return try Self.decoder.decode(T.self, from: data)
         } catch {
             throw DIndexError.decodingError(underlying: error)
         }

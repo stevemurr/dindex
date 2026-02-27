@@ -178,6 +178,33 @@ pub struct CommitResponse {
     pub success: bool,
 }
 
+/// Delete documents request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteRequest {
+    /// Document IDs to delete
+    pub document_ids: Vec<String>,
+}
+
+/// Delete response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteResponse {
+    /// Number of documents deleted
+    pub documents_deleted: usize,
+    /// Number of chunks deleted
+    pub chunks_deleted: usize,
+    /// Duration in milliseconds
+    pub duration_ms: u64,
+}
+
+/// Clear index response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClearResponse {
+    /// Number of chunks deleted
+    pub chunks_deleted: usize,
+    /// Duration in milliseconds
+    pub duration_ms: u64,
+}
+
 /// Error response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {

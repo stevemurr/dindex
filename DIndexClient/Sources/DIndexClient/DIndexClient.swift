@@ -1,13 +1,10 @@
 import Foundation
 
-/// Client for interacting with a dindex server
-///
-/// Supports both HTTP (all platforms) and Unix socket (macOS only) transports.
+/// Client for interacting with a dindex server via HTTP
 ///
 /// ## Example Usage
 ///
 /// ```swift
-/// // HTTP transport (all platforms)
 /// let client = DIndexClient(
 ///     baseURL: URL(string: "http://localhost:8080")!,
 ///     apiKey: "your-api-key"
@@ -43,22 +40,6 @@ public final class DIndexClient: Sendable {
     public init(baseURL: URL, apiKey: String? = nil, session: URLSession) {
         self.transport = HTTPTransport(baseURL: baseURL, apiKey: apiKey, session: session)
     }
-
-    #if os(macOS)
-    /// Create a client for local daemon via Unix socket
-    /// - Parameter socketPath: Path to the Unix socket (default: /tmp/dindex.sock)
-    ///
-    /// Note: This initializer creates an HTTP client pointing to localhost.
-    /// For true Unix socket support, use `UnixSocketTransport` directly.
-    public init(socketPath: String = "/tmp/dindex.sock") {
-        // For now, fall back to HTTP on localhost
-        // Full Unix socket support would require implementing bincode protocol
-        self.transport = HTTPTransport(
-            baseURL: URL(string: "http://127.0.0.1:8080")!,
-            apiKey: nil
-        )
-    }
-    #endif
 
     // MARK: - Search
 
@@ -113,6 +94,32 @@ public final class DIndexClient: Sendable {
     @discardableResult
     public func commit() async throws -> CommitResponse {
         try await transport.post(path: "/api/v1/index/commit")
+    }
+
+    // MARK: - Deletion
+
+    /// Delete documents by their IDs
+    /// - Parameter documentIds: Array of document IDs to delete
+    /// - Returns: Delete result with counts
+    @discardableResult
+    public func deleteDocuments(ids documentIds: [String]) async throws -> DeleteResponse {
+        let request = DeleteRequest(documentIds: documentIds)
+        return try await transport.delete(path: "/api/v1/documents", body: request)
+    }
+
+    /// Delete a single document by ID
+    /// - Parameter documentId: The document ID to delete
+    /// - Returns: Delete result with counts
+    @discardableResult
+    public func deleteDocument(id documentId: String) async throws -> DeleteResponse {
+        try await deleteDocuments(ids: [documentId])
+    }
+
+    /// Clear all entries from the index
+    /// - Returns: Clear result with count of deleted chunks
+    @discardableResult
+    public func clearAll() async throws -> ClearResponse {
+        try await transport.post(path: "/api/v1/index/clear")
     }
 }
 

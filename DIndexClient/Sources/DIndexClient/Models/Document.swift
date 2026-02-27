@@ -70,3 +70,60 @@ public struct CommitResponse: Codable, Sendable {
         self.success = success
     }
 }
+
+/// Request to delete documents by ID
+public struct DeleteRequest: Codable, Sendable {
+    /// Document IDs to delete
+    public let documentIds: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case documentIds = "document_ids"
+    }
+
+    public init(documentIds: [String]) {
+        self.documentIds = documentIds
+    }
+}
+
+/// Response from deleting documents
+public struct DeleteResponse: Codable, Sendable {
+    /// Number of documents deleted
+    public let documentsDeleted: Int
+
+    /// Number of chunks deleted
+    public let chunksDeleted: Int
+
+    /// Duration in milliseconds
+    public let durationMs: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case documentsDeleted = "documents_deleted"
+        case chunksDeleted = "chunks_deleted"
+        case durationMs = "duration_ms"
+    }
+
+    public init(documentsDeleted: Int, chunksDeleted: Int, durationMs: UInt64) {
+        self.documentsDeleted = documentsDeleted
+        self.chunksDeleted = chunksDeleted
+        self.durationMs = durationMs
+    }
+}
+
+/// Response from clearing the index
+public struct ClearResponse: Codable, Sendable {
+    /// Number of chunks deleted
+    public let chunksDeleted: Int
+
+    /// Duration in milliseconds
+    public let durationMs: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case chunksDeleted = "chunks_deleted"
+        case durationMs = "duration_ms"
+    }
+
+    public init(chunksDeleted: Int, durationMs: UInt64) {
+        self.chunksDeleted = chunksDeleted
+        self.durationMs = durationMs
+    }
+}

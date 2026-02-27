@@ -114,6 +114,12 @@ impl RequestHandler {
             }
             Request::ScrapeCancel { job_id } => self.handle_job_cancel(job_id).await,
 
+            // Delete operations
+            Request::DeleteDocuments { document_ids } => {
+                self.handle_delete_documents(document_ids).await
+            }
+            Request::ClearIndex => self.handle_clear_index().await,
+
             // Management operations
             Request::Ping => Response::Pong,
             Request::Status => self.handle_status().await,
@@ -339,6 +345,35 @@ impl RequestHandler {
 
         let job_id = self.job_manager.start_scrape(urls, options);
         Response::JobStarted { job_id }
+    }
+
+    // ============ Delete Handlers ============
+
+    async fn handle_delete_documents(&self, document_ids: Vec<String>) -> Response {
+        info!("Deleting {} documents", document_ids.len());
+
+        match self.index_manager.delete_documents(&document_ids) {
+            Ok((docs_deleted, chunks_deleted)) => Response::DeleteComplete {
+                documents_deleted: docs_deleted,
+                chunks_deleted,
+            },
+            Err(e) => {
+                error!("Delete failed: {}", e);
+                Response::error(ErrorCode::DeleteFailed, e.to_string())
+            }
+        }
+    }
+
+    async fn handle_clear_index(&self) -> Response {
+        info!("Clearing all index entries");
+
+        match self.index_manager.clear_all() {
+            Ok(chunks_deleted) => Response::ClearComplete { chunks_deleted },
+            Err(e) => {
+                error!("Clear failed: {}", e);
+                Response::error(ErrorCode::DeleteFailed, e.to_string())
+            }
+        }
     }
 
     // ============ Management Handlers ============

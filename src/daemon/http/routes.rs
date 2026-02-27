@@ -4,7 +4,7 @@
 
 use axum::{
     middleware,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 
@@ -23,6 +23,8 @@ pub fn create_router(app_state: AppState, auth_state: AuthState) -> Router {
         .route("/stats", get(handlers::stats))
         .route("/index", post(handlers::index_documents))
         .route("/index/commit", post(handlers::commit))
+        .route("/index/clear", post(handlers::clear_index))
+        .route("/documents", delete(handlers::delete_documents))
         .layer(middleware::from_fn_with_state(
             auth_state.clone(),
             auth_middleware,

@@ -161,25 +161,49 @@ final class DIndexClientTests: XCTestCase {
         XCTAssertTrue(unauthorized.localizedDescription.contains("Unauthorized"))
     }
 
-    // MARK: - Configuration Tests
+    // MARK: - Delete/Clear Model Tests
 
-    func testHTTPConfiguration() {
-        let config = DIndexConfiguration.http(
-            baseURL: URL(string: "http://localhost:8080")!,
-            apiKey: "test-key"
-        )
+    func testDeleteRequestEncoding() throws {
+        let request = DeleteRequest(documentIds: ["doc1", "doc2", "doc3"])
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(request)
+        let json = String(data: data, encoding: .utf8)!
 
-        XCTAssertEqual(config.baseURL?.absoluteString, "http://localhost:8080")
-        XCTAssertEqual(config.apiKey, "test-key")
-        XCTAssertNil(config.socketPath)
+        XCTAssertTrue(json.contains("\"document_ids\""))
+        XCTAssertTrue(json.contains("\"doc1\""))
+        XCTAssertTrue(json.contains("\"doc2\""))
+        XCTAssertTrue(json.contains("\"doc3\""))
     }
 
-    #if os(macOS)
-    func testSocketConfiguration() {
-        let config = DIndexConfiguration.socket(path: "/custom/socket.sock")
+    func testDeleteResponseDecoding() throws {
+        let json = """
+        {
+            "documents_deleted": 3,
+            "chunks_deleted": 15,
+            "duration_ms": 42
+        }
+        """
 
-        XCTAssertNil(config.baseURL)
-        XCTAssertEqual(config.socketPath, "/custom/socket.sock")
+        let decoder = JSONDecoder()
+        let response = try decoder.decode(DeleteResponse.self, from: json.data(using: .utf8)!)
+
+        XCTAssertEqual(response.documentsDeleted, 3)
+        XCTAssertEqual(response.chunksDeleted, 15)
+        XCTAssertEqual(response.durationMs, 42)
     }
-    #endif
+
+    func testClearResponseDecoding() throws {
+        let json = """
+        {
+            "chunks_deleted": 500,
+            "duration_ms": 1234
+        }
+        """
+
+        let decoder = JSONDecoder()
+        let response = try decoder.decode(ClearResponse.self, from: json.data(using: .utf8)!)
+
+        XCTAssertEqual(response.chunksDeleted, 500)
+        XCTAssertEqual(response.durationMs, 1234)
+    }
 }

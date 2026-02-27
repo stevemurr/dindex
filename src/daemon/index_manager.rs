@@ -155,6 +155,63 @@ impl IndexManager {
         self.index_batch(&chunks_with_embeddings)
     }
 
+    /// Delete all chunks belonging to the given document IDs
+    pub fn delete_documents(&self, document_ids: &[String]) -> Result<(usize, usize)> {
+        let mut total_chunks = 0usize;
+        let mut docs_deleted = 0usize;
+
+        for doc_id in document_ids {
+            match self.indexer.remove_document(doc_id) {
+                Ok(count) => {
+                    total_chunks += count;
+                    if count > 0 {
+                        docs_deleted += 1;
+                    }
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to delete document {}: {}",
+                        doc_id,
+                        e
+                    ));
+                }
+            }
+        }
+
+        // Save vector index to disk
+        let index_path = self.config.node.data_dir.join("vector.index");
+        self.vector_index.save(&index_path)?;
+        self.indexer.save()?;
+
+        info!(
+            "Deleted {} documents ({} chunks)",
+            docs_deleted, total_chunks
+        );
+        Ok((docs_deleted, total_chunks))
+    }
+
+    /// Clear all entries from the index
+    pub fn clear_all(&self) -> Result<usize> {
+        let chunk_ids = self.chunk_storage.chunk_ids();
+        let total = chunk_ids.len();
+
+        for chunk_id in &chunk_ids {
+            self.vector_index.remove(chunk_id).ok();
+            self.chunk_storage.remove(chunk_id);
+        }
+
+        // Clear BM25 and commit
+        self.bm25_index.clear()?;
+
+        // Save vector index
+        let index_path = self.config.node.data_dir.join("vector.index");
+        self.vector_index.save(&index_path)?;
+        self.chunk_storage.save()?;
+
+        info!("Cleared all {} chunks from index", total);
+        Ok(total)
+    }
+
     /// Commit pending changes to disk
     pub fn commit(&self) -> Result<()> {
         info!("Committing index changes");

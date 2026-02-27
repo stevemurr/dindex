@@ -20,9 +20,6 @@ public enum DIndexError: Error, LocalizedError, Sendable {
     /// Unauthorized - invalid or missing API key
     case unauthorized
 
-    /// Connection to Unix socket failed
-    case socketConnectionFailed(path: String)
-
     /// Request timeout
     case timeout
 
@@ -40,8 +37,6 @@ public enum DIndexError: Error, LocalizedError, Sendable {
             return "Invalid URL: \(url)"
         case .unauthorized:
             return "Unauthorized: Invalid or missing API key"
-        case .socketConnectionFailed(let path):
-            return "Failed to connect to Unix socket: \(path)"
         case .timeout:
             return "Request timed out"
         }

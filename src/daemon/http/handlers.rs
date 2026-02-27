@@ -297,6 +297,96 @@ pub async fn index_documents(
     }
 }
 
+/// Delete documents endpoint
+pub async fn delete_documents(
+    State(state): State<AppState>,
+    Json(request): Json<DeleteRequest>,
+) -> impl IntoResponse {
+    let start = Instant::now();
+
+    if request.document_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "INVALID_REQUEST".to_string(),
+                "document_ids must not be empty".to_string(),
+            )),
+        )
+            .into_response();
+    }
+
+    debug!("HTTP delete request: {} documents", request.document_ids.len());
+
+    let ipc_request = Request::DeleteDocuments {
+        document_ids: request.document_ids,
+    };
+
+    match state.handler.handle(ipc_request).await {
+        IpcResponse::DeleteComplete {
+            documents_deleted,
+            chunks_deleted,
+        } => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            (
+                StatusCode::OK,
+                Json(DeleteResponse {
+                    documents_deleted,
+                    chunks_deleted,
+                    duration_ms,
+                }),
+            )
+                .into_response()
+        }
+        IpcResponse::Error { code, message } => {
+            error!("Delete failed: {:?} - {}", code, message);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(format!("{:?}", code), message)),
+            )
+                .into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal_error("Unexpected response type")),
+        )
+            .into_response(),
+    }
+}
+
+/// Clear all index entries endpoint
+pub async fn clear_index(State(state): State<AppState>) -> impl IntoResponse {
+    let start = Instant::now();
+
+    debug!("HTTP clear index request");
+
+    match state.handler.handle(Request::ClearIndex).await {
+        IpcResponse::ClearComplete { chunks_deleted } => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            (
+                StatusCode::OK,
+                Json(ClearResponse {
+                    chunks_deleted,
+                    duration_ms,
+                }),
+            )
+                .into_response()
+        }
+        IpcResponse::Error { code, message } => {
+            error!("Clear failed: {:?} - {}", code, message);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(format!("{:?}", code), message)),
+            )
+                .into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal_error("Unexpected response type")),
+        )
+            .into_response(),
+    }
+}
+
 /// Commit endpoint
 pub async fn commit(State(state): State<AppState>) -> impl IntoResponse {
     match state.handler.handle(Request::ForceCommit).await {

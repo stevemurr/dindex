@@ -169,6 +169,12 @@ impl Bm25Index {
         Ok(())
     }
 
+    /// Delete all documents and commit
+    pub fn clear(&self) -> Result<()> {
+        self.writer.lock().delete_all_documents()?;
+        self.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
