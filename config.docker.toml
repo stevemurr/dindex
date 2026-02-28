@@ -46,3 +46,11 @@ enabled = true
 listen_addr = "0.0.0.0:8080"
 api_keys = []
 cors_enabled = true
+
+[metrics]
+enabled = true
+system_metrics_interval_secs = 15
+
+[logging]
+format = "text"
+level = "info"

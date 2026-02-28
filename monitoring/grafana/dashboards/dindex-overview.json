@@ -1,0 +1,399 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Overview",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+      "id": 1,
+      "title": "Queries / sec",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "rate(dindex_queries_total[5m])",
+          "legendFormat": "qps"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 1 },
+      "id": 2,
+      "title": "Query Latency p50 / p95 / p99",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(dindex_query_latency_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(dindex_query_latency_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(dindex_query_latency_seconds_bucket[5m]))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 1 },
+      "id": 3,
+      "title": "Error Rate",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "rate(dindex_queries_failed_total[5m])",
+          "legendFormat": "errors/s"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
+      "id": 4,
+      "title": "Memory Usage",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "dindex_memory_usage_bytes",
+          "legendFormat": "RSS"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+      "id": 101,
+      "title": "Indexing",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "id": 5,
+      "title": "Documents Indexed",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "dindex_documents_indexed_total",
+          "legendFormat": "documents"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "id": 6,
+      "title": "Chunks Indexed",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "dindex_chunks_indexed_total",
+          "legendFormat": "chunks"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 8 },
+      "id": 7,
+      "title": "Indexing Rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(dindex_chunks_indexed_total[5m])",
+          "legendFormat": "chunks/s"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 8 },
+      "id": 8,
+      "title": "Commit Latency",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(dindex_commit_latency_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "id": 102,
+      "title": "Embeddings",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 15 },
+      "id": 9,
+      "title": "Embedding Requests / sec",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(dindex_embedding_requests_total[5m])",
+          "legendFormat": "req/s"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 15 },
+      "id": 10,
+      "title": "Embedding Latency p95",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(dindex_embedding_latency_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 15 },
+      "id": 11,
+      "title": "Embedding Errors / sec",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(dindex_embedding_errors_total[5m])",
+          "legendFormat": "errors/s"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 },
+      "id": 103,
+      "title": "Scraping",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 22 },
+      "id": 12,
+      "title": "Fetch Rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(dindex_scrape_fetch_total[5m])",
+          "legendFormat": "fetches/s"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 22 },
+      "id": 13,
+      "title": "Fetch Latency p95",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(dindex_scrape_fetch_latency_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 22 },
+      "id": 14,
+      "title": "Fetch Errors",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(dindex_scrape_fetch_errors_total[5m])",
+          "legendFormat": "errors/s"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 22 },
+      "id": 15,
+      "title": "Pages Indexed",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "dindex_scrape_pages_indexed_total",
+          "legendFormat": "pages"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "id": 104,
+      "title": "P2P & Jobs",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 29 },
+      "id": 16,
+      "title": "Connected Peers",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "dindex_p2p_connected_peers",
+          "legendFormat": "peers"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 29 },
+      "id": 17,
+      "title": "Active Jobs",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "dindex_jobs_started_total - dindex_jobs_completed_total - dindex_jobs_failed_total - dindex_jobs_cancelled_total",
+          "legendFormat": "active"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 29 },
+      "id": 18,
+      "title": "P2P Queries Sent",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(dindex_p2p_queries_sent_total[5m])",
+          "legendFormat": "sent/s"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 29 },
+      "id": 19,
+      "title": "P2P Queries Received",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(dindex_p2p_queries_received_total[5m])",
+          "legendFormat": "received/s"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["dindex"],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "Prometheus",
+          "value": "prometheus"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "name": "DS_PROMETHEUS",
+        "query": "prometheus",
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "DIndex Overview",
+  "uid": "dindex-overview",
+  "version": 1
+}

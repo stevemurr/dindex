@@ -57,6 +57,7 @@ impl RequestHandler {
             write_pipeline.clone(),
             config,
             shutdown_tx.clone(),
+            metrics.clone(),
         ));
 
         Self {
@@ -418,8 +419,13 @@ impl RequestHandler {
     }
 
     async fn handle_force_commit(&self) -> Response {
+        let timer = Timer::start();
         match self.index_manager.commit() {
-            Ok(()) => Response::Ok,
+            Ok(()) => {
+                timer.record(&self.metrics.commit_latency);
+                self.metrics.commits_total.inc();
+                Response::Ok
+            }
             Err(e) => {
                 error!("Force commit failed: {}", e);
                 Response::error(ErrorCode::InternalError, e.to_string())

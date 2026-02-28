@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::http::Method;
+use axum::{extract::State, middleware::Next};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
@@ -19,6 +20,19 @@ use crate::daemon::handler::RequestHandler;
 use super::auth::AuthState;
 use super::handlers::AppState;
 use super::routes::create_router;
+
+/// Middleware that tracks HTTP request count and latency
+async fn metrics_middleware(
+    State(state): State<AppState>,
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> axum::response::Response {
+    state.handler.metrics().http_requests_total.inc();
+    let start = std::time::Instant::now();
+    let response = next.run(request).await;
+    state.handler.metrics().http_request_latency.observe(start.elapsed());
+    response
+}
 
 /// HTTP API server
 pub struct HttpServer {
@@ -49,7 +63,13 @@ impl HttpServer {
         let auth_state = AuthState::new(self.config.api_keys.clone());
 
         // Create router
-        let mut app = create_router(app_state, auth_state);
+        let mut app = create_router(app_state.clone(), auth_state);
+
+        // Add HTTP metrics middleware
+        app = app.layer(axum::middleware::from_fn_with_state(
+            app_state,
+            metrics_middleware,
+        ));
 
         // Add CORS if enabled
         if self.config.cors_enabled {

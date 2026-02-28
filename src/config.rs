@@ -77,6 +77,12 @@ pub struct Config {
     /// HTTP API server configuration
     #[serde(default)]
     pub http: HttpConfig,
+    /// Metrics configuration
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+    /// Logging configuration
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 impl Default for Config {
@@ -93,6 +99,8 @@ impl Default for Config {
             dedup: DedupConfig::default(),
             daemon: DaemonConfig::default(),
             http: HttpConfig::default(),
+            metrics: MetricsConfig::default(),
+            logging: LoggingConfig::default(),
         }
     }
 }
@@ -783,6 +791,62 @@ impl Default for HttpConfig {
             listen_addr: "127.0.0.1:8080".to_string(),
             api_keys: Vec::new(),
             cors_enabled: false,
+        }
+    }
+}
+
+/// Metrics configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsConfig {
+    /// Enable Prometheus /metrics endpoint
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Interval for updating system metrics (memory, etc.) in seconds
+    #[serde(default = "default_system_metrics_interval")]
+    pub system_metrics_interval_secs: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_system_metrics_interval() -> u64 {
+    15
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            system_metrics_interval_secs: 15,
+        }
+    }
+}
+
+/// Logging configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    /// Log format: "text" or "json"
+    #[serde(default = "default_log_format")]
+    pub format: String,
+    /// Log level: "trace", "debug", "info", "warn", "error"
+    #[serde(default = "default_log_level")]
+    pub level: String,
+}
+
+fn default_log_format() -> String {
+    "text".to_string()
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            format: "text".to_string(),
+            level: "info".to_string(),
         }
     }
 }

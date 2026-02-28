@@ -15,6 +15,7 @@ use crate::embedding::{generate_with_fallback, EmbeddingEngine};
 use crate::types::Chunk;
 
 use super::index_manager::IndexManager;
+use super::metrics::DaemonMetrics;
 
 /// Items that can be ingested by the write pipeline
 pub enum IngestItem {
@@ -45,6 +46,18 @@ impl WritePipeline {
         commit_interval: Duration,
         shutdown: broadcast::Receiver<()>,
     ) -> Self {
+        Self::start_with_metrics(index_manager, embedding_engine, batch_size, commit_interval, shutdown, None)
+    }
+
+    /// Create and start the write pipeline with metrics
+    pub fn start_with_metrics(
+        index_manager: Arc<IndexManager>,
+        embedding_engine: Option<Arc<EmbeddingEngine>>,
+        batch_size: usize,
+        commit_interval: Duration,
+        shutdown: broadcast::Receiver<()>,
+        metrics: Option<Arc<DaemonMetrics>>,
+    ) -> Self {
         let (ingest_tx, ingest_rx) = mpsc::channel(1000);
 
         // Spawn the background worker
@@ -54,6 +67,7 @@ impl WritePipeline {
             ingest_rx,
             batch_size,
             commit_interval,
+            metrics,
         );
 
         tokio::spawn(async move {
@@ -83,6 +97,7 @@ struct WritePipelineWorker {
     ingest_rx: mpsc::Receiver<IngestItem>,
     batch_size: usize,
     commit_interval: Duration,
+    metrics: Option<Arc<DaemonMetrics>>,
 }
 
 impl WritePipelineWorker {
@@ -92,6 +107,7 @@ impl WritePipelineWorker {
         ingest_rx: mpsc::Receiver<IngestItem>,
         batch_size: usize,
         commit_interval: Duration,
+        metrics: Option<Arc<DaemonMetrics>>,
     ) -> Self {
         Self {
             index_manager,
@@ -99,6 +115,7 @@ impl WritePipelineWorker {
             ingest_rx,
             batch_size,
             commit_interval,
+            metrics,
         }
     }
 
@@ -201,11 +218,27 @@ impl WritePipelineWorker {
 
     /// Generate embedding for content using real embedding engine
     fn generate_embedding(&self, content: &str) -> Vec<f32> {
-        generate_with_fallback(
-            self.embedding_engine.as_deref(),
-            content,
-            self.index_manager.dimensions(),
-        )
+        if let Some(ref metrics) = self.metrics {
+            metrics.embedding_requests_total.inc();
+            let start = std::time::Instant::now();
+            let result = generate_with_fallback(
+                self.embedding_engine.as_deref(),
+                content,
+                self.index_manager.dimensions(),
+            );
+            metrics.embedding_latency.observe(start.elapsed());
+            // If no embedding engine is present, we used the fallback
+            if self.embedding_engine.is_none() {
+                metrics.embedding_errors_total.inc();
+            }
+            result
+        } else {
+            generate_with_fallback(
+                self.embedding_engine.as_deref(),
+                content,
+                self.index_manager.dimensions(),
+            )
+        }
     }
 }
 

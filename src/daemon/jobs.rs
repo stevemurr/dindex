@@ -24,6 +24,7 @@ use crate::types::Document;
 use url::Url;
 
 use super::index_manager::IndexManager;
+use super::metrics::DaemonMetrics;
 use super::protocol::{ImportOptions, ImportSource, JobStats, Progress, ScrapeOptions};
 use super::scrape_events::{ScrapeEvent, UrlInfo, UrlSource, UrlStatus};
 use super::write_pipeline::{IngestItem, WritePipeline};
@@ -69,6 +70,7 @@ pub struct JobManager {
     write_pipeline: Arc<WritePipeline>,
     config: Config,
     shutdown_tx: broadcast::Sender<()>,
+    metrics: Arc<DaemonMetrics>,
 }
 
 impl JobManager {
@@ -78,6 +80,7 @@ impl JobManager {
         write_pipeline: Arc<WritePipeline>,
         config: Config,
         shutdown_tx: broadcast::Sender<()>,
+        metrics: Arc<DaemonMetrics>,
     ) -> Self {
         Self {
             jobs: Arc::new(DashMap::new()),
@@ -85,6 +88,7 @@ impl JobManager {
             write_pipeline,
             config,
             shutdown_tx,
+            metrics,
         }
     }
 
@@ -119,6 +123,7 @@ impl JobManager {
         };
 
         self.jobs.insert(job_id, job_info);
+        self.metrics.jobs_started.inc();
 
         // Spawn import task
         let jobs = Arc::clone(&self.jobs);
@@ -126,6 +131,7 @@ impl JobManager {
         let index_manager = self.index_manager.clone();
         let write_pipeline = self.write_pipeline.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let metrics = self.metrics.clone();
 
         tokio::spawn(async move {
             let result = run_import_job(
@@ -149,12 +155,14 @@ impl JobManager {
                         job.state = JobState::Completed;
                         job.stats = Some(stats);
                         job.progress.stage = "completed".to_string();
+                        metrics.jobs_completed.inc();
                     }
                     Err(e) => {
                         if job.state != JobState::Cancelled {
                             job.state = JobState::Failed;
                             job.error = Some(e.to_string());
                             job.progress.stage = "failed".to_string();
+                            metrics.jobs_failed.inc();
                         }
                     }
                 }
@@ -197,6 +205,7 @@ impl JobManager {
         };
 
         self.jobs.insert(job_id, job_info);
+        self.metrics.jobs_started.inc();
 
         // Spawn scrape task
         let jobs = Arc::clone(&self.jobs);
@@ -205,6 +214,7 @@ impl JobManager {
         let write_pipeline = self.write_pipeline.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let task_event_tx = event_tx.clone();
+        let metrics = self.metrics.clone();
 
         tokio::spawn(async move {
             let result = run_scrape_job(
@@ -219,6 +229,7 @@ impl JobManager {
                 &mut shutdown_rx,
                 task_event_tx.clone(),
                 Arc::clone(&url_statuses),
+                metrics.clone(),
             )
             .await;
 
@@ -230,6 +241,7 @@ impl JobManager {
                         job.state = JobState::Completed;
                         job.stats = Some(stats.clone());
                         job.progress.stage = "completed".to_string();
+                        metrics.jobs_completed.inc();
                         let _ = task_event_tx.send(ScrapeEvent::JobCompleted {
                             job_id,
                             status: "completed".to_string(),
@@ -250,6 +262,7 @@ impl JobManager {
                             let err_msg = e.to_string();
                             job.error = Some(err_msg.clone());
                             job.progress.stage = "failed".to_string();
+                            metrics.jobs_failed.inc();
                             let _ = task_event_tx.send(ScrapeEvent::JobCompleted {
                                 job_id,
                                 status: "failed".to_string(),
@@ -290,6 +303,7 @@ impl JobManager {
                         let _ = cancel_tx.send(());
                     }
                 }
+                self.metrics.jobs_cancelled.inc();
                 return true;
             }
         }
@@ -567,6 +581,7 @@ async fn run_scrape_job(
     shutdown_rx: &mut broadcast::Receiver<()>,
     event_tx: broadcast::Sender<ScrapeEvent>,
     url_statuses: Arc<DashMap<String, UrlInfo>>,
+    metrics: Arc<DaemonMetrics>,
 ) -> anyhow::Result<JobStats> {
     info!("Starting scrape job {}: {} URLs", job_id, urls.len());
 
@@ -687,8 +702,11 @@ async fn run_scrape_job(
         );
 
         // Process URL through the full coordinator pipeline
+        metrics.scrape_fetch_total.inc();
         let result = coordinator.process_url(&scored_url.url).await;
-        let duration_ms = result.duration.as_millis() as u64;
+        let fetch_duration = result.duration;
+        let duration_ms = fetch_duration.as_millis() as u64;
+        metrics.scrape_fetch_latency.observe(fetch_duration);
 
         if result.success {
             let content = result.content.as_ref().unwrap();
@@ -718,6 +736,7 @@ async fn run_scrape_job(
             chunks_indexed += chunk_count;
             documents_processed += 1;
             urls_succeeded += 1;
+            metrics.scrape_pages_indexed.inc();
 
             // Add discovered URLs to frontier and emit events
             let discovered_count = result.discovered_urls.len();
@@ -779,6 +798,7 @@ async fn run_scrape_job(
 
             if is_skip {
                 urls_skipped += 1;
+                // Not counted as a fetch error (skip is intentional)
                 emit(
                     &event_tx,
                     ScrapeEvent::UrlSkipped {
@@ -799,6 +819,7 @@ async fn run_scrape_job(
                 );
             } else {
                 urls_failed += 1;
+                metrics.scrape_fetch_errors_total.inc();
                 emit(
                     &event_tx,
                     ScrapeEvent::UrlFailed {

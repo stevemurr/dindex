@@ -184,6 +184,7 @@ pub async fn start_node_inner(
     let network_handle = handle.clone();
     let executor = query_executor.clone();
     let local_peer_id = handle.local_peer_id.to_string();
+    let p2p_metrics = daemon.request_handler().metrics().clone();
     tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             match event {
@@ -193,6 +194,7 @@ pub async fn start_node_inner(
                         peer_id,
                         truncate_str(&request.query.text, 50)
                     );
+                    p2p_metrics.p2p_queries_received.inc();
 
                     // Execute the query locally
                     match executor.execute_request(&request) {
@@ -226,9 +228,11 @@ pub async fn start_node_inner(
                 }
                 NetworkEvent::PeerConnected(peer_id) => {
                     info!("Peer connected: {}", peer_id);
+                    p2p_metrics.p2p_connected_peers.inc();
                 }
                 NetworkEvent::PeerDisconnected(peer_id) => {
                     info!("Peer disconnected: {}", peer_id);
+                    p2p_metrics.p2p_connected_peers.dec();
                 }
                 NetworkEvent::AdvertisementReceived(advert) => {
                     info!(

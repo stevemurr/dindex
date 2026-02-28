@@ -47,6 +47,17 @@ pub async fn health() -> impl IntoResponse {
     })
 }
 
+/// Prometheus metrics endpoint
+pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    state.handler.metrics().update_memory_usage();
+    let body = state.handler.metrics().to_prometheus();
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+}
+
 /// Search endpoint
 pub async fn search(
     State(state): State<AppState>,

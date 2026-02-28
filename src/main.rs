@@ -15,6 +15,9 @@ use std::fs::File;
 use std::path::PathBuf;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 mod commands;
 
@@ -362,13 +365,24 @@ fn main() -> Result<()> {
             }
             daemonize::Outcome::Child(Ok(_)) => {
                 // We're the child - continue to start the daemon
-                // Set up logging for file output
-                let subscriber = FmtSubscriber::builder()
-                    .with_max_level(Level::INFO)
-                    .with_target(false)
-                    .with_ansi(false)
-                    .finish();
-                let _ = tracing::subscriber::set_global_default(subscriber);
+                // Set up logging for file output, respecting config format
+                if config.logging.format == "json" {
+                    let log_level: Level = config.logging.level.parse().unwrap_or(Level::INFO);
+                    tracing_subscriber::registry()
+                        .with(tracing_subscriber::fmt::layer()
+                            .json()
+                            .with_target(false)
+                            .with_ansi(false)
+                            .with_filter(tracing_subscriber::filter::LevelFilter::from_level(log_level)))
+                        .init();
+                } else {
+                    let subscriber = FmtSubscriber::builder()
+                        .with_max_level(Level::INFO)
+                        .with_target(false)
+                        .with_ansi(false)
+                        .finish();
+                    let _ = tracing::subscriber::set_global_default(subscriber);
+                }
             }
             daemonize::Outcome::Child(Err(e)) => {
                 eprintln!("Daemon child process error: {}", e);
@@ -383,11 +397,20 @@ fn main() -> Result<()> {
             _ => Level::TRACE,
         };
 
-        let subscriber = FmtSubscriber::builder()
-            .with_max_level(log_level)
-            .with_target(false)
-            .finish();
-        tracing::subscriber::set_global_default(subscriber)?;
+        if config.logging.format == "json" {
+            tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_target(false)
+                    .with_filter(tracing_subscriber::filter::LevelFilter::from_level(log_level)))
+                .init();
+        } else {
+            let subscriber = FmtSubscriber::builder()
+                .with_max_level(log_level)
+                .with_target(false)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)?;
+        }
     }
 
     // Now start the tokio runtime

@@ -90,17 +90,18 @@ impl Daemon {
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = broadcast::channel(16);
 
-        // Start write pipeline
-        let write_pipeline = Arc::new(WritePipeline::start(
+        // Create daemon metrics
+        let metrics = DaemonMetrics::shared();
+
+        // Start write pipeline with metrics
+        let write_pipeline = Arc::new(WritePipeline::start_with_metrics(
             index_manager.clone(),
             embedding_engine.clone(),
             config.bulk_import.batch_size,
             Duration::from_secs(30), // Commit every 30 seconds
             shutdown_rx,
+            Some(metrics.clone()),
         ));
-
-        // Create daemon metrics
-        let metrics = DaemonMetrics::shared();
 
         // Create request handler
         let handler = Arc::new(RequestHandler::new(
@@ -135,6 +136,22 @@ impl Daemon {
 
         // Subscribe to shutdown signal
         let shutdown_rx = self.shutdown_tx.subscribe();
+
+        // Spawn periodic memory usage update
+        let metrics_for_memory = self.handler.metrics().clone();
+        let mut shutdown_rx_memory = self.shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        metrics_for_memory.update_memory_usage();
+                    }
+                    _ = shutdown_rx_memory.recv() => break,
+                }
+            }
+        });
 
         // Start IPC server - run directly, not spawned, to catch errors
         let shutdown_rx_server = self.shutdown_tx.subscribe();

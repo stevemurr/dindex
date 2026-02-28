@@ -34,8 +34,11 @@ pub fn create_router(app_state: AppState, auth_state: AuthState) -> Router {
             auth_state.clone(),
             auth_middleware,
         ))
-        .with_state(app_state);
+        .with_state(app_state.clone());
 
-    // Mount under /api/v1
-    Router::new().nest("/api/v1", api_v1)
+    // Mount under /api/v1, with /metrics outside auth
+    Router::new()
+        .nest("/api/v1", api_v1)
+        .route("/metrics", get(handlers::prometheus_metrics))
+        .with_state(app_state)
 }
