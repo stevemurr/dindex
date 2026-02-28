@@ -22,7 +22,7 @@ use uuid::Uuid;
 use axum::extract::Path;
 
 use crate::daemon::handler::RequestHandler;
-use crate::daemon::protocol::{self, OutputFormat, Request, Response as IpcResponse};
+use crate::daemon::protocol::{self, OutputFormat, ProgressStage, Request, Response as IpcResponse};
 use crate::types::{Document, GroupedSearchResult};
 
 use super::types::*;
@@ -548,7 +548,7 @@ pub async fn get_job_progress(
             StatusCode::OK,
             Json(JobProgressResponse {
                 job_id: job_id.to_string(),
-                stage: "completed".to_string(),
+                stage: ProgressStage::Completed,
                 current: stats.chunks_indexed as u64,
                 total: Some(stats.chunks_indexed as u64),
                 rate: None,
@@ -556,11 +556,11 @@ pub async fn get_job_progress(
             }),
         )
             .into_response(),
-        IpcResponse::JobFailed { job_id, error } => (
+        IpcResponse::JobFailed { job_id, error: _ } => (
             StatusCode::OK,
             Json(JobProgressResponse {
                 job_id: job_id.to_string(),
-                stage: format!("failed: {}", error),
+                stage: ProgressStage::Failed,
                 current: 0,
                 total: None,
                 rate: None,

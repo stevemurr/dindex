@@ -163,11 +163,40 @@ pub enum Request {
     Shutdown,
 }
 
+/// Stage of a long-running job's progress
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressStage {
+    Starting,
+    Parsing,
+    Importing,
+    Scraping,
+    Committing,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl std::fmt::Display for ProgressStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Starting => write!(f, "starting"),
+            Self::Parsing => write!(f, "parsing"),
+            Self::Importing => write!(f, "importing"),
+            Self::Scraping => write!(f, "scraping"),
+            Self::Committing => write!(f, "committing"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed => write!(f, "failed"),
+            Self::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+
 /// Progress information for long-running jobs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Progress {
     pub job_id: Uuid,
-    pub stage: String,
+    pub stage: ProgressStage,
     pub current: u64,
     pub total: Option<u64>,
     pub rate: Option<f64>,

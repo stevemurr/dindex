@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::daemon::protocol::ScrapeOptions;
+use crate::daemon::protocol::{ProgressStage, ScrapeOptions};
 use crate::retrieval::RetrievalMethod;
 
 /// Search request body
@@ -240,7 +240,7 @@ pub struct JobProgressResponse {
     /// The job ID
     pub job_id: String,
     /// Current stage of the job
-    pub stage: String,
+    pub stage: ProgressStage,
     /// Current progress count
     pub current: u64,
     /// Total count (if known)

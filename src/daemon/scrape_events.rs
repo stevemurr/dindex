@@ -42,6 +42,15 @@ pub struct UrlInfo {
     pub updated_at: Instant,
 }
 
+/// Terminal status of a completed scrape job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobCompletionStatus {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
 /// SSE events emitted during scrape jobs.
 ///
 /// Each variant is serialized as internally-tagged JSON (`"type": "variant_name"`)
@@ -114,7 +123,7 @@ pub enum ScrapeEvent {
     /// Job finished (completed, failed, or cancelled).
     JobCompleted {
         job_id: Uuid,
-        status: String,
+        status: JobCompletionStatus,
         stats: Option<JobStats>,
         error: Option<String>,
     },

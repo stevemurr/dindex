@@ -3,7 +3,7 @@ use dindex::{
     chunking::TextSplitter,
     client::{self, ClientError},
     config::Config,
-    daemon::protocol::ScrapeOptions,
+    daemon::protocol::{ProgressStage, ScrapeOptions},
     embedding::init_embedding_engine,
     index::IndexStack,
     util::truncate_for_display,
@@ -75,7 +75,7 @@ pub async fn scrape_urls(
                             use std::io::Write;
                             std::io::stdout().flush().ok();
 
-                            if progress.stage == "completed" || progress.stage == "failed" || progress.stage == "cancelled" {
+                            if matches!(progress.stage, ProgressStage::Completed | ProgressStage::Failed | ProgressStage::Cancelled) {
                                 println!("\nScrape {}", progress.stage);
                                 break;
                             }

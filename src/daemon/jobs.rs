@@ -23,8 +23,8 @@ use url::Url;
 
 use super::index_manager::IndexManager;
 use super::metrics::DaemonMetrics;
-use super::protocol::{ImportOptions, ImportSource, JobStats, Progress, ScrapeOptions};
-use super::scrape_events::{ScrapeEvent, UrlInfo, UrlSource, UrlStatus};
+use super::protocol::{ImportOptions, ImportSource, JobStats, Progress, ProgressStage, ScrapeOptions};
+use super::scrape_events::{JobCompletionStatus, ScrapeEvent, UrlInfo, UrlSource, UrlStatus};
 use super::write_pipeline::{IngestItem, WritePipeline};
 
 /// Job state
@@ -115,7 +115,7 @@ impl JobManager {
             state: JobState::Running,
             progress: Progress {
                 job_id,
-                stage: "starting".to_string(),
+                stage: ProgressStage::Starting,
                 current: 0,
                 total: None,
                 rate: None,
@@ -162,14 +162,14 @@ impl JobManager {
                     Ok(stats) => {
                         job.state = JobState::Completed;
                         job.stats = Some(stats);
-                        job.progress.stage = "completed".to_string();
+                        job.progress.stage = ProgressStage::Completed;
                         metrics.jobs_completed.inc();
                     }
                     Err(e) => {
                         if job.state != JobState::Cancelled {
                             job.state = JobState::Failed;
                             job.error = Some(e.to_string());
-                            job.progress.stage = "failed".to_string();
+                            job.progress.stage = ProgressStage::Failed;
                             metrics.jobs_failed.inc();
                         }
                     }
@@ -198,7 +198,7 @@ impl JobManager {
             state: JobState::Running,
             progress: Progress {
                 job_id,
-                stage: "starting".to_string(),
+                stage: ProgressStage::Starting,
                 current: 0,
                 total: Some(urls.len() as u64),
                 rate: None,
@@ -249,11 +249,11 @@ impl JobManager {
                     Ok(stats) => {
                         job.state = JobState::Completed;
                         job.stats = Some(stats.clone());
-                        job.progress.stage = "completed".to_string();
+                        job.progress.stage = ProgressStage::Completed;
                         metrics.jobs_completed.inc();
                         let _ = task_event_tx.send(ScrapeEvent::JobCompleted {
                             job_id,
-                            status: "completed".to_string(),
+                            status: JobCompletionStatus::Completed,
                             stats: Some(stats.clone()),
                             error: None,
                         });
@@ -262,7 +262,7 @@ impl JobManager {
                         if job.state == JobState::Cancelled {
                             let _ = task_event_tx.send(ScrapeEvent::JobCompleted {
                                 job_id,
-                                status: "cancelled".to_string(),
+                                status: JobCompletionStatus::Cancelled,
                                 stats: None,
                                 error: None,
                             });
@@ -270,11 +270,11 @@ impl JobManager {
                             job.state = JobState::Failed;
                             let err_msg = e.to_string();
                             job.error = Some(err_msg.clone());
-                            job.progress.stage = "failed".to_string();
+                            job.progress.stage = ProgressStage::Failed;
                             metrics.jobs_failed.inc();
                             let _ = task_event_tx.send(ScrapeEvent::JobCompleted {
                                 job_id,
-                                status: "failed".to_string(),
+                                status: JobCompletionStatus::Failed,
                                 stats: None,
                                 error: Some(err_msg),
                             });
@@ -299,7 +299,7 @@ impl JobManager {
         if let Some(mut job) = self.jobs.get_mut(&job_id) {
             if job.state == JobState::Running {
                 job.state = JobState::Cancelled;
-                job.progress.stage = "cancelled".to_string();
+                job.progress.stage = ProgressStage::Cancelled;
                 if let Ok(mut guard) = job.cancel_tx.lock() {
                     if let Some(cancel_tx) = guard.take() {
                         let _ = cancel_tx.send(());
@@ -357,9 +357,9 @@ async fn run_import_job(
     let mut errors = 0usize;
 
     // Update progress helper
-    fn update_progress(jobs: &DashMap<Uuid, JobInfo>, job_id: Uuid, stage: &str, current: u64, total: Option<u64>) {
+    fn update_progress(jobs: &DashMap<Uuid, JobInfo>, job_id: Uuid, stage: ProgressStage, current: u64, total: Option<u64>) {
         if let Some(mut job) = jobs.get_mut(&job_id) {
-            job.progress.stage = stage.to_string();
+            job.progress.stage = stage;
             job.progress.current = current;
             job.progress.total = total;
 
@@ -389,7 +389,7 @@ async fn run_import_job(
             // Create wikimedia source - needs to be mutable for iter_documents
             let mut wiki_source = WikimediaSource::open(&path)?;
 
-            update_progress(&jobs, job_id, "parsing", 0, None);
+            update_progress(&jobs, job_id, ProgressStage::Parsing, 0, None);
 
             // Process documents in batches to avoid holding iterator across await points
             let min_content_length = config.bulk_import.min_content_length;
@@ -438,7 +438,7 @@ async fn run_import_job(
 
                 // Update parsing progress if we haven't started processing yet
                 if documents_processed == 0 && docs_parsed > 0 {
-                    update_progress(&jobs, job_id, "parsing", docs_parsed as u64, None);
+                    update_progress(&jobs, job_id, ProgressStage::Parsing, docs_parsed as u64, None);
                 }
 
                 // If no documents in batch, we're done
@@ -471,7 +471,7 @@ async fn run_import_job(
 
                     // Update progress more frequently (every 500ms or every 10 docs)
                     if documents_processed % 10 == 0 || last_progress_update.elapsed() > Duration::from_millis(500) {
-                        update_progress(&jobs, job_id, "importing", documents_processed as u64, None);
+                        update_progress(&jobs, job_id, ProgressStage::Importing, documents_processed as u64, None);
                         last_progress_update = Instant::now();
                     }
                 }
@@ -481,7 +481,7 @@ async fn run_import_job(
             }
 
             // Commit changes
-            update_progress(&jobs, job_id, "committing", documents_processed as u64, None);
+            update_progress(&jobs, job_id, ProgressStage::Committing, documents_processed as u64, None);
             index_manager.commit()?;
         }
         ImportSource::Zim { path: _ } => {
@@ -868,7 +868,7 @@ async fn run_scrape_job(
 
         // Update polling-compatible progress
         if let Some(mut job) = jobs.get_mut(&job_id) {
-            job.progress.stage = "scraping".to_string();
+            job.progress.stage = ProgressStage::Scraping;
             job.progress.current = total_processed;
             job.progress.total = Some((total_processed + coord_stats.queue_size as u64).max(total_processed));
             job.progress.rate = rate;
@@ -877,7 +877,7 @@ async fn run_scrape_job(
 
     // Commit changes
     if let Some(mut job) = jobs.get_mut(&job_id) {
-        job.progress.stage = "committing".to_string();
+        job.progress.stage = ProgressStage::Committing;
     }
     index_manager.commit()?;
 

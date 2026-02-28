@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use dindex::{
     client::{self, ClientError},
     config::Config,
-    daemon::protocol::{ImportOptions, ImportSource},
+    daemon::protocol::{ImportOptions, ImportSource, ProgressStage},
     embedding::init_embedding_engine,
     import::{DumpFormat, ImportCheckpoint, ImportCoordinatorBuilder, WikimediaSource},
 };
@@ -98,7 +98,7 @@ pub async fn import_dump(
                                 std::io::stdout().flush().ok();
                             }
 
-                            if progress.stage == "completed" || progress.stage == "failed" || progress.stage == "cancelled" {
+                            if matches!(progress.stage, ProgressStage::Completed | ProgressStage::Failed | ProgressStage::Cancelled) {
                                 if !quiet {
                                     println!("\nImport {}", progress.stage);
                                 }
