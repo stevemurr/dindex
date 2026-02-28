@@ -261,4 +261,12 @@ extension DIndexClient {
     public func cancelJob(jobId: String) async throws -> JobCancelResponse {
         try await transport.post(path: "/api/v1/jobs/\(jobId)/cancel")
     }
+
+    /// Subscribe to real-time events for a scrape job via SSE
+    ///
+    /// - Parameter jobId: The job ID to subscribe to
+    /// - Returns: An async stream of scrape events
+    public func subscribeToJobEvents(jobId: String) -> AsyncThrowingStream<ScrapeEvent, Error> {
+        transport.streamSSE(path: "/api/v1/jobs/\(jobId)/events")
+    }
 }
