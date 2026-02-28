@@ -23,7 +23,7 @@ pub fn compute_aggregator_score(document: &Html, text_content: &str) -> f32 {
 }
 
 /// Check for RSS/Atom feed links in the document head.
-pub fn detect_feed_links(document: &Html) -> f32 {
+fn detect_feed_links(document: &Html) -> f32 {
     let selectors = [
         "link[type='application/rss+xml']",
         "link[type='application/atom+xml']",
@@ -40,7 +40,7 @@ pub fn detect_feed_links(document: &Html) -> f32 {
 
 /// Compute external link density: ratio of external `<a>` text length to total text length.
 /// Returns 0.0 for <5% density, scales linearly to 1.0 at >=50% density.
-pub fn compute_external_link_density(document: &Html, text_content: &str) -> f32 {
+fn compute_external_link_density(document: &Html, text_content: &str) -> f32 {
     let total_text_len = text_content.len();
     if total_text_len == 0 {
         return 0.0;
@@ -74,7 +74,7 @@ pub fn compute_external_link_density(document: &Html, text_content: &str) -> f32
 /// Compute content structure score.
 /// Presence of `<article>` reduces score; heavy `<li>` lists with links and
 /// short content increase it.
-pub fn compute_structure_score(document: &Html, text_content: &str) -> f32 {
+fn compute_structure_score(document: &Html, text_content: &str) -> f32 {
     let word_count = text_content.split_whitespace().count();
     let mut score = 0.0f32;
 

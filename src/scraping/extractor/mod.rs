@@ -19,11 +19,11 @@ use url::Url;
 
 /// Content extractor
 pub struct ContentExtractor {
-    pub(crate) config: ExtractorConfig,
+    pub(super) config: ExtractorConfig,
     /// Pre-compiled selectors for finding main content
-    pub(crate) content_selectors: Vec<Selector>,
+    pub(super) content_selectors: Vec<Selector>,
     /// Pre-compiled meta selectors: maps meta name → (name selector, property selector)
-    pub(crate) meta_selectors: HashMap<String, (Option<Selector>, Option<Selector>)>,
+    pub(super) meta_selectors: HashMap<String, (Option<Selector>, Option<Selector>)>,
 }
 
 impl ContentExtractor {

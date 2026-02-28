@@ -4,7 +4,7 @@
 //! deduplication, and indexing. Manages the scraping lifecycle and integrates
 //! with the P2P network for distributed crawling.
 
-pub mod pipeline;
+mod pipeline;
 mod types;
 mod url_filter;
 

@@ -19,7 +19,7 @@ use crate::scraping::coordinator::{
 use super::super::index_manager::IndexManager;
 use super::super::metrics::DaemonMetrics;
 use super::super::protocol::{JobStats, ProgressStage, ScrapeOptions};
-use super::super::scrape_events::{JobCompletionStatus, ScrapeEvent, UrlInfo, UrlSource, UrlStatus};
+use super::super::scrape_events::{ScrapeEvent, UrlInfo, UrlSource, UrlStatus};
 use super::super::write_pipeline::{IngestItem, WritePipeline};
 use super::JobInfo;
 

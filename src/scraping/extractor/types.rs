@@ -86,7 +86,7 @@ pub enum ContentType {
 }
 
 impl ContentType {
-    pub fn from_schema_type(schema_type: &str) -> Self {
+    pub(crate) fn from_schema_type(schema_type: &str) -> Self {
         match schema_type.to_lowercase().as_str() {
             "article" | "newsarticle" | "blogposting" | "technicalarticle" => ContentType::Article,
             "product" => ContentType::Product,
