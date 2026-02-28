@@ -337,7 +337,7 @@ impl PolitenessController {
         let state = self
             .domain_state
             .entry(hostname.to_string())
-            .or_insert_with(DomainState::default);
+            .or_default();
 
         // Check if we're in a backoff period
         if let Some(backoff_until) = state.backoff_until {
@@ -409,7 +409,7 @@ impl PolitenessController {
         let state = self
             .domain_state
             .entry(hostname.to_string())
-            .or_insert_with(DomainState::default);
+            .or_default();
 
         state.last_fetch = Instant::now();
         state.consecutive_429s = 0;
@@ -421,7 +421,7 @@ impl PolitenessController {
         let state = self
             .domain_state
             .entry(hostname.to_string())
-            .or_insert_with(DomainState::default);
+            .or_default();
 
         state.consecutive_429s += 1;
         state.last_fetch = Instant::now();
@@ -440,7 +440,7 @@ impl PolitenessController {
         let state = self
             .domain_state
             .entry(hostname.to_string())
-            .or_insert_with(DomainState::default);
+            .or_default();
 
         state.last_fetch = Instant::now();
         // Small backoff on errors

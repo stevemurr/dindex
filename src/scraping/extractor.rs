@@ -134,6 +134,8 @@ pub struct ContentExtractor {
     config: ExtractorConfig,
     /// Pre-compiled selectors for finding main content
     content_selectors: Vec<Selector>,
+    /// Pre-compiled meta selectors: maps meta name → (name selector, property selector)
+    meta_selectors: HashMap<String, (Option<Selector>, Option<Selector>)>,
 }
 
 impl ContentExtractor {
@@ -156,12 +158,25 @@ impl ContentExtractor {
         .filter_map(|s| Selector::parse(s).ok())
         .collect();
 
-        // Note: We don't need remove_selectors because the `readability` library
-        // handles boilerplate removal (scripts, styles, nav, etc.) internally
+        // Pre-compile meta selectors for all known meta names used across extraction
+        let meta_names = [
+            "og:title", "og:description", "og:type", "og:url", "og:image", "og:locale",
+            "twitter:title", "twitter:description", "twitter:card", "twitter:site", "twitter:creator",
+            "title", "description", "author", "keywords", "date", "language",
+            "article:published_time",
+        ];
+
+        let mut meta_selectors = HashMap::with_capacity(meta_names.len());
+        for name in &meta_names {
+            let name_sel = Selector::parse(&format!("meta[name='{}']", name)).ok();
+            let prop_sel = Selector::parse(&format!("meta[property='{}']", name)).ok();
+            meta_selectors.insert(name.to_string(), (name_sel, prop_sel));
+        }
 
         Self {
             config,
             content_selectors,
+            meta_selectors,
         }
     }
 
@@ -473,51 +488,136 @@ impl ContentExtractor {
         String::new()
     }
 
-    /// Extract clean text from HTML
+    /// Extract clean text from HTML, preserving structure as markdown
     fn extract_text(&self, html: &str) -> String {
         let fragment = Html::parse_fragment(html);
 
-        // Get all text nodes, excluding scripts and styles
         let mut text = String::new();
         let mut last_was_block = false;
+        let mut in_pre = false;
+        let mut list_depth: u32 = 0;
 
         for node in fragment.root_element().descendants() {
             if let Some(text_node) = node.value().as_text() {
-                let t = text_node.trim();
+                let t = if in_pre {
+                    text_node.to_string()
+                } else {
+                    text_node.trim().to_string()
+                };
                 if !t.is_empty() {
-                    if last_was_block {
+                    if last_was_block && !text.is_empty() {
                         text.push('\n');
-                    } else if !text.is_empty() {
+                    } else if !text.is_empty() && !in_pre {
                         text.push(' ');
                     }
-                    text.push_str(t);
+                    text.push_str(&t);
                     last_was_block = false;
                 }
             } else if let Some(elem) = node.value().as_element() {
-                // Check if this is a block element
                 let name = elem.name();
-                let is_block = matches!(
-                    name,
-                    "p" | "div"
-                        | "br"
-                        | "h1"
-                        | "h2"
-                        | "h3"
-                        | "h4"
-                        | "h5"
-                        | "h6"
-                        | "li"
-                        | "tr"
-                        | "blockquote"
-                );
-                if is_block {
-                    last_was_block = true;
+                match name {
+                    // Headings → markdown prefixes
+                    "h1" => {
+                        if !text.is_empty() { text.push_str("\n\n"); }
+                        text.push_str("# ");
+                        last_was_block = false;
+                    }
+                    "h2" => {
+                        if !text.is_empty() { text.push_str("\n\n"); }
+                        text.push_str("## ");
+                        last_was_block = false;
+                    }
+                    "h3" => {
+                        if !text.is_empty() { text.push_str("\n\n"); }
+                        text.push_str("### ");
+                        last_was_block = false;
+                    }
+                    "h4" => {
+                        if !text.is_empty() { text.push_str("\n\n"); }
+                        text.push_str("#### ");
+                        last_was_block = false;
+                    }
+                    "h5" => {
+                        if !text.is_empty() { text.push_str("\n\n"); }
+                        text.push_str("##### ");
+                        last_was_block = false;
+                    }
+                    "h6" => {
+                        if !text.is_empty() { text.push_str("\n\n"); }
+                        text.push_str("###### ");
+                        last_was_block = false;
+                    }
+                    // Paragraphs → double newline
+                    "p" => {
+                        if !text.is_empty() { text.push_str("\n\n"); }
+                        last_was_block = false;
+                    }
+                    // List items → bullet prefix
+                    "li" => {
+                        text.push('\n');
+                        let indent = "  ".repeat(list_depth.saturating_sub(1) as usize);
+                        text.push_str(&indent);
+                        text.push_str("- ");
+                        last_was_block = false;
+                    }
+                    "ul" | "ol" => {
+                        list_depth += 1;
+                        last_was_block = true;
+                    }
+                    // Preformatted/code blocks
+                    "pre" | "code" => {
+                        in_pre = true;
+                        if name == "pre" {
+                            text.push_str("\n\n```\n");
+                        }
+                        last_was_block = false;
+                    }
+                    // Other block elements
+                    "div" | "br" | "tr" | "blockquote" | "section" | "header"
+                    | "footer" | "aside" => {
+                        last_was_block = true;
+                    }
+                    // Skip script and style content entirely
+                    "script" | "style" | "noscript" => {
+                        // These are handled by readability, but skip just in case
+                    }
+                    _ => {}
                 }
             }
         }
 
-        // Clean up whitespace
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
+        // Normalize whitespace while preserving paragraph breaks and structure
+        Self::normalize_whitespace(&text)
+    }
+
+    /// Normalize whitespace: collapse runs of spaces on each line, preserve
+    /// paragraph breaks (double newlines), and trim trailing whitespace.
+    fn normalize_whitespace(text: &str) -> String {
+        let mut result = String::with_capacity(text.len());
+        let mut consecutive_newlines = 0u32;
+
+        for line in text.split('\n') {
+            let trimmed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+
+            if trimmed.is_empty() {
+                consecutive_newlines += 1;
+                continue;
+            }
+
+            // Emit appropriate newlines between non-empty lines
+            if !result.is_empty() {
+                if consecutive_newlines >= 2 {
+                    result.push_str("\n\n");
+                } else {
+                    result.push('\n');
+                }
+            }
+
+            consecutive_newlines = 0;
+            result.push_str(&trimmed);
+        }
+
+        result
     }
 
     /// Extract author
@@ -637,11 +737,40 @@ impl ContentExtractor {
         self.get_meta_content(document, "og:url")
     }
 
-    /// Get meta content by name or property
+    /// Get meta content by name or property, using pre-compiled selectors when available
     fn get_meta_content(&self, document: &Html, name: &str) -> Option<String> {
-        // Try name attribute
-        let name_selector = format!("meta[name='{}']", name);
-        if let Ok(selector) = Selector::parse(&name_selector) {
+        // Try cached selectors first
+        if let Some((name_sel, prop_sel)) = self.meta_selectors.get(name) {
+            // Try name attribute
+            if let Some(selector) = name_sel {
+                if let Some(elem) = document.select(selector).next() {
+                    if let Some(content) = elem.value().attr("content") {
+                        let trimmed = content.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Try property attribute (for OpenGraph)
+            if let Some(selector) = prop_sel {
+                if let Some(elem) = document.select(selector).next() {
+                    if let Some(content) = elem.value().attr("content") {
+                        let trimmed = content.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+
+            return None;
+        }
+
+        // Fallback: parse selectors dynamically for uncached names
+        let name_selector_str = format!("meta[name='{}']", name);
+        if let Ok(selector) = Selector::parse(&name_selector_str) {
             if let Some(elem) = document.select(&selector).next() {
                 if let Some(content) = elem.value().attr("content") {
                     let trimmed = content.trim();
@@ -652,9 +781,8 @@ impl ContentExtractor {
             }
         }
 
-        // Try property attribute (for OpenGraph)
-        let prop_selector = format!("meta[property='{}']", name);
-        if let Ok(selector) = Selector::parse(&prop_selector) {
+        let prop_selector_str = format!("meta[property='{}']", name);
+        if let Ok(selector) = Selector::parse(&prop_selector_str) {
             if let Some(elem) = document.select(&selector).next() {
                 if let Some(content) = elem.value().attr("content") {
                     let trimmed = content.trim();

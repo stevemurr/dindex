@@ -175,18 +175,12 @@ impl ContentDeduplicator {
             return Some(doc_id.clone());
         }
 
-        // Check near-duplicates (expensive for large caches)
-        // In production, use a more efficient structure
-        let cache_snapshot: Vec<(u64, DocumentId)> = self
-            .local_cache
-            .iter()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
-
-        for (cached_hash, doc_id) in cache_snapshot {
-            let cached_simhash = SimHash(cached_hash);
-            if simhash.is_similar(&cached_simhash, self.max_distance) {
-                return Some(doc_id);
+        // Check near-duplicates by iterating in place (no clone)
+        let max_dist = self.max_distance;
+        for (cached_hash, doc_id) in self.local_cache.iter() {
+            let cached_simhash = SimHash(*cached_hash);
+            if simhash.is_similar(&cached_simhash, max_dist) {
+                return Some(doc_id.clone());
             }
         }
 

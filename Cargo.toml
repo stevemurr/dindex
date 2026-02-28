@@ -6,10 +6,6 @@ description = "Decentralized semantic search index for LLM consumption"
 license = "MIT"
 authors = ["DIndex Contributors"]
 
-[features]
-default = []
-onnx = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
-
 [dependencies]
 # P2P Networking
 libp2p = { version = "0.54", features = [
@@ -37,8 +33,6 @@ async-trait = "0.1"
 
 # Vector index
 usearch = "2"
-
-ndarray = { version = "0.17", optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -105,10 +99,6 @@ axum = { version = "0.7", features = ["tokio", "json"] }
 tower = { version = "0.4", features = ["timeout", "limit"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-
-# Optional: ONNX reranking (enable with --features onnx)
-ort = { version = "=2.0.0-rc.10", optional = true }
-tokenizers = { version = "0.20", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

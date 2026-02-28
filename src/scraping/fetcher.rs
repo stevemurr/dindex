@@ -344,43 +344,31 @@ impl FetchEngine {
     }
 }
 
-/// Extract URLs from a fetch result
+/// Extract URLs from a fetch result using proper HTML parsing
 pub fn extract_urls(result: &FetchResult) -> Vec<Url> {
+    use scraper::{Html, Selector};
+    use std::collections::HashSet;
+
+    let base_url = &result.final_url;
+    let document = Html::parse_document(&result.body);
+
+    let selector = match Selector::parse("a[href]") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut seen = HashSet::new();
     let mut urls = Vec::new();
 
-    // Use simple regex-like matching for href attributes
-    let base_url = &result.final_url;
-
-    // Find all href values
-    for (start_idx, _) in result.body.match_indices("href=\"") {
-        let start = start_idx + 6; // len of 'href="'
-        if let Some(end_offset) = result.body[start..].find('"') {
-            let href = &result.body[start..start + end_offset];
+    for element in document.select(&selector) {
+        if let Some(href) = element.value().attr("href") {
             if let Ok(url) = base_url.join(href) {
-                // Only include http/https URLs
-                if url.scheme() == "http" || url.scheme() == "https" {
+                if (url.scheme() == "http" || url.scheme() == "https") && seen.insert(url.as_str().to_string()) {
                     urls.push(url);
                 }
             }
         }
     }
-
-    // Also check href='...'
-    for (start_idx, _) in result.body.match_indices("href='") {
-        let start = start_idx + 6;
-        if let Some(end_offset) = result.body[start..].find('\'') {
-            let href = &result.body[start..start + end_offset];
-            if let Ok(url) = base_url.join(href) {
-                if url.scheme() == "http" || url.scheme() == "https" {
-                    urls.push(url);
-                }
-            }
-        }
-    }
-
-    // Deduplicate
-    urls.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    urls.dedup();
 
     urls
 }

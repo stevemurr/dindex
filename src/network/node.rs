@@ -394,15 +394,20 @@ impl NetworkNode {
                     .kademlia
                     .add_address(&peer_id, endpoint.get_remote_address().clone());
 
-                let _ = self.event_tx.send(NetworkEvent::PeerConnected(peer_id)).await;
+                if let Err(e) = self.event_tx.send(NetworkEvent::PeerConnected(peer_id)).await {
+                    warn!("Failed to send PeerConnected event: {}", e);
+                }
             }
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 info!("Disconnected from peer: {}", peer_id);
                 self.connected_peers.write().remove(&peer_id);
-                let _ = self
+                if let Err(e) = self
                     .event_tx
                     .send(NetworkEvent::PeerDisconnected(peer_id))
-                    .await;
+                    .await
+                {
+                    warn!("Failed to send PeerDisconnected event: {}", e);
+                }
             }
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("Listening on: {}/p2p/{}", address, self.local_peer_id);

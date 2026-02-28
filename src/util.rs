@@ -44,11 +44,11 @@ pub fn compute_simhash<'a>(features: impl Iterator<Item = &'a str>) -> u64 {
     for feature in features {
         has_features = true;
         let hash = xxhash_rust::xxh3::xxh3_64(feature.as_bytes());
-        for i in 0..64 {
+        for (i, vote) in v.iter_mut().enumerate() {
             if (hash >> i) & 1 == 1 {
-                v[i] += 1;
+                *vote += 1;
             } else {
-                v[i] -= 1;
+                *vote -= 1;
             }
         }
     }
@@ -58,8 +58,8 @@ pub fn compute_simhash<'a>(features: impl Iterator<Item = &'a str>) -> u64 {
     }
 
     let mut simhash: u64 = 0;
-    for i in 0..64 {
-        if v[i] > 0 {
+    for (i, vote) in v.iter().enumerate() {
+        if *vote > 0 {
             simhash |= 1u64 << i;
         }
     }

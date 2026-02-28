@@ -30,18 +30,67 @@ pub use fetcher::FetchEngine;
 pub use frontier::{ScoredUrl, UrlFrontier};
 pub use politeness::{FetchDecision, PolitenessController};
 
-/// Normalize a URL for deduplication (strip fragment, sort query params, lowercase)
+/// Tracking/session query parameters to strip during normalization
+const TRACKING_PARAMS: &[&str] = &[
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "fbclid",
+    "gclid",
+    "sid",
+    "sessionid",
+    "ref",
+    "source",
+];
+
+/// Normalize a URL for deduplication
+///
+/// - Strips fragments
+/// - Removes `www.` prefix from hostnames
+/// - Removes trailing slashes from non-root paths
+/// - Strips tracking/session query parameters
+/// - Sorts remaining query parameters
+/// - Lowercases the result
 pub(crate) fn normalize_url(url: &url::Url) -> String {
     let mut normalized = url.clone();
 
     // Remove fragment
     normalized.set_fragment(None);
 
-    // Sort query parameters
+    // Strip www. prefix from hostname
+    if let Some(host) = normalized.host_str() {
+        if let Some(stripped) = host.strip_prefix("www.") {
+            let stripped = stripped.to_string();
+            let _ = normalized.set_host(Some(&stripped));
+        }
+    }
+
+    // Remove trailing slash from non-root paths
+    let path = normalized.path().to_string();
+    if path.len() > 1 && path.ends_with('/') {
+        normalized.set_path(&path[..path.len() - 1]);
+    }
+
+    // Filter out tracking parameters and sort remaining ones
     if let Some(query) = normalized.query() {
-        let mut params: Vec<_> = query.split('&').collect();
-        params.sort();
-        normalized.set_query(Some(&params.join("&")));
+        let params: Vec<_> = query
+            .split('&')
+            .filter(|p| {
+                let key = p.split('=').next().unwrap_or("");
+                let key_lower = key.to_lowercase();
+                !TRACKING_PARAMS.contains(&key_lower.as_str())
+            })
+            .collect();
+
+        if params.is_empty() {
+            normalized.set_query(None);
+        } else {
+            let mut sorted_params = params;
+            sorted_params.sort();
+            normalized.set_query(Some(&sorted_params.join("&")));
+        }
     }
 
     normalized.as_str().to_lowercase()

@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use url::Url;
 
 use super::{
@@ -115,10 +115,8 @@ pub struct ScrapingStats {
 pub struct ScrapingCoordinator {
     /// Configuration
     config: ScrapingConfig,
-    /// Local peer ID - stored for potential future distributed coordination.
-    /// Currently passed to sub-components during initialization.
-    #[allow(dead_code)]
-    local_peer_id: PeerId,
+    /// Local peer ID
+    _local_peer_id: PeerId,
     /// Domain assignment
     domain_assignment: Arc<RwLock<DomainAssignment>>,
     /// URL frontier
@@ -127,8 +125,8 @@ pub struct ScrapingCoordinator {
     politeness: Arc<RwLock<PolitenessController>>,
     /// Fetch engine
     fetcher: Arc<RwLock<FetchEngine>>,
-    /// Content extractor
-    extractor: ContentExtractor,
+    /// Content extractor (Arc for spawn_blocking sharing)
+    extractor: Arc<ContentExtractor>,
     /// URL deduplicator
     url_dedup: Arc<RwLock<UrlDeduplicator>>,
     /// Content deduplicator (legacy, used if no registry is provided)
@@ -157,14 +155,14 @@ impl ScrapingCoordinator {
 
         let politeness = PolitenessController::new(config.politeness.clone());
         let fetcher = FetchEngine::new(config.fetch.clone())?;
-        let extractor = ContentExtractor::new(config.extractor.clone());
+        let extractor = Arc::new(ContentExtractor::new(config.extractor.clone()));
 
         let url_dedup = UrlDeduplicator::default();
         let content_dedup = ContentDeduplicator::new(100_000, 3, local_peer_id.clone());
 
         Ok(Self {
             config,
-            local_peer_id,
+            _local_peer_id: local_peer_id,
             domain_assignment,
             frontier: Arc::new(RwLock::new(frontier)),
             politeness: Arc::new(RwLock::new(politeness)),
@@ -294,8 +292,35 @@ impl ScrapingCoordinator {
             }
         };
 
-        // Extract content
-        let content = match self.extractor.extract(&response.body, url) {
+        // Extract content and metadata on a blocking thread to avoid
+        // starving the tokio runtime with CPU-bound HTML parsing.
+        let extractor = Arc::clone(&self.extractor);
+        let body_clone = response.body.clone();
+        let url_clone = url.clone();
+        let extraction = tokio::task::spawn_blocking(move || {
+            let content = extractor.extract(&body_clone, &url_clone);
+            let metadata = extractor.extract_metadata(&body_clone, &url_clone);
+            (content, metadata)
+        })
+        .await;
+
+        let (content_result, metadata) = match extraction {
+            Ok(pair) => pair,
+            Err(e) => {
+                return ProcessResult {
+                    url: url.clone(),
+                    success: false,
+                    content: None,
+                    metadata: None,
+                    simhash: None,
+                    discovered_urls: extract_urls(&response),
+                    error: Some(format!("Extraction task failed: {}", e)),
+                    duration: start.elapsed(),
+                };
+            }
+        };
+
+        let content = match content_result {
             Ok(c) => c,
             Err(e) => {
                 return ProcessResult {
@@ -310,6 +335,19 @@ impl ScrapingCoordinator {
                 };
             }
         };
+
+        // If a canonical URL differs from the fetched URL, mark the canonical as
+        // seen so that future encounters are deduplicated against it.
+        if let Some(ref canonical) = metadata.canonical_url {
+            if let Ok(canonical_parsed) = Url::parse(canonical) {
+                let canonical_normalized = super::normalize_url(&canonical_parsed);
+                let fetched_normalized = super::normalize_url(url);
+                if canonical_normalized != fetched_normalized {
+                    let mut url_dedup = self.url_dedup.write().await;
+                    url_dedup.mark_seen(&canonical_parsed);
+                }
+            }
+        }
 
         // Check content deduplication using registry if available, otherwise use legacy dedup
         let simhash = if let Some(ref registry) = self.document_registry {
@@ -382,9 +420,6 @@ impl ScrapingCoordinator {
             let doc_id = format!("{}:{}", hostname, uuid::Uuid::new_v4());
             content_dedup.register(&content.text_content, doc_id)
         };
-
-        // Extract metadata
-        let metadata = self.extractor.extract_metadata(&response.body, url);
 
         // Extract URLs for further crawling
         let discovered_urls = self.filter_discovered_urls(&response, url);
@@ -479,44 +514,71 @@ impl ScrapingCoordinator {
         frontier.pop_next(&ready_domains, &tracked_domains)
     }
 
-    /// Run the scraping loop
-    pub async fn run(&self) {
+    /// Run the scraping loop with concurrent fetching.
+    ///
+    /// Uses a semaphore to limit concurrency to `max_concurrent_fetches` while
+    /// maintaining per-domain politeness through the frontier and politeness controller.
+    pub async fn run(self: &Arc<Self>) {
         {
             let mut running = self.running.write().await;
             *running = true;
         }
 
-        tracing::info!("Starting scraping coordinator");
+        let max_concurrent = self.config.max_concurrent_fetches.max(1);
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+
+        tracing::info!(
+            "Starting scraping coordinator (max_concurrent_fetches={})",
+            max_concurrent
+        );
 
         while *self.running.read().await {
+            // Try to acquire a permit (non-blocking check first)
+            let permit = match semaphore.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    // All slots full, wait for one to free up
+                    match semaphore.clone().acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => break, // Semaphore closed
+                    }
+                }
+            };
+
             // Get next URL
             let next_url = self.get_next_url().await;
 
             match next_url {
                 Some(scored_url) => {
-                    let result = self.process_url(&scored_url.url).await;
+                    let coordinator = Arc::clone(self);
+                    tokio::spawn(async move {
+                        let _permit = permit; // Held until task completes
 
-                    if result.success {
-                        tracing::debug!(
-                            "Processed {} - {} words, {} URLs discovered",
-                            result.url,
-                            result.content.as_ref().map(|c| c.word_count).unwrap_or(0),
-                            result.discovered_urls.len()
-                        );
+                        let result = coordinator.process_url(&scored_url.url).await;
 
-                        // Add discovered URLs
-                        self.add_discovered_urls(result.discovered_urls, scored_url.depth)
-                            .await;
-                    } else {
-                        tracing::debug!(
-                            "Failed to process {}: {}",
-                            result.url,
-                            result.error.unwrap_or_default()
-                        );
-                    }
+                        if result.success {
+                            tracing::debug!(
+                                "Processed {} - {} words, {} URLs discovered",
+                                result.url,
+                                result.content.as_ref().map(|c| c.word_count).unwrap_or(0),
+                                result.discovered_urls.len()
+                            );
+
+                            coordinator
+                                .add_discovered_urls(result.discovered_urls, scored_url.depth)
+                                .await;
+                        } else {
+                            tracing::debug!(
+                                "Failed to process {}: {}",
+                                result.url,
+                                result.error.unwrap_or_default()
+                            );
+                        }
+                    });
                 }
                 None => {
-                    // No URLs ready, wait a bit
+                    // No URLs ready, release permit and wait
+                    drop(permit);
                     tokio::time::sleep(self.config.scrape_interval).await;
                 }
             }

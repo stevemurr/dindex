@@ -14,6 +14,26 @@ use url::Url;
 
 use super::domain_assignment::{DomainAssignment, PeerId};
 
+/// URL path patterns that indicate aggregator/listing pages rather than original content.
+/// These are deprioritized since they typically duplicate content found at canonical URLs.
+const AGGREGATOR_PATH_SEGMENTS: &[&str] = &[
+    "/tag/",
+    "/tags/",
+    "/category/",
+    "/categories/",
+    "/archive/",
+    "/archives/",
+    "/author/",
+    "/page/",
+    "/label/",
+    "/topic/",
+];
+
+/// Query parameter keys that indicate sorting/filtering views of the same content.
+const AGGREGATOR_QUERY_KEYS: &[&str] = &[
+    "sort", "order", "orderby", "filter", "view", "page", "p",
+];
+
 /// A URL with its priority score and metadata
 #[derive(Debug, Clone)]
 pub struct ScoredUrl {
@@ -29,11 +49,14 @@ pub struct ScoredUrl {
     pub inlink_count: u32,
     /// Whether this appears to be time-sensitive content
     pub is_fresh_content: bool,
+    /// Whether this URL looks like an aggregator/listing page
+    pub is_aggregator: bool,
 }
 
 impl ScoredUrl {
     /// Create a new scored URL with default values
     pub fn new(url: Url) -> Self {
+        let is_aggregator = Self::detect_aggregator(&url);
         Self {
             url,
             priority: 0.0,
@@ -41,6 +64,7 @@ impl ScoredUrl {
             discovered_at: Instant::now(),
             inlink_count: 0,
             is_fresh_content: false,
+            is_aggregator,
         }
     }
 
@@ -59,6 +83,7 @@ impl ScoredUrl {
         // - Inlink count: +0.2 per inlink
         // - Freshness hint: +0.5 if news/blog
         // - Content type: +0.2 for HTML (assumed here)
+        // - Aggregator penalty: -0.5 for tag/category/archive pages
 
         self.priority = 1.0; // Base priority
         self.priority -= 0.1 * self.depth as f32; // Breadth-first bias
@@ -67,6 +92,32 @@ impl ScoredUrl {
             self.priority += 0.5;
         }
         self.priority += 0.2; // Assume HTML content
+        if self.is_aggregator {
+            self.priority -= 0.5; // Deprioritize aggregator pages
+        }
+    }
+
+    /// Detect whether a URL looks like an aggregator/listing page
+    fn detect_aggregator(url: &Url) -> bool {
+        let path = url.path().to_lowercase();
+
+        // Check path segments
+        if AGGREGATOR_PATH_SEGMENTS.iter().any(|seg| path.contains(seg)) {
+            return true;
+        }
+
+        // Check query parameters for sort/filter/pagination
+        if let Some(query) = url.query() {
+            for param in query.split('&') {
+                let key = param.split('=').next().unwrap_or("");
+                let key_lower = key.to_lowercase();
+                if AGGREGATOR_QUERY_KEYS.contains(&key_lower.as_str()) {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     /// Increment inlink count and recalculate priority
@@ -132,10 +183,43 @@ impl UrlExchangeBatch {
     }
 }
 
+/// Entry in the cross-domain priority heap representing the best URL from a domain
+#[derive(Debug, Clone)]
+struct DomainTopEntry {
+    domain: String,
+    best_url: ScoredUrl,
+}
+
+impl PartialEq for DomainTopEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.domain == other.domain
+    }
+}
+
+impl Eq for DomainTopEntry {}
+
+impl PartialOrd for DomainTopEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DomainTopEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.best_url.cmp(&other.best_url)
+    }
+}
+
 /// URL Frontier managing per-domain priority queues
 pub struct UrlFrontier {
     /// Per-domain priority heaps, keyed by hostname
     domain_queues: HashMap<String, BinaryHeap<ScoredUrl>>,
+
+    /// Cross-domain priority heap for O(log D) pop_next
+    cross_domain_heap: BinaryHeap<DomainTopEntry>,
+
+    /// Domains whose cross-domain entry needs refreshing
+    stale_domains: HashSet<String>,
 
     /// Global seen-URL filter using hashed URLs to save memory
     seen_urls: HashSet<u64>,
@@ -161,6 +245,8 @@ impl UrlFrontier {
     pub fn new(local_peer_id: PeerId, domain_assignment: DomainAssignment) -> Self {
         Self {
             domain_queues: HashMap::new(),
+            cross_domain_heap: BinaryHeap::new(),
+            stale_domains: HashSet::new(),
             seen_urls: HashSet::new(),
             domain_assignment,
             local_peer_id,
@@ -215,14 +301,35 @@ impl UrlFrontier {
 
     /// Add a URL to the local queue for a domain
     fn add_local_url(&mut self, hostname: &str, url: ScoredUrl) {
+        let domain = hostname.to_string();
         let queue = self
             .domain_queues
-            .entry(hostname.to_string())
-            .or_insert_with(BinaryHeap::new);
+            .entry(domain.clone())
+            .or_default();
 
         // Enforce max queue size
         if queue.len() < self.max_queue_size {
             queue.push(url);
+            // Mark domain as needing cross-domain heap refresh
+            self.stale_domains.insert(domain);
+        }
+    }
+
+    /// Rebuild stale entries in the cross-domain heap
+    fn refresh_cross_domain_heap(&mut self) {
+        if self.stale_domains.is_empty() {
+            return;
+        }
+
+        for domain in self.stale_domains.drain() {
+            if let Some(queue) = self.domain_queues.get(&domain) {
+                if let Some(top) = queue.peek() {
+                    self.cross_domain_heap.push(DomainTopEntry {
+                        domain,
+                        best_url: top.clone(),
+                    });
+                }
+            }
         }
     }
 
@@ -243,42 +350,70 @@ impl UrlFrontier {
     /// the politeness controller knows about (fetched at least once). Domains in
     /// the frontier that are NOT in `tracked_domains` have never been fetched and
     /// are implicitly ready.
+    ///
+    /// Uses a cross-domain priority heap for O(log D) amortized performance
+    /// instead of scanning all domain queues.
     pub fn pop_next(
         &mut self,
         ready_domains: &HashSet<String>,
         tracked_domains: &HashSet<String>,
     ) -> Option<ScoredUrl> {
-        let mut best_url: Option<ScoredUrl> = None;
-        let mut best_domain: Option<String> = None;
+        // Refresh any stale entries first
+        self.refresh_cross_domain_heap();
 
-        for (domain, queue) in &self.domain_queues {
-            // A domain is eligible if:
-            // 1. The politeness controller says it's ready, OR
-            // 2. The politeness controller hasn't seen it yet (new domain)
+        // Entries we skip because their domain isn't ready — re-insert after
+        let mut deferred = Vec::new();
+
+        let result = loop {
+            let entry = match self.cross_domain_heap.pop() {
+                Some(e) => e,
+                None => break None,
+            };
+
+            let domain = &entry.domain;
+
+            // Check if domain is eligible
             let is_tracked = tracked_domains.contains(domain);
             let is_ready = ready_domains.contains(domain);
 
             if is_tracked && !is_ready {
-                // Known to politeness but not ready (rate limited / delay) — skip
+                // Not ready — defer and try next
+                deferred.push(entry);
                 continue;
             }
 
-            if let Some(top) = queue.peek() {
-                if best_url.as_ref().is_none_or(|best| top > best) {
-                    best_url = Some(top.clone());
-                    best_domain = Some(domain.clone());
-                }
+            // Check if the domain queue still has this URL (it may have been
+            // consumed by a concurrent stale entry)
+            let queue = match self.domain_queues.get_mut(domain) {
+                Some(q) => q,
+                None => continue,
+            };
+
+            // The cross-domain heap may have stale entries. Verify the top of
+            // the domain queue still matches (or is at least present).
+            if queue.is_empty() {
+                continue;
             }
+
+            let url = queue.pop().unwrap();
+
+            // Re-insert next-best from this domain into cross-domain heap
+            if let Some(next_top) = queue.peek() {
+                self.cross_domain_heap.push(DomainTopEntry {
+                    domain: entry.domain,
+                    best_url: next_top.clone(),
+                });
+            }
+
+            break Some(url);
+        };
+
+        // Put back deferred entries
+        for entry in deferred {
+            self.cross_domain_heap.push(entry);
         }
 
-        // Pop from the chosen domain
-        if let Some(domain) = best_domain {
-            if let Some(queue) = self.domain_queues.get_mut(&domain) {
-                return queue.pop();
-            }
-        }
-
-        None
+        result
     }
 
     /// Get outbound batches that are ready to send

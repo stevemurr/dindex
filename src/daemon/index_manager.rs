@@ -196,7 +196,9 @@ impl IndexManager {
         let total = chunk_ids.len();
 
         for chunk_id in &chunk_ids {
-            self.vector_index.remove(chunk_id).ok();
+            if let Err(e) = self.vector_index.remove(chunk_id) {
+                tracing::warn!("Failed to remove chunk {} from vector index: {}", chunk_id, e);
+            }
             self.chunk_storage.remove(chunk_id);
         }
 
