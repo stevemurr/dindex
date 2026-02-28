@@ -78,8 +78,6 @@ services:
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
-    profiles:
-      - monitoring
     restart: unless-stopped
 
   grafana:
@@ -94,8 +92,6 @@ services:
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
-    profiles:
-      - monitoring
     restart: unless-stopped
 
 volumes:
