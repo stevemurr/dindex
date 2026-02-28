@@ -11,7 +11,7 @@ use tracing::{debug, error};
 use uuid::Uuid;
 
 use super::{AppState, MAX_DOCUMENT_SIZE};
-use super::super::types::*;
+use crate::daemon::http::types::*;
 use crate::daemon::protocol::{self, Request, Response as IpcResponse};
 use crate::types::Document;
 

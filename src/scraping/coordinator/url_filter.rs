@@ -13,7 +13,6 @@ use super::types::ScrapingConfig;
 /// Filter discovered URLs based on coordinator configuration
 pub(super) fn filter_discovered_urls(
     response: &FetchResult,
-    _source_url: &Url,
     config: &ScrapingConfig,
     seed_domains: &HashSet<String>,
     compiled_include: &[regex::Regex],

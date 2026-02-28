@@ -14,9 +14,9 @@ use crate::config::Config;
 use crate::import::{DumpSource, WikimediaSource};
 use crate::types::Document;
 
-use super::super::index_manager::IndexManager;
-use super::super::protocol::{ImportSource, JobStats, ProgressStage};
-use super::super::write_pipeline::{IngestItem, WritePipeline};
+use crate::daemon::index_manager::IndexManager;
+use crate::daemon::protocol::{ImportSource, JobStats, ProgressStage};
+use crate::daemon::write_pipeline::{IngestItem, WritePipeline};
 use super::JobInfo;
 
 /// Run an import job

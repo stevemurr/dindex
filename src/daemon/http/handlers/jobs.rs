@@ -16,7 +16,7 @@ use tokio_stream::StreamExt as _;
 use tracing::{debug, error, info, warn};
 
 use super::AppState;
-use super::super::types::*;
+use crate::daemon::http::types::*;
 use crate::daemon::protocol::{ProgressStage, Request, Response as IpcResponse};
 
 /// Parse a job ID string into a UUID, returning an error response on failure.

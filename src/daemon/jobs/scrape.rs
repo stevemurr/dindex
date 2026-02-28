@@ -16,11 +16,11 @@ use crate::scraping::coordinator::{
     ScrapingConfig as CoordinatorScrapingConfig, ScrapingCoordinator,
 };
 
-use super::super::index_manager::IndexManager;
-use super::super::metrics::DaemonMetrics;
-use super::super::protocol::{JobStats, ProgressStage, ScrapeOptions};
-use super::super::scrape_events::{ScrapeEvent, UrlInfo, UrlSource, UrlStatus};
-use super::super::write_pipeline::{IngestItem, WritePipeline};
+use crate::daemon::index_manager::IndexManager;
+use crate::daemon::metrics::DaemonMetrics;
+use crate::daemon::protocol::{JobStats, ProgressStage, ScrapeOptions};
+use crate::daemon::scrape_events::{ScrapeEvent, UrlInfo, UrlSource, UrlStatus};
+use crate::daemon::write_pipeline::{IngestItem, WritePipeline};
 use super::JobInfo;
 
 /// Maximum consecutive empty frontier iterations before declaring exhaustion

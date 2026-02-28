@@ -280,7 +280,6 @@ impl ScrapingCoordinator {
         // Extract URLs for further crawling
         let discovered_urls = url_filter::filter_discovered_urls(
             &response,
-            url,
             &self.config,
             &self.seed_domains,
             &self.compiled_include,

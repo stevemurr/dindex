@@ -9,7 +9,7 @@ use axum::{
 use tracing::{debug, error};
 
 use super::{AppState, MAX_QUERY_LENGTH};
-use super::super::types::*;
+use crate::daemon::http::types::*;
 use crate::daemon::protocol::{OutputFormat, Request, Response as IpcResponse};
 use crate::types::GroupedSearchResult;
 

@@ -8,7 +8,7 @@ use axum::{
 };
 
 use super::AppState;
-use super::super::types::*;
+use crate::daemon::http::types::*;
 use crate::daemon::protocol::{Request, Response as IpcResponse};
 
 /// Health check endpoint
