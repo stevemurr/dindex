@@ -39,7 +39,14 @@ impl LshIndex {
 
     /// Compute LSH signature for an embedding
     pub fn hash(&self, embedding: &Embedding) -> LshSignature {
-        assert_eq!(embedding.len(), self.dimensions);
+        if embedding.len() != self.dimensions {
+            tracing::warn!(
+                "LSH dimension mismatch: expected {}, got {} — returning zero signature",
+                self.dimensions,
+                embedding.len()
+            );
+            return LshSignature::new([0u64; 2], self.num_bits);
+        }
         assert!(self.num_bits <= 128, "LSH signature supports at most 128 bits");
 
         let mut bits = [0u64; 2];
@@ -90,6 +97,28 @@ mod tests {
 
         let estimated_sim = sig1.similarity(&sig2);
         assert!(estimated_sim > 0.9, "Estimated similarity should be high");
+    }
+
+    #[test]
+    fn test_lsh_deterministic() {
+        let lsh1 = LshIndex::new(64, 64, 99);
+        let lsh2 = LshIndex::new(64, 64, 99);
+        let v: Vec<f32> = (0..64).map(|i| (i as f32 / 64.0).cos()).collect();
+
+        let sig1 = lsh1.hash(&v);
+        let sig2 = lsh2.hash(&v);
+
+        assert_eq!(sig1, sig2, "Same seed should produce identical signatures");
+    }
+
+    #[test]
+    fn test_lsh_dimension_mismatch_returns_zero() {
+        let lsh = LshIndex::new(128, 64, 42);
+        // Embedding with wrong dimensions (64 instead of 128)
+        let v: Vec<f32> = (0..64).map(|i| (i as f32).sin()).collect();
+
+        let sig = lsh.hash(&v);
+        assert_eq!(sig.bits, [0u64; 2], "Dimension mismatch should return zero signature");
     }
 
     #[test]

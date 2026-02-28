@@ -63,9 +63,13 @@ impl DIndexBehaviour {
             .heartbeat_interval(Duration::from_secs(10))
             .validation_mode(gossipsub::ValidationMode::Strict)
             .message_id_fn(|msg| {
-                // Use content hash as message ID for deduplication
+                // Include source in hash so identical payloads from different peers
+                // produce distinct message IDs (prevents dropping legitimate responses)
                 use sha2::{Digest, Sha256};
                 let mut hasher = Sha256::new();
+                if let Some(source) = &msg.source {
+                    hasher.update(source.to_bytes());
+                }
                 hasher.update(&msg.data);
                 gossipsub::MessageId::from(hex::encode(hasher.finalize()))
             })

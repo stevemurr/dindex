@@ -367,6 +367,76 @@ mod tests {
     }
 
     #[test]
+    fn test_save_load_roundtrip() {
+        let config = test_routing_config();
+        let router = QueryRouter::new(64, &config);
+
+        // Register some nodes
+        let embeddings: Vec<Vec<f32>> = (0..10)
+            .map(|i| (0..64).map(|j| ((i * 64 + j) as f32 / 1000.0).sin()).collect())
+            .collect();
+        let ad1 = AdvertisementBuilder::new("node_a".to_string())
+            .with_centroids(&embeddings, 3, None)
+            .build(config.lsh_bits, config.lsh_num_bands, config.bloom_false_positive_rate);
+        let ad2 = AdvertisementBuilder::new("node_b".to_string())
+            .with_centroids(&embeddings, 3, None)
+            .build(config.lsh_bits, config.lsh_num_bands, config.bloom_false_positive_rate);
+        router.register_node(ad1);
+        router.register_node(ad2);
+        assert_eq!(router.node_count(), 2);
+
+        // Save
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ads.json");
+        router.save(&path).unwrap();
+
+        // Load into a fresh router
+        let router2 = QueryRouter::new(64, &config);
+        let loaded = router2.load(&path).unwrap();
+        assert_eq!(loaded, 2);
+        assert_eq!(router2.node_count(), 2);
+
+        // Verify candidates still work
+        let query: Vec<f32> = (0..64).map(|i| (i as f32 / 1000.0).sin()).collect();
+        let candidates = router2.find_candidates(&query, None);
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn test_load_nonexistent_returns_zero() {
+        let config = test_routing_config();
+        let router = QueryRouter::new(64, &config);
+        let count = router.load(std::path::Path::new("/tmp/does_not_exist_dindex_test.json")).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_register_node_overwrites() {
+        let config = test_routing_config();
+        let router = QueryRouter::new(64, &config);
+
+        let embeddings1: Vec<Vec<f32>> = (0..5)
+            .map(|i| (0..64).map(|j| ((i * 64 + j) as f32 / 500.0).sin()).collect())
+            .collect();
+        let embeddings2: Vec<Vec<f32>> = (0..15)
+            .map(|i| (0..64).map(|j| ((i * 64 + j) as f32 / 1000.0).cos()).collect())
+            .collect();
+
+        let ad1 = AdvertisementBuilder::new("node_x".to_string())
+            .with_centroids(&embeddings1, 2, None)
+            .build(config.lsh_bits, config.lsh_num_bands, config.bloom_false_positive_rate);
+        router.register_node(ad1);
+        assert_eq!(router.node_count(), 1);
+
+        // Re-register with different data — should overwrite, not duplicate
+        let ad2 = AdvertisementBuilder::new("node_x".to_string())
+            .with_centroids(&embeddings2, 3, None)
+            .build(config.lsh_bits, config.lsh_num_bands, config.bloom_false_positive_rate);
+        router.register_node(ad2);
+        assert_eq!(router.node_count(), 1);
+    }
+
+    #[test]
     fn test_dimension_mismatch_handling() {
         let config = test_routing_config();
         let router = QueryRouter::new(64, &config);

@@ -108,6 +108,16 @@ async fn write_length_prefixed<T: AsyncWrite + Unpin>(
     io: &mut T,
     data: &[u8],
 ) -> io::Result<()> {
+    if data.len() > MAX_MESSAGE_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "message too large to send: {} bytes (max {})",
+                data.len(),
+                MAX_MESSAGE_SIZE
+            ),
+        ));
+    }
     let len = data.len() as u32;
     io.write_all(&len.to_be_bytes()).await?;
     io.write_all(data).await?;
@@ -176,6 +186,71 @@ mod tests {
         assert_eq!(decoded.request_id, "req-1");
         assert_eq!(decoded.processing_time_ms, 42);
         assert_eq!(decoded.responder_peer, Some("peer-A".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_read_truncated_length_prefix() {
+        // Only 2 bytes instead of 4
+        let mut cursor = AsyncCursor::new(vec![0x00, 0x01]);
+        let result = read_length_prefixed(&mut cursor).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[tokio::test]
+    async fn test_read_truncated_payload() {
+        // Length says 100 but only 10 bytes follow
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&100u32.to_be_bytes());
+        buf.extend_from_slice(&[0u8; 10]);
+        let mut cursor = AsyncCursor::new(buf);
+        let result = read_length_prefixed(&mut cursor).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[tokio::test]
+    async fn test_read_zero_length_message() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        let mut cursor = AsyncCursor::new(buf);
+        let result = read_length_prefixed(&mut cursor).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_read_empty_stream() {
+        let mut cursor = AsyncCursor::new(Vec::new());
+        let result = read_length_prefixed(&mut cursor).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[tokio::test]
+    async fn test_read_invalid_bincode() {
+        // Valid length prefix with garbage bincode data
+        let garbage = vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB];
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(garbage.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&garbage);
+        let mut cursor = AsyncCursor::new(buf);
+
+        let mut codec = DIndexCodec;
+        let protocol = StreamProtocol::new(DIRECT_QUERY_PROTOCOL);
+        let result: io::Result<QueryRequest> = codec.read_request(&protocol, &mut cursor).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn test_write_rejects_oversized_message() {
+        let mut buf = Vec::new();
+        // Create data exceeding MAX_MESSAGE_SIZE
+        let big_data = vec![0u8; MAX_MESSAGE_SIZE + 1];
+        let result = write_length_prefixed(&mut buf, &big_data).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too large to send"));
     }
 
     #[tokio::test]

@@ -147,8 +147,12 @@ impl QueryCoordinator {
                 {
                     Ok(responses) => {
                         for response in responses {
-                            responding_nodes.push(response.request_id.clone());
-                            all_results.push((response.request_id, response.results));
+                            let node_id = response
+                                .responder_peer
+                                .clone()
+                                .unwrap_or_else(|| response.request_id.clone());
+                            responding_nodes.push(node_id.clone());
+                            all_results.push((node_id, response.results));
                         }
                     }
                     Err(e) => {
@@ -200,8 +204,12 @@ impl QueryCoordinator {
                             {
                                 Ok(responses) => {
                                     for response in responses {
-                                        responding_nodes.push(response.request_id.clone());
-                                        all_results.push((response.request_id, response.results));
+                                        let node_id = response
+                                            .responder_peer
+                                            .clone()
+                                            .unwrap_or_else(|| response.request_id.clone());
+                                        responding_nodes.push(node_id.clone());
+                                        all_results.push((node_id, response.results));
                                     }
                                 }
                                 Err(e) => {

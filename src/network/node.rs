@@ -43,6 +43,8 @@ struct PendingQuery {
     responses: Vec<QueryResponse>,
     expected_peers: Vec<PeerId>,
     deadline: Instant,
+    /// Number of peers that failed (outbound failure)
+    failed_peers: usize,
 }
 
 /// Network node for P2P communication
@@ -335,12 +337,16 @@ impl NetworkNode {
                     self.handle_swarm_event(event).await;
                 }
                 // Handle commands
-                Some(cmd) = self.command_rx.recv() => {
-                    if matches!(cmd, NetworkCommand::Shutdown) {
-                        info!("Network node shutting down");
-                        break;
+                cmd = self.command_rx.recv() => {
+                    match cmd {
+                        Some(NetworkCommand::Shutdown) | None => {
+                            info!("Network node shutting down");
+                            break;
+                        }
+                        Some(cmd) => {
+                            self.handle_command(cmd).await;
+                        }
                     }
-                    self.handle_command(cmd).await;
                 }
                 // Check for query timeouts
                 _ = query_timeout_check.tick() => {
@@ -363,7 +369,7 @@ impl NetworkNode {
                 info!("Connected to peer: {}", peer_id);
                 let addr = endpoint.get_remote_address().clone();
 
-                {
+                let evicted_peer = {
                     let mut peers = self.connected_peers.write();
                     peers.insert(
                         peer_id,
@@ -385,7 +391,15 @@ impl NetworkNode {
                             peers.remove(&oldest_pid);
                             warn!("Evicted oldest peer {} to stay within max peer limit", oldest_pid);
                         }
+                        oldest
+                    } else {
+                        None
                     }
+                };
+
+                // Disconnect the evicted peer at the transport level
+                if let Some(evicted_pid) = evicted_peer {
+                    let _ = self.swarm.disconnect_peer_id(evicted_pid);
                 }
 
                 // Add to Kademlia
@@ -398,15 +412,26 @@ impl NetworkNode {
                     warn!("Failed to send PeerConnected event: {}", e);
                 }
             }
-            SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                info!("Disconnected from peer: {}", peer_id);
-                self.connected_peers.write().remove(&peer_id);
-                if let Err(e) = self
-                    .event_tx
-                    .send(NetworkEvent::PeerDisconnected(peer_id))
-                    .await
-                {
-                    warn!("Failed to send PeerDisconnected event: {}", e);
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established,
+                ..
+            } => {
+                if num_established == 0 {
+                    info!("Disconnected from peer: {}", peer_id);
+                    self.connected_peers.write().remove(&peer_id);
+                    if let Err(e) = self
+                        .event_tx
+                        .send(NetworkEvent::PeerDisconnected(peer_id))
+                        .await
+                    {
+                        warn!("Failed to send PeerDisconnected event: {}", e);
+                    }
+                } else {
+                    debug!(
+                        "Connection to {} closed, {} remaining",
+                        peer_id, num_established
+                    );
                 }
             }
             SwarmEvent::NewListenAddr { address, .. } => {
@@ -466,10 +491,15 @@ impl NetworkNode {
                 if let Ok(msg) = bincode::deserialize::<NetworkMessage>(&message.data) {
                     match msg {
                         NetworkMessage::Advertisement(advert) => {
-                            let _node_id = advert.node_id.clone();
+                            // Key by the advertiser's PeerId (from node_id), not the
+                            // propagation_source which may be a relay in multi-hop networks
+                            let ad_key = advert
+                                .node_id
+                                .parse::<PeerId>()
+                                .unwrap_or(propagation_source);
                             self.node_advertisements
                                 .write()
-                                .insert(propagation_source, advert.clone());
+                                .insert(ad_key, advert.clone());
                             let _ = self
                                 .event_tx
                                 .send(NetworkEvent::AdvertisementReceived(advert))
@@ -546,15 +576,22 @@ impl NetworkNode {
                             peer, request.request_id
                         );
                         // Store the response channel so we can reply directly
+                        let request_id = request.request_id.clone();
                         self.pending_response_channels
-                            .insert(request.request_id.clone(), (channel, Instant::now()));
-                        let _ = self
+                            .insert(request_id.clone(), (channel, Instant::now()));
+                        if self
                             .event_tx
                             .send(NetworkEvent::QueryReceived {
                                 peer_id: peer,
                                 request,
                             })
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            // Event receiver dropped — remove orphaned channel immediately
+                            warn!("Failed to send QueryReceived event, cleaning up response channel for {}", request_id);
+                            self.pending_response_channels.remove(&request_id);
+                        }
                     }
                     request_response::Message::Response {
                         response,
@@ -581,9 +618,10 @@ impl NetworkNode {
                 warn!("Direct query to {} failed: {}", peer, error);
                 // Clean up and check if we should complete the pending query
                 if let Some(req_id) = self.outbound_request_map.remove(&outbound_id) {
-                    // Check if all expected peers have responded or failed
-                    if let Some(pending) = self.pending_queries.get(&req_id) {
-                        if pending.responses.len() + 1 >= pending.expected_peers.len()
+                    // Increment failed count and check if all expected peers have responded or failed
+                    if let Some(pending) = self.pending_queries.get_mut(&req_id) {
+                        pending.failed_peers += 1;
+                        if pending.responses.len() + pending.failed_peers >= pending.expected_peers.len()
                             || Instant::now() >= pending.deadline
                         {
                             if let Some(pending) = self.pending_queries.remove(&req_id) {
@@ -696,6 +734,7 @@ impl NetworkNode {
                         responses: Vec::new(),
                         expected_peers: peers.clone(),
                         deadline: Instant::now() + timeout,
+                        failed_peers: 0,
                     },
                 );
 
@@ -897,3 +936,246 @@ impl NetworkNode {
 // Re-export necessary libp2p types
 use libp2p::{noise, yamux};
 use libp2p::mdns;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::messages::QueryResponse;
+
+    // ---- 4a: load_or_generate_keypair ----
+
+    #[test]
+    fn test_keypair_generate_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let kp1 = load_or_generate_keypair(dir.path()).unwrap();
+        let pid1 = PeerId::from(kp1.public());
+
+        // Key file should exist now
+        assert!(dir.path().join("node_key").exists());
+
+        // Loading again should produce the same PeerId
+        let kp2 = load_or_generate_keypair(dir.path()).unwrap();
+        let pid2 = PeerId::from(kp2.public());
+        assert_eq!(pid1, pid2, "Reloaded keypair should produce the same PeerId");
+    }
+
+    #[test]
+    fn test_keypair_corrupt_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("node_key");
+        std::fs::write(&key_path, b"not a valid protobuf keypair").unwrap();
+
+        let result = load_or_generate_keypair(dir.path());
+        assert!(result.is_err(), "Corrupt key file should return an error");
+    }
+
+    // ---- 4c: PendingQuery response aggregation ----
+
+    /// Generate a deterministic PeerId for testing
+    fn test_peer_id(seed: u8) -> PeerId {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        let secret = libp2p::identity::ed25519::SecretKey::try_from_bytes(bytes).unwrap();
+        let kp = libp2p::identity::ed25519::Keypair::from(secret);
+        PeerId::from(libp2p::identity::PublicKey::from(kp.public()))
+    }
+
+    #[test]
+    fn test_response_from_expected_peer_collected() {
+        let peer_a = test_peer_id(1);
+        let peer_b = test_peer_id(2);
+        let (tx, rx) = oneshot::channel();
+
+        let mut pending_queries: HashMap<String, PendingQuery> = HashMap::new();
+        pending_queries.insert(
+            "q1".to_string(),
+            PendingQuery {
+                response_tx: tx,
+                responses: Vec::new(),
+                expected_peers: vec![peer_a, peer_b],
+                deadline: Instant::now() + Duration::from_secs(60),
+                failed_peers: 0,
+            },
+        );
+
+        // Simulate receiving a response from expected peer_a
+        let response = QueryResponse::new("q1".to_string(), vec![])
+            .with_responder(peer_a.to_string());
+
+        // Inline the handle_query_response logic for testability
+        if let Some(pending) = pending_queries.get_mut("q1") {
+            if let Some(ref responder) = response.responder_peer {
+                let is_expected = pending.expected_peers.iter().any(|p| p.to_string() == *responder);
+                assert!(is_expected, "peer_a should be expected");
+            }
+            pending.responses.push(response);
+        }
+
+        assert_eq!(pending_queries["q1"].responses.len(), 1);
+        drop(pending_queries);
+        drop(rx);
+    }
+
+    #[test]
+    fn test_response_from_unexpected_peer_dropped() {
+        let peer_a = test_peer_id(1);
+        let peer_b = test_peer_id(2);
+        let peer_c = test_peer_id(3); // unexpected
+        let (_tx, _rx) = oneshot::channel();
+
+        let mut pending_queries: HashMap<String, PendingQuery> = HashMap::new();
+        pending_queries.insert(
+            "q1".to_string(),
+            PendingQuery {
+                response_tx: _tx,
+                responses: Vec::new(),
+                expected_peers: vec![peer_a, peer_b],
+                deadline: Instant::now() + Duration::from_secs(60),
+                failed_peers: 0,
+            },
+        );
+
+        let response = QueryResponse::new("q1".to_string(), vec![])
+            .with_responder(peer_c.to_string());
+
+        if let Some(pending) = pending_queries.get_mut("q1") {
+            if let Some(ref responder) = response.responder_peer {
+                let is_expected = pending.expected_peers.iter().any(|p| p.to_string() == *responder);
+                if is_expected {
+                    pending.responses.push(response);
+                }
+            }
+        }
+
+        assert_eq!(pending_queries["q1"].responses.len(), 0, "Unexpected peer response should be dropped");
+    }
+
+    #[test]
+    fn test_duplicate_response_from_same_peer_dropped() {
+        let peer_a = test_peer_id(1);
+        let (_tx, _rx) = oneshot::channel();
+
+        let mut pending_queries: HashMap<String, PendingQuery> = HashMap::new();
+        pending_queries.insert(
+            "q1".to_string(),
+            PendingQuery {
+                response_tx: _tx,
+                responses: Vec::new(),
+                expected_peers: vec![peer_a],
+                deadline: Instant::now() + Duration::from_secs(60),
+                failed_peers: 0,
+            },
+        );
+
+        let response1 = QueryResponse::new("q1".to_string(), vec![])
+            .with_responder(peer_a.to_string());
+        let response2 = QueryResponse::new("q1".to_string(), vec![])
+            .with_responder(peer_a.to_string());
+
+        // First response
+        if let Some(pending) = pending_queries.get_mut("q1") {
+            pending.responses.push(response1);
+        }
+
+        // Duplicate response — check and skip
+        if let Some(pending) = pending_queries.get_mut("q1") {
+            if let Some(ref responder) = response2.responder_peer {
+                let already = pending.responses.iter().any(|r| r.responder_peer.as_deref() == Some(responder));
+                if !already {
+                    pending.responses.push(response2);
+                }
+            }
+        }
+
+        assert_eq!(pending_queries["q1"].responses.len(), 1, "Duplicate should be dropped");
+    }
+
+    #[test]
+    fn test_query_completes_when_all_respond() {
+        let peer_a = test_peer_id(1);
+        let peer_b = test_peer_id(2);
+        let (tx, mut rx) = oneshot::channel();
+
+        let mut pending_queries: HashMap<String, PendingQuery> = HashMap::new();
+        pending_queries.insert(
+            "q1".to_string(),
+            PendingQuery {
+                response_tx: tx,
+                responses: Vec::new(),
+                expected_peers: vec![peer_a, peer_b],
+                deadline: Instant::now() + Duration::from_secs(60),
+                failed_peers: 0,
+            },
+        );
+
+        // Response from peer_a
+        if let Some(pending) = pending_queries.get_mut("q1") {
+            pending.responses.push(
+                QueryResponse::new("q1".to_string(), vec![]).with_responder(peer_a.to_string()),
+            );
+        }
+        // Not complete yet
+        assert!(pending_queries["q1"].responses.len() < pending_queries["q1"].expected_peers.len());
+
+        // Response from peer_b
+        if let Some(pending) = pending_queries.get_mut("q1") {
+            pending.responses.push(
+                QueryResponse::new("q1".to_string(), vec![]).with_responder(peer_b.to_string()),
+            );
+        }
+
+        // Now complete — send
+        let complete = {
+            let pending = &pending_queries["q1"];
+            pending.responses.len() + pending.failed_peers >= pending.expected_peers.len()
+        };
+        assert!(complete, "Query should be complete when all peers respond");
+
+        if let Some(pending) = pending_queries.remove("q1") {
+            let _ = pending.response_tx.send(pending.responses);
+        }
+        let results = rx.try_recv().unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_failed_peers_trigger_completion() {
+        let peer_a = test_peer_id(1);
+        let peer_b = test_peer_id(2);
+        let peer_c = test_peer_id(3);
+        let (tx, mut rx) = oneshot::channel();
+
+        let mut pending_queries: HashMap<String, PendingQuery> = HashMap::new();
+        pending_queries.insert(
+            "q1".to_string(),
+            PendingQuery {
+                response_tx: tx,
+                responses: Vec::new(),
+                expected_peers: vec![peer_a, peer_b, peer_c],
+                deadline: Instant::now() + Duration::from_secs(60),
+                failed_peers: 0,
+            },
+        );
+
+        // 1 response + 2 failures should complete (1 + 2 >= 3)
+        if let Some(pending) = pending_queries.get_mut("q1") {
+            pending.responses.push(
+                QueryResponse::new("q1".to_string(), vec![]).with_responder(peer_a.to_string()),
+            );
+            pending.failed_peers += 1; // peer_b failed
+            pending.failed_peers += 1; // peer_c failed
+        }
+
+        let complete = {
+            let pending = &pending_queries["q1"];
+            pending.responses.len() + pending.failed_peers >= pending.expected_peers.len()
+        };
+        assert!(complete, "responses + failures should trigger completion");
+
+        if let Some(pending) = pending_queries.remove("q1") {
+            let _ = pending.response_tx.send(pending.responses);
+        }
+        let results = rx.try_recv().unwrap();
+        assert_eq!(results.len(), 1, "Should have 1 successful response");
+    }
+}

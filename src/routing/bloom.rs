@@ -22,6 +22,9 @@ impl BloomFilter {
     /// * `num_items` - Expected number of items
     /// * `false_positive_rate` - Desired false positive rate (e.g., 0.01 for 1%)
     pub fn new(num_items: usize, false_positive_rate: f64) -> Self {
+        // Guard against zero items to prevent division by zero
+        let num_items = num_items.max(1);
+
         // Calculate optimal parameters
         // m = -n * ln(p) / (ln(2)^2)
         let m = (-(num_items as f64) * false_positive_rate.ln() / (2.0_f64.ln().powi(2))).ceil() as usize;
@@ -268,6 +271,50 @@ mod tests {
 
         assert!(bf2.contains(b"test"));
         assert_eq!(bf.num_bits, bf2.num_bits);
+    }
+
+    #[test]
+    fn test_bloom_filter_zero_items_no_panic() {
+        // Should not panic or divide by zero
+        let bf = BloomFilter::new(0, 0.01);
+        assert!(bf.num_bits >= 8);
+        assert!(bf.num_hashes >= 1);
+    }
+
+    #[test]
+    fn test_bloom_filter_from_bytes_too_short() {
+        // Less than 16 bytes header
+        assert!(BloomFilter::from_bytes(&[]).is_none());
+        assert!(BloomFilter::from_bytes(&[0u8; 8]).is_none());
+        assert!(BloomFilter::from_bytes(&[0u8; 15]).is_none());
+    }
+
+    #[test]
+    fn test_bloom_filter_from_bytes_truncated_bits() {
+        // Header says 1000 bits but body is empty
+        let mut data = Vec::new();
+        data.extend_from_slice(&1000u64.to_le_bytes()); // num_bits = 1000
+        data.extend_from_slice(&4u64.to_le_bytes()); // num_hashes = 4
+        // No bits data — needs (1000+7)/8 = 125 bytes
+        assert!(BloomFilter::from_bytes(&data).is_none());
+    }
+
+    #[test]
+    fn test_banded_bloom_filter_from_bytes_too_short() {
+        assert!(BandedBloomFilter::from_bytes(&[]).is_none());
+        assert!(BandedBloomFilter::from_bytes(&[0u8; 4]).is_none());
+        assert!(BandedBloomFilter::from_bytes(&[0u8; 7]).is_none());
+    }
+
+    #[test]
+    fn test_banded_bloom_filter_from_bytes_malformed_bloom() {
+        // Valid banded header but malformed inner bloom data
+        let mut data = Vec::new();
+        data.extend_from_slice(&8u32.to_le_bytes()); // num_bands
+        data.extend_from_slice(&8u32.to_le_bytes()); // bits_per_band
+        // Inner bloom data too short (needs at least 16 bytes)
+        data.extend_from_slice(&[0u8; 4]);
+        assert!(BandedBloomFilter::from_bytes(&data).is_none());
     }
 
     #[test]
