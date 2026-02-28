@@ -194,18 +194,6 @@ impl ImportProgress {
         }
     }
 
-    /// Update total expected (if discovered during processing)
-    pub fn set_total(&self, total: u64) {
-        if let Some(ref pb) = self.progress_bar {
-            pb.set_length(total);
-        }
-    }
-
-    /// Set bytes position (for resume)
-    pub fn set_bytes_position(&self, bytes: u64) {
-        self.bytes_processed.store(bytes, Ordering::Relaxed);
-    }
-
     /// Get bytes processed
     pub fn bytes_processed(&self) -> u64 {
         self.bytes_processed.load(Ordering::Relaxed)

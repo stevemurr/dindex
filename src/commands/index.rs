@@ -5,12 +5,10 @@ use dindex::{
     config::Config,
     content::{extract_from_bytes_with_url, extract_from_path, ContentType},
     embedding::init_embedding_engine,
-    index::{ChunkStorage, VectorIndex},
-    retrieval::{Bm25Index, HybridIndexer},
+    index::IndexStack,
     types::Document,
 };
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 use walkdir;
@@ -133,22 +131,8 @@ pub async fn index_document(
     let engine = init_embedding_engine(&config)
         .context("Failed to initialize embedding engine")?;
 
-    let index_path = config.node.data_dir.join("vector.index");
-    let vector_index = Arc::new(VectorIndex::new(
-        config.embedding.dimensions,
-        &config.index,
-    )?);
-
-    let bm25_path = config.node.data_dir.join("bm25");
-    let bm25_index = Arc::new(Bm25Index::new(&bm25_path)?);
-
-    let chunk_storage = Arc::new(ChunkStorage::new(&config.node.data_dir)?);
-
-    let indexer = HybridIndexer::new(
-        vector_index.clone(),
-        bm25_index.clone(),
-        chunk_storage.clone(),
-    );
+    let stack = IndexStack::create(&config.node.data_dir, config.embedding.dimensions, &config.index)?;
+    let indexer = stack.indexer();
 
     // Extract texts for batch embedding
     let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
@@ -169,7 +153,7 @@ pub async fn index_document(
     info!("Indexed {} chunks with keys {:?}", keys.len(), &keys[..keys.len().min(5)]);
 
     // Save index
-    vector_index.save(&index_path)?;
+    stack.save_vector_index(&config.node.data_dir)?;
     indexer.save()?;
 
     info!("Index saved to {}", config.node.data_dir.display());

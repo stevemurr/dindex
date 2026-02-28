@@ -36,7 +36,7 @@ impl UrlDeduplicator {
 
     /// Check if a URL is new (not seen before)
     pub fn is_new_url(&mut self, url: &Url) -> bool {
-        let normalized = Self::normalize_url(url);
+        let normalized = super::normalize_url(url);
         let hash = Self::hash_url(&normalized);
 
         if self.seen.contains(&hash) {
@@ -53,20 +53,6 @@ impl UrlDeduplicator {
         }
     }
 
-    /// Check if URL was seen (without marking it)
-    pub fn was_seen(&self, url: &Url) -> bool {
-        let normalized = Self::normalize_url(url);
-        let hash = Self::hash_url(&normalized);
-        self.seen.contains(&hash)
-    }
-
-    /// Mark a URL as seen
-    pub fn mark_seen(&mut self, url: &Url) {
-        let normalized = Self::normalize_url(url);
-        let hash = Self::hash_url(&normalized);
-        self.seen.insert(hash);
-    }
-
     /// Get the number of URLs seen
     pub fn len(&self) -> usize {
         self.seen.len()
@@ -77,14 +63,9 @@ impl UrlDeduplicator {
         self.seen.is_empty()
     }
 
-    /// Normalize a URL for consistent hashing
-    fn normalize_url(url: &Url) -> String {
-        super::normalize_url(url)
-    }
-
     /// Hash a normalized URL
     fn hash_url(normalized: &str) -> u64 {
-        xxhash_rust::xxh3::xxh3_64(normalized.as_bytes())
+        crate::util::fast_hash(normalized)
     }
 }
 
@@ -134,10 +115,6 @@ impl SimHash {
         self.hamming_distance(other) <= max_distance
     }
 
-    /// Get the raw hash value
-    pub fn value(&self) -> u64 {
-        self.0
-    }
 }
 
 /// Content deduplicator using SimHash
@@ -194,11 +171,6 @@ impl ContentDeduplicator {
         simhash
     }
 
-    /// Register a pre-computed SimHash
-    pub fn register_hash(&mut self, simhash: SimHash, document_id: DocumentId) {
-        self.local_cache.put(simhash.0, document_id);
-    }
-
     /// Clear the cache
     pub fn clear(&mut self) {
         self.local_cache.clear();
@@ -214,8 +186,8 @@ mod tests {
         let url1 = Url::parse("https://example.com/page#section").unwrap();
         let url2 = Url::parse("https://example.com/page").unwrap();
 
-        let norm1 = UrlDeduplicator::normalize_url(&url1);
-        let norm2 = UrlDeduplicator::normalize_url(&url2);
+        let norm1 = crate::scraping::normalize_url(&url1);
+        let norm2 = crate::scraping::normalize_url(&url2);
 
         assert_eq!(norm1, norm2);
     }

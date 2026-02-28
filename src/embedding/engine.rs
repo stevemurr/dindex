@@ -63,7 +63,7 @@ impl EmbeddingEngine {
     pub fn embed(&self, text: &str) -> Result<Embedding> {
         self.backend
             .embed(text)
-            .map_err(|e| anyhow::anyhow!("{}", e))
+            .map_err(|e| anyhow::anyhow!(e))
             .context("Failed to generate embedding")
     }
 
@@ -71,7 +71,7 @@ impl EmbeddingEngine {
     pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
         self.backend
             .embed_batch(texts)
-            .map_err(|e| anyhow::anyhow!("{}", e))
+            .map_err(|e| anyhow::anyhow!(e))
             .context("Failed to generate batch embeddings")
     }
 
@@ -96,14 +96,19 @@ impl EmbeddingEngine {
     }
 }
 
-/// Normalize an embedding vector to unit length
-pub fn normalize_embedding(embedding: &Embedding) -> Embedding {
-    crate::util::normalize_embedding(embedding)
-}
-
-/// Compute cosine similarity between two embeddings
+/// Compute cosine similarity between two embeddings.
+///
+/// Returns 0.0 if dimensions mismatch (with a debug assertion in debug builds).
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len(), "Embeddings must have same dimension");
+    debug_assert_eq!(a.len(), b.len(), "Embeddings must have same dimension");
+    if a.len() != b.len() {
+        tracing::warn!(
+            "cosine_similarity called with mismatched dimensions: {} vs {}",
+            a.len(),
+            b.len()
+        );
+        return 0.0;
+    }
 
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -123,7 +128,7 @@ mod tests {
     #[test]
     fn test_normalize_embedding() {
         let embedding = vec![3.0, 4.0];
-        let normalized = normalize_embedding(&embedding);
+        let normalized = crate::util::normalize_embedding(&embedding);
         assert!((normalized[0] - 0.6).abs() < 1e-6);
         assert!((normalized[1] - 0.8).abs() < 1e-6);
     }

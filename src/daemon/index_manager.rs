@@ -13,7 +13,7 @@ use tracing::{debug, info};
 
 use crate::config::Config;
 use crate::embedding::{generate_with_fallback, EmbeddingEngine};
-use crate::index::{ChunkStorage, VectorIndex};
+use crate::index::{ChunkStorage, IndexStack, VectorIndex};
 use crate::retrieval::{Bm25Index, HybridIndexer, HybridRetriever};
 use crate::types::{Chunk, Query, QueryFilters, SearchResult};
 
@@ -40,51 +40,18 @@ pub struct IndexManager {
 impl IndexManager {
     /// Load or create indexes from the configured data directory
     pub fn load(config: &Config) -> Result<Self> {
-        let data_dir = &config.node.data_dir;
-        std::fs::create_dir_all(data_dir)?;
+        info!("Loading indexes from: {}", config.node.data_dir.display());
 
-        info!("Loading indexes from: {}", data_dir.display());
+        let stack = IndexStack::open(config)?;
 
-        // Load or create vector index
-        let index_path = data_dir.join("vector.index");
-        let vector_index = if index_path.exists() {
-            info!("Loading existing vector index");
-            Arc::new(VectorIndex::load(&index_path, &config.index)?)
-        } else {
-            info!("Creating new vector index");
-            Arc::new(VectorIndex::new(config.embedding.dimensions, &config.index)?)
-        };
-
-        // Load or create BM25 index
-        let bm25_path = data_dir.join("bm25");
-        let bm25_index = Arc::new(Bm25Index::new(&bm25_path)?);
-        info!("BM25 index loaded");
-
-        // Load or create chunk storage (auto-migrates from JSON if needed)
-        let chunk_storage = Arc::new(ChunkStorage::load(data_dir)?);
-        info!("Chunk storage loaded with {} chunks", chunk_storage.len());
-
-        // Create retriever for search operations
-        let retriever = Arc::new(HybridRetriever::new(
-            vector_index.clone(),
-            bm25_index.clone(),
-            chunk_storage.clone(),
-            None,
-            config.retrieval.clone(),
-        ));
-
-        // Create indexer for write operations
-        let indexer = Arc::new(HybridIndexer::new(
-            vector_index.clone(),
-            bm25_index.clone(),
-            chunk_storage.clone(),
-        ));
+        let retriever = Arc::new(stack.retriever(None, config.retrieval.clone()));
+        let indexer = Arc::new(stack.indexer());
 
         Ok(Self {
             config: config.clone(),
-            vector_index,
-            bm25_index,
-            chunk_storage,
+            vector_index: stack.vector_index,
+            bm25_index: stack.bm25_index,
+            chunk_storage: stack.chunk_storage,
             retriever,
             indexer,
             embedding_engine: RwLock::new(None),
@@ -253,7 +220,7 @@ impl IndexManager {
         // Calculate sizes
         let vector_index_size = self.file_size(data_dir.join("vector.index"));
         let bm25_index_size = self.dir_size(data_dir.join("bm25"));
-        let storage_size = self.file_size(data_dir.join("chunks.json"));
+        let storage_size = self.dir_size(data_dir.join("chunks.sled"));
 
         // Count chunks and unique documents
         let total_chunks = self.chunk_storage.len();
@@ -286,8 +253,7 @@ impl IndexManager {
     /// Get all embeddings for advertisement generation
     pub fn all_embeddings(&self) -> Vec<Vec<f32>> {
         self.chunk_storage
-            .all_embeddings()
-            .into_iter()
+            .embedding_iter()
             .map(|(_, emb)| emb)
             .collect()
     }

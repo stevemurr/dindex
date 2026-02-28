@@ -120,11 +120,6 @@ impl ScoredUrl {
         false
     }
 
-    /// Increment inlink count and recalculate priority
-    pub fn add_inlink(&mut self) {
-        self.inlink_count = self.inlink_count.saturating_add(1);
-        self.recalculate_priority();
-    }
 }
 
 impl PartialEq for ScoredUrl {
@@ -210,6 +205,12 @@ impl Ord for DomainTopEntry {
     }
 }
 
+/// Default maximum URLs per domain queue
+const DEFAULT_MAX_QUEUE_SIZE: usize = 10_000;
+
+/// Default batch size threshold for sending URL batches to remote nodes
+const DEFAULT_BATCH_SEND_THRESHOLD: usize = 1_000;
+
 /// URL Frontier managing per-domain priority queues
 pub struct UrlFrontier {
     /// Per-domain priority heaps, keyed by hostname
@@ -251,20 +252,20 @@ impl UrlFrontier {
             domain_assignment,
             local_peer_id,
             outbound_batches: HashMap::new(),
-            max_queue_size: 10000,
-            batch_send_threshold: 1000,
+            max_queue_size: DEFAULT_MAX_QUEUE_SIZE,
+            batch_send_threshold: DEFAULT_BATCH_SEND_THRESHOLD,
         }
     }
 
     /// Hash a normalized URL string to u64
     fn hash_url(normalized: &str) -> u64 {
-        xxhash_rust::xxh3::xxh3_64(normalized.as_bytes())
+        crate::util::fast_hash(normalized)
     }
 
     /// Add a discovered URL to the appropriate queue
     pub fn add_discovered_url(&mut self, url: Url, depth: u8) -> UrlDestination {
         // Normalize and check if seen
-        let normalized = Self::normalize_url(&url);
+        let normalized = super::normalize_url(&url);
         let hash = Self::hash_url(&normalized);
         if self.seen_urls.contains(&hash) {
             return UrlDestination::AlreadySeen;
@@ -449,16 +450,22 @@ impl UrlFrontier {
         self.domain_queues.len()
     }
 
-    /// Normalize a URL for deduplication
-    fn normalize_url(url: &Url) -> String {
-        super::normalize_url(url)
-    }
-
     /// Add seed URLs
     pub fn add_seeds(&mut self, seeds: Vec<Url>) {
         for url in seeds {
             self.add_discovered_url(url, 0);
         }
+    }
+
+    /// Mark a URL as seen without adding it to any queue.
+    ///
+    /// Useful for canonical URL handling: when a fetched URL resolves to a
+    /// different canonical URL, the canonical should be marked as seen so
+    /// future encounters are deduplicated.
+    pub fn mark_url_seen(&mut self, url: &Url) {
+        let normalized = super::normalize_url(url);
+        let hash = Self::hash_url(&normalized);
+        self.seen_urls.insert(hash);
     }
 
     /// Update domain assignment (when network topology changes)
@@ -535,8 +542,8 @@ mod tests {
         let url1 = Url::parse("https://example.com/page#section").unwrap();
         let url2 = Url::parse("https://example.com/page").unwrap();
 
-        let norm1 = UrlFrontier::normalize_url(&url1);
-        let norm2 = UrlFrontier::normalize_url(&url2);
+        let norm1 = crate::scraping::normalize_url(&url1);
+        let norm2 = crate::scraping::normalize_url(&url2);
 
         // Fragment should be stripped
         assert_eq!(norm1, norm2);

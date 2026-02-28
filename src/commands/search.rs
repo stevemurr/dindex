@@ -4,8 +4,7 @@ use dindex::{
     config::Config,
     daemon::OutputFormat,
     embedding::init_embedding_engine,
-    index::ChunkStorage,
-    retrieval::{Bm25Index, HybridRetriever},
+    index::IndexStack,
     types::{GroupedSearchResult, Query},
     util::truncate_for_display,
 };
@@ -47,25 +46,8 @@ pub async fn search_index(
     let engine = init_embedding_engine(&config)
         .context("Failed to initialize embedding engine")?;
 
-    let index_path = config.node.data_dir.join("vector.index");
-    let vector_index = if index_path.exists() {
-        Arc::new(dindex::index::VectorIndex::load(&index_path, &config.index)?)
-    } else {
-        Arc::new(dindex::index::VectorIndex::new(config.embedding.dimensions, &config.index)?)
-    };
-
-    let bm25_path = config.node.data_dir.join("bm25");
-    let bm25_index = Arc::new(Bm25Index::new(&bm25_path)?);
-
-    let chunk_storage = Arc::new(ChunkStorage::load(&config.node.data_dir)?);
-
-    let retriever = Arc::new(HybridRetriever::new(
-        vector_index,
-        bm25_index,
-        chunk_storage,
-        None,
-        config.retrieval.clone(),
-    ));
+    let stack = IndexStack::open(&config)?;
+    let retriever = Arc::new(stack.retriever(None, config.retrieval.clone()));
 
     // Create query
     let query = Query::new(&query_text, top_k);
@@ -97,8 +79,10 @@ fn output_search_results(results: &[dindex::types::SearchResult], format: &str, 
 
     match format {
         "json" | "json-pretty" => {
-            let json = serde_json::to_string_pretty(&grouped).unwrap_or_default();
-            println!("{}", json);
+            match serde_json::to_string_pretty(&grouped) {
+                Ok(json) => println!("{}", json),
+                Err(e) => eprintln!("Failed to serialize results: {}", e),
+            }
         }
         _ => {
             println!(
@@ -129,7 +113,8 @@ fn output_search_results(results: &[dindex::types::SearchResult], format: &str, 
                         truncate_for_display(display_text, 200),
                     );
                     if !chunk.matched_by.is_empty() {
-                        println!("        Matched by: {:?}", chunk.matched_by);
+                        let methods: Vec<&str> = chunk.matched_by.iter().map(|m| m.as_str()).collect();
+                        println!("        Matched by: {:?}", methods);
                     }
                 }
                 println!();

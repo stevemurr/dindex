@@ -6,10 +6,9 @@ use crate::chunking::TextSplitter;
 use crate::config::{ChunkingConfig, DedupConfig, IndexConfig};
 use crate::embedding::EmbeddingEngine;
 use crate::index::{
-    ChunkStorage, DocumentProcessor, DocumentRegistry, ProcessingResult, ProcessorConfig,
+    DocumentProcessor, DocumentRegistry, IndexStack, ProcessingResult, ProcessorConfig,
     VectorIndex,
 };
-use crate::retrieval::{Bm25Index, HybridIndexer};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -52,25 +51,11 @@ impl ImportCoordinator {
         );
 
         // Initialize index components
-        let vector_index = Arc::new(
-            VectorIndex::new(embedding_dims, &index_config)
-                .map_err(|e| ImportError::Index(e.to_string()))?,
-        );
+        let stack = IndexStack::create(&data_dir, embedding_dims, &index_config)
+            .map_err(|e| ImportError::Index(e.to_string()))?;
 
-        let bm25_path = data_dir.join("bm25");
-        let bm25_index = Arc::new(
-            Bm25Index::new(&bm25_path).map_err(|e| ImportError::Index(e.to_string()))?,
-        );
-
-        let chunk_storage = Arc::new(
-            ChunkStorage::new(&data_dir).map_err(|e| ImportError::Index(e.to_string()))?,
-        );
-
-        let indexer = Arc::new(HybridIndexer::new(
-            vector_index.clone(),
-            bm25_index,
-            chunk_storage,
-        ));
+        let vector_index = stack.vector_index.clone();
+        let indexer = Arc::new(stack.indexer());
 
         let splitter = TextSplitter::new(chunking_config);
 
@@ -312,12 +297,6 @@ impl ImportCoordinatorBuilder {
         self
     }
 
-    /// Set checkpoint path
-    pub fn with_checkpoint(mut self, path: impl AsRef<Path>) -> Self {
-        self.config.checkpoint_path = Some(path.as_ref().to_path_buf());
-        self
-    }
-
     /// Set embedding engine
     pub fn with_embedding_engine(mut self, engine: Arc<EmbeddingEngine>) -> Self {
         self.embedding_engine = Some(engine);
@@ -333,12 +312,6 @@ impl ImportCoordinatorBuilder {
     /// Set index configuration
     pub fn with_index_config(mut self, config: IndexConfig) -> Self {
         self.index_config = config;
-        self
-    }
-
-    /// Set dedup configuration
-    pub fn with_dedup_config(mut self, config: DedupConfig) -> Self {
-        self.dedup_config = config;
         self
     }
 

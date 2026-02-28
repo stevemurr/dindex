@@ -5,18 +5,20 @@
 //! with the P2P network for distributed crawling.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, Semaphore};
 use url::Url;
 
 use super::{
-    dedup::{ContentDeduplicator, SimHash, UrlDeduplicator},
+    dedup::{ContentDeduplicator, SimHash},
     domain_assignment::{DomainAssignment, PeerId},
     extractor::{ContentExtractor, ExtractedContent, ExtractedMetadata, ExtractorConfig},
     fetcher::{extract_urls, FetchConfig, FetchEngine, FetchError, FetchResult},
     frontier::{ScoredUrl, UrlFrontier},
     politeness::{FetchDecision, PolitenessConfig, PolitenessController},
+    trap_detection::{self, TrapDetectorConfig},
 };
 
 use crate::index::{DocumentRegistry, DuplicateCheckResult};
@@ -47,6 +49,53 @@ pub struct ScrapingConfig {
     pub fetch: FetchConfig,
     /// Extractor configuration
     pub extractor: ExtractorConfig,
+    /// Crawl trap detection configuration
+    pub trap_detector: TrapDetectorConfig,
+}
+
+impl ScrapingConfig {
+    /// Build a ScrapingConfig from the TOML ScrapingConfig + per-job overrides.
+    ///
+    /// Ensures consistent settings regardless of whether the scrape is initiated
+    /// from the CLI command or the daemon job manager.
+    pub fn from_config(
+        config: &crate::config::ScrapingConfig,
+        max_depth: u8,
+        stay_on_domain: bool,
+        delay_ms: u64,
+        max_pages: usize,
+    ) -> Self {
+        Self {
+            enabled: true,
+            max_concurrent_fetches: config.max_concurrent_fetches,
+            max_depth,
+            stay_on_domain,
+            include_patterns: config.include_patterns.clone(),
+            exclude_patterns: config.exclude_patterns.clone(),
+            max_pages_per_domain: max_pages,
+            scrape_interval: Duration::from_millis(100),
+            politeness: PolitenessConfig {
+                user_agent: config.user_agent.clone(),
+                default_delay: Duration::from_millis(delay_ms),
+                min_delay: Duration::from_millis(delay_ms / 2),
+                max_delay: Duration::from_secs(30),
+                cache_size: 10_000,
+                request_timeout: Duration::from_secs(config.request_timeout_secs),
+            },
+            fetch: FetchConfig {
+                user_agent: config.user_agent.clone(),
+                timeout: Duration::from_secs(config.request_timeout_secs),
+                connect_timeout: Duration::from_secs(10),
+                max_content_size: 10 * 1024 * 1024,
+                max_redirects: 10,
+                min_text_ratio: 0.1,
+                enable_js_rendering: config.enable_js_rendering,
+                connections_per_host: config.max_concurrent_fetches,
+            },
+            extractor: ExtractorConfig::default(),
+            trap_detector: TrapDetectorConfig::default(),
+        }
+    }
 }
 
 impl Default for ScrapingConfig {
@@ -63,8 +112,24 @@ impl Default for ScrapingConfig {
             politeness: PolitenessConfig::default(),
             fetch: FetchConfig::default(),
             extractor: ExtractorConfig::default(),
+            trap_detector: TrapDetectorConfig::default(),
         }
     }
+}
+
+/// Successfully processed content from a URL
+#[derive(Debug)]
+pub struct ProcessedContent {
+    pub content: ExtractedContent,
+    pub metadata: ExtractedMetadata,
+    pub simhash: SimHash,
+}
+
+/// Outcome of processing a single URL
+#[derive(Debug)]
+pub enum ProcessOutcome {
+    Success(ProcessedContent),
+    Failure { error: String },
 }
 
 /// Result of processing a single URL
@@ -72,20 +137,24 @@ impl Default for ScrapingConfig {
 pub struct ProcessResult {
     /// The URL that was processed
     pub url: Url,
-    /// Whether processing was successful
-    pub success: bool,
-    /// Extracted content (if successful)
-    pub content: Option<ExtractedContent>,
-    /// Extracted metadata
-    pub metadata: Option<ExtractedMetadata>,
-    /// SimHash of the content
-    pub simhash: Option<SimHash>,
+    /// Processing outcome (success with content, or failure with error)
+    pub outcome: ProcessOutcome,
     /// URLs discovered on this page
     pub discovered_urls: Vec<Url>,
-    /// Error message (if failed)
-    pub error: Option<String>,
     /// Processing duration
     pub duration: Duration,
+}
+
+impl ProcessResult {
+    /// Create a failure result with no discovered URLs
+    fn failure(url: &Url, error: impl Into<String>, start: Instant) -> Self {
+        Self {
+            url: url.clone(),
+            outcome: ProcessOutcome::Failure { error: error.into() },
+            discovered_urls: Vec::new(),
+            duration: start.elapsed(),
+        }
+    }
 }
 
 /// Statistics from the scraping coordinator
@@ -111,6 +180,12 @@ pub struct ScrapingStats {
     pub active_domains: usize,
 }
 
+/// Capacity of the content deduplicator (max number of tracked documents)
+const CONTENT_DEDUP_CAPACITY: usize = 100_000;
+
+/// Hamming distance threshold for near-duplicate detection
+const CONTENT_DEDUP_HAMMING_THRESHOLD: u32 = 3;
+
 /// Scraping coordinator managing the entire scraping pipeline
 pub struct ScrapingCoordinator {
     /// Configuration
@@ -123,12 +198,10 @@ pub struct ScrapingCoordinator {
     frontier: Arc<RwLock<UrlFrontier>>,
     /// Politeness controller
     politeness: Arc<RwLock<PolitenessController>>,
-    /// Fetch engine
-    fetcher: Arc<RwLock<FetchEngine>>,
+    /// Fetch engine (lock-free — uses internal atomics for stats)
+    fetcher: Arc<FetchEngine>,
     /// Content extractor (Arc for spawn_blocking sharing)
     extractor: Arc<ContentExtractor>,
-    /// URL deduplicator
-    url_dedup: Arc<RwLock<UrlDeduplicator>>,
     /// Content deduplicator (legacy, used if no registry is provided)
     content_dedup: Arc<RwLock<ContentDeduplicator>>,
     /// Document registry for unified deduplication (optional)
@@ -137,8 +210,12 @@ pub struct ScrapingCoordinator {
     stats: Arc<RwLock<ScrapingStats>>,
     /// Seed domains (for stay_on_domain mode)
     seed_domains: HashSet<String>,
-    /// Running flag
-    running: Arc<RwLock<bool>>,
+    /// Running flag (lock-free)
+    running: Arc<AtomicBool>,
+    /// Pre-compiled include patterns
+    compiled_include: Vec<regex::Regex>,
+    /// Pre-compiled exclude patterns
+    compiled_exclude: Vec<regex::Regex>,
 }
 
 impl ScrapingCoordinator {
@@ -157,8 +234,32 @@ impl ScrapingCoordinator {
         let fetcher = FetchEngine::new(config.fetch.clone())?;
         let extractor = Arc::new(ContentExtractor::new(config.extractor.clone()));
 
-        let url_dedup = UrlDeduplicator::default();
-        let content_dedup = ContentDeduplicator::new(100_000, 3, local_peer_id.clone());
+        let content_dedup = ContentDeduplicator::new(CONTENT_DEDUP_CAPACITY, CONTENT_DEDUP_HAMMING_THRESHOLD, local_peer_id.clone());
+
+        // Pre-compile include/exclude regex patterns
+        let compiled_include: Vec<regex::Regex> = config
+            .include_patterns
+            .iter()
+            .filter_map(|p| match regex::Regex::new(p) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    tracing::warn!("Invalid include pattern '{}': {}", p, e);
+                    None
+                }
+            })
+            .collect();
+
+        let compiled_exclude: Vec<regex::Regex> = config
+            .exclude_patterns
+            .iter()
+            .filter_map(|p| match regex::Regex::new(p) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    tracing::warn!("Invalid exclude pattern '{}': {}", p, e);
+                    None
+                }
+            })
+            .collect();
 
         Ok(Self {
             config,
@@ -166,21 +267,16 @@ impl ScrapingCoordinator {
             domain_assignment,
             frontier: Arc::new(RwLock::new(frontier)),
             politeness: Arc::new(RwLock::new(politeness)),
-            fetcher: Arc::new(RwLock::new(fetcher)),
+            fetcher: Arc::new(fetcher),
             extractor,
-            url_dedup: Arc::new(RwLock::new(url_dedup)),
             content_dedup: Arc::new(RwLock::new(content_dedup)),
             document_registry: None,
             stats: Arc::new(RwLock::new(ScrapingStats::default())),
             seed_domains: HashSet::new(),
-            running: Arc::new(RwLock::new(false)),
+            running: Arc::new(AtomicBool::new(false)),
+            compiled_include,
+            compiled_exclude,
         })
-    }
-
-    /// Set the document registry for unified deduplication
-    pub fn with_document_registry(mut self, registry: Arc<DocumentRegistry>) -> Self {
-        self.document_registry = Some(registry);
-        self
     }
 
     /// Add seed URLs to start crawling
@@ -200,23 +296,6 @@ impl ScrapingCoordinator {
     pub async fn process_url(&self, url: &Url) -> ProcessResult {
         let start = Instant::now();
 
-        // Check URL deduplication
-        {
-            let mut url_dedup = self.url_dedup.write().await;
-            if !url_dedup.is_new_url(url) {
-                return ProcessResult {
-                    url: url.clone(),
-                    success: false,
-                    content: None,
-                    metadata: None,
-                    simhash: None,
-                    discovered_urls: Vec::new(),
-                    error: Some("URL already seen".to_string()),
-                    duration: start.elapsed(),
-                };
-            }
-        }
-
         // Check politeness
         let fetch_decision = {
             let mut politeness = self.politeness.write().await;
@@ -225,16 +304,7 @@ impl ScrapingCoordinator {
 
         match fetch_decision {
             FetchDecision::Disallowed => {
-                return ProcessResult {
-                    url: url.clone(),
-                    success: false,
-                    content: None,
-                    metadata: None,
-                    simhash: None,
-                    discovered_urls: Vec::new(),
-                    error: Some("Disallowed by robots.txt".to_string()),
-                    duration: start.elapsed(),
-                };
+                return ProcessResult::failure(url, "Disallowed by robots.txt", start);
             }
             FetchDecision::WaitFor(duration) => {
                 tokio::time::sleep(duration).await;
@@ -248,11 +318,8 @@ impl ScrapingCoordinator {
             FetchDecision::Allowed => {}
         }
 
-        // Fetch the URL
-        let fetch_result = {
-            let mut fetcher = self.fetcher.write().await;
-            fetcher.fetch(url).await
-        };
+        // Fetch the URL (no lock needed — FetchEngine uses internal atomics)
+        let fetch_result = self.fetcher.fetch(url).await;
 
         let hostname = url.host_str().unwrap_or_default();
 
@@ -265,86 +332,55 @@ impl ScrapingCoordinator {
             Err(FetchError::Http(e)) if e.status().map(|s| s.as_u16()) == Some(429) => {
                 let mut politeness = self.politeness.write().await;
                 politeness.record_429(hostname, None);
-                return ProcessResult {
-                    url: url.clone(),
-                    success: false,
-                    content: None,
-                    metadata: None,
-                    simhash: None,
-                    discovered_urls: Vec::new(),
-                    error: Some("Rate limited (429)".to_string()),
-                    duration: start.elapsed(),
-                };
+                return ProcessResult::failure(url, "Rate limited (429)", start);
             }
             Err(e) => {
                 let mut politeness = self.politeness.write().await;
                 politeness.record_error(hostname);
-                return ProcessResult {
-                    url: url.clone(),
-                    success: false,
-                    content: None,
-                    metadata: None,
-                    simhash: None,
-                    discovered_urls: Vec::new(),
-                    error: Some(format!("Fetch error: {}", e)),
-                    duration: start.elapsed(),
-                };
+                return ProcessResult::failure(url, format!("Fetch error: {}", e), start);
             }
         };
 
         // Extract content and metadata on a blocking thread to avoid
         // starving the tokio runtime with CPU-bound HTML parsing.
+        // Uses extract_all() to parse the DOM once for both content and metadata.
         let extractor = Arc::clone(&self.extractor);
         let body_clone = response.body.clone();
         let url_clone = url.clone();
         let extraction = tokio::task::spawn_blocking(move || {
-            let content = extractor.extract(&body_clone, &url_clone);
-            let metadata = extractor.extract_metadata(&body_clone, &url_clone);
-            (content, metadata)
+            extractor.extract_all(&body_clone, &url_clone)
         })
         .await;
 
-        let (content_result, metadata) = match extraction {
-            Ok(pair) => pair,
-            Err(e) => {
+        let (content, metadata) = match extraction {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
                 return ProcessResult {
                     url: url.clone(),
-                    success: false,
-                    content: None,
-                    metadata: None,
-                    simhash: None,
+                    outcome: ProcessOutcome::Failure { error: format!("Extraction error: {}", e) },
                     discovered_urls: extract_urls(&response),
-                    error: Some(format!("Extraction task failed: {}", e)),
                     duration: start.elapsed(),
                 };
             }
-        };
-
-        let content = match content_result {
-            Ok(c) => c,
             Err(e) => {
                 return ProcessResult {
                     url: url.clone(),
-                    success: false,
-                    content: None,
-                    metadata: None,
-                    simhash: None,
+                    outcome: ProcessOutcome::Failure { error: format!("Extraction task failed: {}", e) },
                     discovered_urls: extract_urls(&response),
-                    error: Some(format!("Extraction error: {}", e)),
                     duration: start.elapsed(),
                 };
             }
         };
 
         // If a canonical URL differs from the fetched URL, mark the canonical as
-        // seen so that future encounters are deduplicated against it.
+        // seen in the frontier so that future encounters are deduplicated.
         if let Some(ref canonical) = metadata.canonical_url {
             if let Ok(canonical_parsed) = Url::parse(canonical) {
                 let canonical_normalized = super::normalize_url(&canonical_parsed);
                 let fetched_normalized = super::normalize_url(url);
                 if canonical_normalized != fetched_normalized {
-                    let mut url_dedup = self.url_dedup.write().await;
-                    url_dedup.mark_seen(&canonical_parsed);
+                    let mut frontier = self.frontier.write().await;
+                    frontier.mark_url_seen(&canonical_parsed);
                 }
             }
         }
@@ -362,16 +398,7 @@ impl ScrapingCoordinator {
                     let mut stats = self.stats.write().await;
                     stats.duplicates_skipped += 1;
 
-                    return ProcessResult {
-                        url: url.clone(),
-                        success: false,
-                        content: None,
-                        metadata: None,
-                        simhash: None,
-                        discovered_urls: Vec::new(),
-                        error: Some(format!("Duplicate of {}", entry.content_id)),
-                        duration: start.elapsed(),
-                    };
+                    return ProcessResult::failure(url, format!("Duplicate of {}", entry.content_id), start);
                 }
                 DuplicateCheckResult::NearDuplicate { entry, hamming_distance } => {
                     // Near-duplicate - update URL mapping and skip
@@ -380,16 +407,7 @@ impl ScrapingCoordinator {
                     let mut stats = self.stats.write().await;
                     stats.duplicates_skipped += 1;
 
-                    return ProcessResult {
-                        url: url.clone(),
-                        success: false,
-                        content: None,
-                        metadata: None,
-                        simhash: None,
-                        discovered_urls: Vec::new(),
-                        error: Some(format!("Near-duplicate of {} (distance: {})", entry.content_id, hamming_distance)),
-                        duration: start.elapsed(),
-                    };
+                    return ProcessResult::failure(url, format!("Near-duplicate of {} (distance: {})", entry.content_id, hamming_distance), start);
                 }
                 DuplicateCheckResult::New => {
                     // New content - will be registered after processing
@@ -404,16 +422,7 @@ impl ScrapingCoordinator {
                 let mut stats = self.stats.write().await;
                 stats.duplicates_skipped += 1;
 
-                return ProcessResult {
-                    url: url.clone(),
-                    success: false,
-                    content: None,
-                    metadata: None,
-                    simhash: None,
-                    discovered_urls: Vec::new(),
-                    error: Some(format!("Duplicate of {}", existing_doc)),
-                    duration: start.elapsed(),
-                };
+                return ProcessResult::failure(url, format!("Duplicate of {}", existing_doc), start);
             }
 
             // Register new content
@@ -438,12 +447,12 @@ impl ScrapingCoordinator {
 
         ProcessResult {
             url: url.clone(),
-            success: true,
-            content: Some(content),
-            metadata: Some(metadata),
-            simhash: Some(simhash),
+            outcome: ProcessOutcome::Success(ProcessedContent {
+                content,
+                metadata,
+                simhash,
+            }),
             discovered_urls,
-            error: None,
             duration: start.elapsed(),
         }
     }
@@ -456,6 +465,11 @@ impl ScrapingCoordinator {
         all_urls
             .into_iter()
             .filter(|url| {
+                // Check crawl trap detection
+                if trap_detection::is_crawl_trap(url, &self.config.trap_detector) {
+                    return false;
+                }
+
                 // Check stay_on_domain
                 if self.config.stay_on_domain {
                     let domain = url.host_str().unwrap_or_default();
@@ -464,24 +478,17 @@ impl ScrapingCoordinator {
                     }
                 }
 
-                // Check exclude patterns
+                // Check exclude patterns (compiled regex)
                 let url_str = url.as_str();
-                for pattern in &self.config.exclude_patterns {
-                    if url_str.contains(pattern) {
+                for pattern in &self.compiled_exclude {
+                    if pattern.is_match(url_str) {
                         return false;
                     }
                 }
 
-                // Check include patterns (if any)
-                if !self.config.include_patterns.is_empty() {
-                    let mut matches = false;
-                    for pattern in &self.config.include_patterns {
-                        if url_str.contains(pattern) {
-                            matches = true;
-                            break;
-                        }
-                    }
-                    if !matches {
+                // Check include patterns (if any, compiled regex)
+                if !self.compiled_include.is_empty() {
+                    if !self.compiled_include.iter().any(|p| p.is_match(url_str)) {
                         return false;
                     }
                 }
@@ -519,10 +526,7 @@ impl ScrapingCoordinator {
     /// Uses a semaphore to limit concurrency to `max_concurrent_fetches` while
     /// maintaining per-domain politeness through the frontier and politeness controller.
     pub async fn run(self: &Arc<Self>) {
-        {
-            let mut running = self.running.write().await;
-            *running = true;
-        }
+        self.running.store(true, Ordering::Relaxed);
 
         let max_concurrent = self.config.max_concurrent_fetches.max(1);
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
@@ -532,7 +536,7 @@ impl ScrapingCoordinator {
             max_concurrent
         );
 
-        while *self.running.read().await {
+        while self.running.load(Ordering::Relaxed) {
             // Try to acquire a permit (non-blocking check first)
             let permit = match semaphore.clone().try_acquire_owned() {
                 Ok(permit) => permit,
@@ -556,23 +560,26 @@ impl ScrapingCoordinator {
 
                         let result = coordinator.process_url(&scored_url.url).await;
 
-                        if result.success {
-                            tracing::debug!(
-                                "Processed {} - {} words, {} URLs discovered",
-                                result.url,
-                                result.content.as_ref().map(|c| c.word_count).unwrap_or(0),
-                                result.discovered_urls.len()
-                            );
+                        match &result.outcome {
+                            ProcessOutcome::Success(processed) => {
+                                tracing::debug!(
+                                    "Processed {} - {} words, {} URLs discovered",
+                                    result.url,
+                                    processed.content.word_count,
+                                    result.discovered_urls.len()
+                                );
 
-                            coordinator
-                                .add_discovered_urls(result.discovered_urls, scored_url.depth)
-                                .await;
-                        } else {
-                            tracing::debug!(
-                                "Failed to process {}: {}",
-                                result.url,
-                                result.error.unwrap_or_default()
-                            );
+                                coordinator
+                                    .add_discovered_urls(result.discovered_urls, scored_url.depth)
+                                    .await;
+                            }
+                            ProcessOutcome::Failure { error } => {
+                                tracing::debug!(
+                                    "Failed to process {}: {}",
+                                    result.url,
+                                    error
+                                );
+                            }
                         }
                     });
                 }
@@ -588,14 +595,13 @@ impl ScrapingCoordinator {
     }
 
     /// Stop the scraping loop
-    pub async fn stop(&self) {
-        let mut running = self.running.write().await;
-        *running = false;
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::Relaxed);
     }
 
     /// Check if running
-    pub async fn is_running(&self) -> bool {
-        *self.running.read().await
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
     }
 
     /// Get current statistics
@@ -661,12 +667,6 @@ impl ScrapingCoordinator {
         // Update frontier with new assignment
         let mut frontier = self.frontier.write().await;
         frontier.update_domain_assignment(assignment.clone());
-    }
-
-    /// Get outbound URL batches for other nodes
-    pub async fn get_outbound_batches(&self) -> Vec<super::frontier::UrlExchangeBatch> {
-        let mut frontier = self.frontier.write().await;
-        frontier.take_ready_batches()
     }
 
     /// Receive URL batch from another node
@@ -788,7 +788,7 @@ mod tests {
     #[tokio::test]
     async fn test_is_running_initially_false() {
         let coordinator = default_coordinator();
-        assert!(!coordinator.is_running().await);
+        assert!(!coordinator.is_running());
     }
 
     #[tokio::test]
@@ -796,15 +796,12 @@ mod tests {
         let coordinator = default_coordinator();
 
         // Manually set running to true
-        {
-            let mut running = coordinator.running.write().await;
-            *running = true;
-        }
-        assert!(coordinator.is_running().await);
+        coordinator.running.store(true, Ordering::Relaxed);
+        assert!(coordinator.is_running());
 
         // Stop should set it back to false
-        coordinator.stop().await;
-        assert!(!coordinator.is_running().await);
+        coordinator.stop();
+        assert!(!coordinator.is_running());
     }
 
     #[tokio::test]
@@ -926,21 +923,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_url_duplicate_url() {
-        let coordinator = default_coordinator();
+    async fn test_frontier_deduplicates_urls() {
+        let mut coordinator = default_coordinator();
 
         let url = Url::parse("https://example.com/dup").unwrap();
 
-        // Process once - marks URL as seen (will fail to fetch since no server,
-        // but the URL dedup should trigger on the second call)
-        let _first_result = coordinator.process_url(&url).await;
+        // Add as seed — first time should succeed
+        coordinator.add_seeds(vec![url.clone()]).await;
+        let stats = coordinator.stats().await;
+        assert!(stats.queue_size > 0, "First add should succeed");
 
-        // Process same URL again - should be detected as duplicate
-        let second_result = coordinator.process_url(&url).await;
-        assert!(!second_result.success);
+        // Adding the same URL as a discovered URL should be deduped by the frontier
+        coordinator.add_discovered_urls(vec![url], 0).await;
+        // Queue size should not increase (URL already seen by frontier)
+        let stats2 = coordinator.stats().await;
         assert_eq!(
-            second_result.error.as_deref(),
-            Some("URL already seen")
+            stats.queue_size, stats2.queue_size,
+            "Duplicate URL should be rejected by frontier"
         );
     }
 

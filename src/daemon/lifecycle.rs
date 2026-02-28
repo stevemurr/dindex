@@ -212,10 +212,18 @@ impl Daemon {
         // Trigger shutdown
         let _ = self.shutdown_tx.send(());
 
-        // Wait for servers to stop
-        let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+        // Wait for servers to stop, aborting if they don't shut down in time
+        let server_abort = server_handle.abort_handle();
+        if tokio::time::timeout(Duration::from_secs(5), server_handle).await.is_err() {
+            warn!("IPC server did not shut down within 5s, aborting");
+            server_abort.abort();
+        }
         if let Some(http_handle) = http_handle {
-            let _ = tokio::time::timeout(Duration::from_secs(5), http_handle).await;
+            let http_abort = http_handle.abort_handle();
+            if tokio::time::timeout(Duration::from_secs(5), http_handle).await.is_err() {
+                warn!("HTTP server did not shut down within 5s, aborting");
+                http_abort.abort();
+            }
         }
 
         // Final cleanup
@@ -269,33 +277,59 @@ impl Daemon {
     }
 
     /// Acquire single-instance lock via PID file
+    ///
+    /// Uses `create_new(true)` for atomic creation to avoid TOCTOU races
+    /// where two processes could interleave exists/read/remove/create.
     fn acquire_lock(pid_file_path: &Path) -> Result<()> {
-        // Check if daemon is already running
-        if pid_file_path.exists() {
-            let mut file = File::open(pid_file_path)?;
-            let mut contents = String::new();
-            file.read_to_string(&mut contents)?;
+        use std::fs::OpenOptions;
 
-            if let Ok(pid) = contents.trim().parse::<u32>() {
-                // Check if process is still running
-                if Self::process_exists(pid) {
-                    anyhow::bail!(
-                        "Daemon is already running (PID {}). Stop it first or remove {}",
-                        pid,
-                        pid_file_path.display()
-                    );
-                }
+        // Try atomic create — fails if file already exists
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(pid_file_path)
+        {
+            Ok(mut file) => {
+                writeln!(file, "{}", std::process::id())?;
+                return Ok(());
             }
-
-            // Stale PID file, remove it
-            std::fs::remove_file(pid_file_path)?;
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // File exists — check if it's stale below
+            }
+            Err(e) => {
+                return Err(e).context("Failed to create PID file");
+            }
         }
 
-        // Create PID file
-        let mut file = File::create(pid_file_path)?;
-        writeln!(file, "{}", std::process::id())?;
+        // PID file exists — check if the process is still running
+        let mut file = File::open(pid_file_path)?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
 
-        Ok(())
+        if let Ok(pid) = contents.trim().parse::<u32>() {
+            if Self::process_exists(pid) {
+                anyhow::bail!(
+                    "Daemon is already running (PID {}). Stop it first or remove {}",
+                    pid,
+                    pid_file_path.display()
+                );
+            }
+        }
+
+        // Stale PID file — remove and retry once
+        std::fs::remove_file(pid_file_path)?;
+
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(pid_file_path)
+        {
+            Ok(mut file) => {
+                writeln!(file, "{}", std::process::id())?;
+                Ok(())
+            }
+            Err(e) => Err(e).context("Failed to create PID file after removing stale lock"),
+        }
     }
 
     /// Release single-instance lock

@@ -6,7 +6,7 @@
 //! - Local servers (LM Studio, vLLM, Ollama with OpenAI compat, text-embeddings-inference)
 
 use super::traits::{EmbeddingBackend, EmbeddingError, EmbeddingResult};
-use crate::embedding::normalize_embedding;
+use crate::util::normalize_embedding;
 use crate::types::Embedding;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};

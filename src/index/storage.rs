@@ -72,7 +72,7 @@ impl ChunkStorage {
     }
 
     /// Store a chunk
-    pub fn store(&self, chunk: &IndexedChunk) {
+    pub fn store(&self, chunk: &IndexedChunk) -> Result<()> {
         let stored = StoredChunk {
             chunk: chunk.chunk.clone(),
             embedding: chunk.embedding.clone(),
@@ -83,25 +83,24 @@ impl ChunkStorage {
         let doc_id = &chunk.chunk.metadata.document_id;
 
         // Serialize and store the chunk
-        match bincode::serialize(&stored) {
-            Ok(data) => {
-                if let Err(e) = self.db.insert(chunk_id.as_bytes(), data) {
-                    warn!("Failed to store chunk {}: {}", chunk_id, e);
-                    return;
-                }
-                // Update document index
-                self.add_to_doc_index(doc_id, chunk_id);
-                // Update URL index
-                if let Some(ref url) = chunk.chunk.metadata.source_url {
-                    if let Err(e) = self.url_index.insert(url.as_bytes(), doc_id.as_bytes()) {
-                        warn!("Failed to update URL index for {}: {}", url, e);
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Failed to serialize chunk {}: {}", chunk_id, e);
+        let data = bincode::serialize(&stored)
+            .with_context(|| format!("Failed to serialize chunk {}", chunk_id))?;
+
+        self.db
+            .insert(chunk_id.as_bytes(), data)
+            .with_context(|| format!("Failed to store chunk {}", chunk_id))?;
+
+        // Update document index
+        self.add_to_doc_index(doc_id, chunk_id);
+
+        // Update URL index
+        if let Some(ref url) = chunk.chunk.metadata.source_url {
+            if let Err(e) = self.url_index.insert(url.as_bytes(), doc_id.as_bytes()) {
+                warn!("Failed to update URL index for {}: {}", url, e);
             }
         }
+
+        Ok(())
     }
 
     /// Add chunk_id to document index
@@ -149,11 +148,20 @@ impl ChunkStorage {
 
     /// Get a chunk by ID
     pub fn get(&self, chunk_id: &str) -> Option<StoredChunk> {
-        self.db
-            .get(chunk_id.as_bytes())
-            .ok()
-            .flatten()
-            .and_then(|data| bincode::deserialize(&data).ok())
+        match self.db.get(chunk_id.as_bytes()) {
+            Ok(Some(data)) => match bincode::deserialize(&data) {
+                Ok(stored) => Some(stored),
+                Err(e) => {
+                    warn!("Failed to deserialize chunk {}: {}", chunk_id, e);
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(e) => {
+                warn!("Failed to read chunk {}: {}", chunk_id, e);
+                None
+            }
+        }
     }
 
     /// Get multiple chunks by ID
@@ -212,9 +220,9 @@ impl ChunkStorage {
         self.db.is_empty()
     }
 
-    /// Get all embeddings (for centroid computation)
-    /// Note: This still loads all embeddings - consider streaming for very large indexes
-    pub fn all_embeddings(&self) -> Vec<(String, Vec<f32>)> {
+    /// Iterate over all embeddings lazily (for centroid computation and export).
+    /// Avoids collecting all embeddings into memory at once.
+    pub fn embedding_iter(&self) -> impl Iterator<Item = (String, Vec<f32>)> + '_ {
         self.db
             .iter()
             .filter_map(|r| r.ok())
@@ -223,16 +231,29 @@ impl ChunkStorage {
                 let stored: StoredChunk = bincode::deserialize(&v).ok()?;
                 Some((id, stored.embedding))
             })
-            .collect()
+    }
+
+    /// Get all embeddings (collects into Vec; prefer `embedding_iter()` for streaming)
+    pub fn all_embeddings(&self) -> Vec<(String, Vec<f32>)> {
+        self.embedding_iter().collect()
     }
 
     /// Find a document ID by its source URL
     pub fn find_document_id_by_url(&self, url: &str) -> Option<String> {
-        self.url_index
-            .get(url.as_bytes())
-            .ok()
-            .flatten()
-            .and_then(|data| String::from_utf8(data.to_vec()).ok())
+        match self.url_index.get(url.as_bytes()) {
+            Ok(Some(data)) => match String::from_utf8(data.to_vec()) {
+                Ok(doc_id) => Some(doc_id),
+                Err(e) => {
+                    warn!("Failed to decode document ID for URL {}: {}", url, e);
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(e) => {
+                warn!("Failed to read URL index for {}: {}", url, e);
+                None
+            }
+        }
     }
 
     /// Get chunks by document ID (uses secondary index)
@@ -281,7 +302,7 @@ impl ChunkStorage {
                 lsh_signature: None,
                 index_key: stored.index_key,
             };
-            storage.store(&indexed);
+            storage.store(&indexed)?;
         }
 
         storage.save()?;
@@ -322,7 +343,7 @@ mod tests {
             index_key: 0,
         };
 
-        storage.store(&indexed);
+        storage.store(&indexed).unwrap();
         assert_eq!(storage.len(), 1);
 
         let retrieved = storage.get("chunk1").unwrap();
@@ -347,7 +368,7 @@ mod tests {
                 lsh_signature: None,
                 index_key: i,
             };
-            storage.store(&indexed);
+            storage.store(&indexed).unwrap();
         }
 
         for i in 0..2u64 {
@@ -362,7 +383,7 @@ mod tests {
                 lsh_signature: None,
                 index_key: 10 + i,
             };
-            storage.store(&indexed);
+            storage.store(&indexed).unwrap();
         }
 
         assert_eq!(storage.len(), 5);
@@ -394,7 +415,7 @@ mod tests {
                 lsh_signature: None,
                 index_key: 42,
             };
-            storage.store(&indexed);
+            storage.store(&indexed).unwrap();
             storage.save().unwrap();
         }
 
@@ -427,7 +448,7 @@ mod tests {
                 lsh_signature: None,
                 index_key: i,
             };
-            storage.store(&indexed);
+            storage.store(&indexed).unwrap();
         }
 
         assert_eq!(storage.len(), 2);
@@ -479,7 +500,7 @@ mod tests {
                 lsh_signature: None,
                 index_key: i as u64,
             };
-            storage.store(&indexed);
+            storage.store(&indexed).unwrap();
         }
 
         let mut ids = storage.chunk_ids();
@@ -518,7 +539,7 @@ mod tests {
                 lsh_signature: None,
                 index_key: i as u64,
             };
-            storage.store(&indexed);
+            storage.store(&indexed).unwrap();
         }
 
         let all = storage.all_embeddings();

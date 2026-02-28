@@ -3,7 +3,7 @@
 //! Dispatches incoming requests to the appropriate service and returns responses.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -197,7 +197,22 @@ impl RequestHandler {
 
     // ============ Write Handlers ============
 
+    /// Remove indexing streams that have been idle for too long
+    fn cleanup_stale_streams(&self) {
+        const STREAM_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
+        self.active_streams.retain(|id, stream| {
+            let stale = stream.created_at.elapsed() > STREAM_TIMEOUT;
+            if stale {
+                warn!("Removing stale indexing stream {}", id);
+            }
+            !stale
+        });
+    }
+
     async fn handle_index_documents(&self, stream_id: Uuid) -> Response {
+        // Clean up any stale streams before creating new ones
+        self.cleanup_stale_streams();
+
         // Create a new indexing stream
         self.active_streams.insert(
             stream_id,
@@ -449,21 +464,9 @@ impl RequestHandler {
 
     /// Get approximate memory usage in MB
     fn get_memory_usage(&self) -> u64 {
-        // Try to read from /proc/self/statm on Linux
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
-                if let Some(rss) = content.split_whitespace().nth(1) {
-                    if let Ok(pages) = rss.parse::<u64>() {
-                        // Page size is typically 4KB
-                        return pages * 4 / 1024;
-                    }
-                }
-            }
-        }
-
-        // Fallback: return 0
-        0
+        super::metrics::get_memory_usage()
+            .map(|bytes| bytes / (1024 * 1024))
+            .unwrap_or(0)
     }
 }
 

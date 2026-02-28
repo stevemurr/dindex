@@ -127,13 +127,6 @@ pub fn extract_from_path(path: &Path) -> Result<ExtractedDocument> {
     }
 }
 
-/// Extract content from bytes with a known content type
-///
-/// For HTML content, an optional URL can be provided to help with relative link resolution.
-pub fn extract_from_bytes(bytes: &[u8], content_type: ContentType) -> Result<ExtractedDocument> {
-    extract_from_bytes_with_url(bytes, content_type, None)
-}
-
 /// Extract content from bytes with a known content type and optional source URL
 ///
 /// For HTML content, the URL helps with relative link resolution and metadata extraction.

@@ -135,7 +135,7 @@ impl HybridRetriever {
         for fused_result in top_fused {
             if let Some(stored) = chunk_map.get(fused_result.chunk_id.as_str()) {
                 let mut result = SearchResult::new(stored.chunk.clone(), fused_result.rrf_score);
-                result.matched_by = fused_result.contributing_methods.iter().map(|m| m.to_string()).collect();
+                result.matched_by = fused_result.contributing_methods.clone();
                 results.push(result);
             }
         }
@@ -303,7 +303,7 @@ impl HybridIndexer {
             lsh_signature: None,
             index_key: key,
         };
-        self.chunk_storage.store(&indexed_chunk);
+        self.chunk_storage.store(&indexed_chunk)?;
 
         Ok(key)
     }

@@ -11,8 +11,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::config::Config;
-
 /// Recovery state file name
 const RECOVERY_STATE_FILE: &str = ".dindex_recovery";
 
@@ -116,13 +114,6 @@ impl RecoveryState {
         }
     }
 
-    /// Mark commit started
-    pub fn mark_committing(&mut self) {
-        self.wal_state = WalState::Committing {
-            started_at: current_timestamp(),
-        };
-    }
-
     /// Mark operation complete (clean state)
     pub fn mark_complete(&mut self) {
         self.wal_state = WalState::Clean;
@@ -183,75 +174,9 @@ impl RecoveryManager {
         }
     }
 
-    /// Verify index integrity
-    pub fn verify_integrity(&mut self, _config: &Config) -> Result<IntegrityResult> {
-        info!("Verifying index integrity...");
-
-        let mut issues = Vec::new();
-
-        // Check vector index file exists and is valid
-        let vector_index_path = self.data_dir.join("vector.index");
-        if vector_index_path.exists() {
-            match fs::metadata(&vector_index_path) {
-                Ok(meta) => {
-                    if meta.len() == 0 {
-                        issues.push("Vector index file is empty".to_string());
-                    }
-                }
-                Err(e) => {
-                    issues.push(format!("Cannot read vector index: {}", e));
-                }
-            }
-        }
-
-        // Check BM25 index directory
-        let bm25_path = self.data_dir.join("bm25");
-        if bm25_path.exists() && !bm25_path.is_dir() {
-            issues.push("BM25 index path exists but is not a directory".to_string());
-        }
-
-        // Check chunk storage (sled database)
-        let chunks_path = self.data_dir.join("chunks.sled");
-        if chunks_path.exists() {
-            if !chunks_path.is_dir() {
-                issues.push("Chunk storage path exists but is not a directory".to_string());
-            } else {
-                // Try to open the sled database to verify integrity
-                match sled::open(&chunks_path) {
-                    Ok(db) => {
-                        // Verify we can read from the database
-                        if let Err(e) = db.first() {
-                            issues.push(format!("Chunk storage database is corrupted: {}", e));
-                        }
-                    }
-                    Err(e) => {
-                        issues.push(format!("Cannot open chunk storage database: {}", e));
-                    }
-                }
-            }
-        }
-
-        // Update last integrity check time
-        self.state.last_integrity_check = Some(current_timestamp());
-        self.state.save(&self.data_dir)?;
-
-        if issues.is_empty() {
-            info!("Index integrity verified - no issues found");
-            Ok(IntegrityResult::Ok)
-        } else {
-            warn!("Index integrity issues found: {:?}", issues);
-            Ok(IntegrityResult::Issues(issues))
-        }
-    }
-
     /// Get the current recovery state
     pub fn state(&self) -> &RecoveryState {
         &self.state
-    }
-
-    /// Get mutable recovery state for updates during operations
-    pub fn state_mut(&mut self) -> &mut RecoveryState {
-        &mut self.state
     }
 
     /// Save current state

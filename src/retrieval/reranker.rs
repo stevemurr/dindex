@@ -16,9 +16,11 @@ impl SimpleReranker {
 
         for result in results.iter_mut() {
             let content_lower = result.chunk.content.to_lowercase();
+            let content_words: std::collections::HashSet<&str> =
+                content_lower.split_whitespace().collect();
             let overlap: usize = query_terms
                 .iter()
-                .filter(|term| content_lower.contains(*term))
+                .filter(|term| content_words.contains(*term))
                 .count();
 
             // Boost score based on term overlap

@@ -417,33 +417,6 @@ pub struct MetricsSnapshot {
     pub http_requests_total: u64,
 }
 
-impl MetricsSnapshot {
-    /// Format as human-readable string
-    pub fn to_display_string(&self) -> String {
-        format!(
-            "Queries: {} (avg {:.1}ms, {} failed)\n\
-             Indexed: {} chunks, {} documents, {} commits (avg {:.1}ms)\n\
-             Jobs: {} started, {} completed, {} failed, {} cancelled\n\
-             Connections: {} total, {} active\n\
-             Memory: {:.1} MB",
-            self.queries_total,
-            self.query_latency_ms,
-            self.queries_failed,
-            self.chunks_indexed,
-            self.documents_indexed,
-            self.commits_total,
-            self.commit_latency_ms,
-            self.jobs_started,
-            self.jobs_completed,
-            self.jobs_failed,
-            self.jobs_cancelled,
-            self.connections_total,
-            self.active_connections,
-            self.memory_usage_bytes as f64 / 1_048_576.0,
-        )
-    }
-}
-
 /// Helper for timing operations
 pub struct Timer {
     start: Instant,
@@ -471,7 +444,7 @@ impl Timer {
 }
 
 /// Get current process memory usage in bytes
-fn get_memory_usage() -> Option<u64> {
+pub(super) fn get_memory_usage() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {

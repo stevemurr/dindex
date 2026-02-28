@@ -22,7 +22,7 @@ use uuid::Uuid;
 use axum::extract::Path;
 
 use crate::daemon::handler::RequestHandler;
-use crate::daemon::protocol::{self, OutputFormat, Request, Response as IpcResponse, ScrapeOptions};
+use crate::daemon::protocol::{self, OutputFormat, Request, Response as IpcResponse};
 use crate::types::{Document, GroupedSearchResult};
 
 use super::types::*;
@@ -468,17 +468,9 @@ pub async fn start_scrape(
 
     debug!("HTTP scrape request: {} URLs, depth={}", request.urls.len(), request.options.max_depth);
 
-    // Convert HTTP options to IPC options
-    let options = ScrapeOptions {
-        max_depth: request.options.max_depth,
-        stay_on_domain: request.options.stay_on_domain,
-        delay_ms: request.options.delay_ms,
-        max_pages: request.options.max_pages,
-    };
-
     let ipc_request = Request::ScrapeStart {
         urls: request.urls,
-        options,
+        options: request.options,
     };
 
     match state.handler.handle(ipc_request).await {

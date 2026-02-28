@@ -923,26 +923,13 @@ fn test_wikipedia_url_generation_languages() {
     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
     std::io::Write::write_all(&mut temp_file, sample_xml.as_bytes()).unwrap();
 
+    // Default base URL (temp file doesn't start with enwiki/dewiki, so defaults to en)
     let mut source = WikimediaSource::open(temp_file.path())
-        .unwrap()
-        .with_base_url("https://en.wikipedia.org/wiki/");
+        .unwrap();
     let docs: Vec<_> = source.iter_documents().collect();
     assert_eq!(
         docs[0].as_ref().unwrap().url,
         Some("https://en.wikipedia.org/wiki/Test_Article".to_string())
-    );
-
-    // Test German Wikipedia URL
-    let mut temp_file2 = tempfile::NamedTempFile::new().unwrap();
-    std::io::Write::write_all(&mut temp_file2, sample_xml.as_bytes()).unwrap();
-
-    let mut source2 = WikimediaSource::open(temp_file2.path())
-        .unwrap()
-        .with_base_url("https://de.wikipedia.org/wiki/");
-    let docs2: Vec<_> = source2.iter_documents().collect();
-    assert_eq!(
-        docs2[0].as_ref().unwrap().url,
-        Some("https://de.wikipedia.org/wiki/Test_Article".to_string())
     );
 }
 
@@ -1019,7 +1006,7 @@ fn test_politeness_controller_init() {
 
     assert_eq!(
         controller.user_agent(),
-        "DecentralizedSearchBot/1.0",
+        dindex::config::DEFAULT_USER_AGENT,
         "Should have correct user agent"
     );
 }

@@ -49,19 +49,27 @@ impl Default for ImportOptions {
 /// Options for scrape operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScrapeOptions {
+    #[serde(default = "default_max_depth")]
     pub max_depth: u8,
+    #[serde(default)]
     pub stay_on_domain: bool,
+    #[serde(default = "default_delay_ms")]
     pub delay_ms: u64,
+    #[serde(default = "default_max_pages")]
     pub max_pages: usize,
 }
+
+fn default_max_depth() -> u8 { 2 }
+fn default_delay_ms() -> u64 { 1000 }
+fn default_max_pages() -> usize { 100 }
 
 impl Default for ScrapeOptions {
     fn default() -> Self {
         Self {
-            max_depth: 2,
+            max_depth: default_max_depth(),
             stay_on_domain: false,
-            delay_ms: 1000,
-            max_pages: 100,
+            delay_ms: default_delay_ms(),
+            max_pages: default_max_pages(),
         }
     }
 }

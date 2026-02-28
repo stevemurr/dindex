@@ -125,12 +125,6 @@ impl WikimediaSource {
         self
     }
 
-    /// Set the base URL for constructing article URLs
-    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.base_url = base_url.into();
-        self
-    }
-
     /// Parse the next page from the XML stream
     fn parse_next_page(&mut self) -> Result<ParseResult, ImportError> {
         let mut buf = Vec::with_capacity(8192);
@@ -340,36 +334,6 @@ impl<'a> Iterator for WikimediaIterator<'a> {
             }
         }
     }
-}
-
-/// Helper to create a source for testing with plain XML
-pub fn from_xml_string(xml: &str) -> Result<WikimediaSource, ImportError> {
-    use std::io::Write;
-
-    // Write to a temp file
-    let mut temp_file = tempfile::NamedTempFile::new()?;
-    temp_file.write_all(xml.as_bytes())?;
-    temp_file.flush()?;
-
-    let path = temp_file.path().to_path_buf();
-
-    // Keep the temp file around by leaking it
-    // (In production code, you'd want to handle this differently)
-    let _ = temp_file.into_temp_path();
-
-    let file = File::open(&path)?;
-    let buf_reader = BufReader::new(file);
-    let xml_reader = Reader::from_reader(buf_reader);
-
-    Ok(WikimediaSource {
-        path,
-        reader: WikimediaReader::Plain(xml_reader),
-        wikitext_parser: WikiTextParser::new(),
-        current_page: None,
-        bytes_read: 0,
-        allowed_namespaces: Some(HashSet::from([0])),
-        base_url: "https://en.wikipedia.org/wiki/".to_string(),
-    })
 }
 
 #[cfg(test)]

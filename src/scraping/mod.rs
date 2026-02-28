@@ -21,6 +21,7 @@ pub mod extractor;
 pub mod fetcher;
 pub mod frontier;
 pub mod politeness;
+pub mod trap_detection;
 
 pub use coordinator::ScrapingCoordinator;
 pub use dedup::{ContentDeduplicator, UrlDeduplicator};
@@ -60,10 +61,11 @@ pub(crate) fn normalize_url(url: &url::Url) -> String {
     normalized.set_fragment(None);
 
     // Strip www. prefix from hostname
-    if let Some(host) = normalized.host_str() {
+    if let Some(host) = normalized.host_str().map(|h| h.to_string()) {
         if let Some(stripped) = host.strip_prefix("www.") {
-            let stripped = stripped.to_string();
-            let _ = normalized.set_host(Some(&stripped));
+            if let Err(e) = normalized.set_host(Some(stripped)) {
+                tracing::warn!("Failed to strip www. from {}: {}", host, e);
+            }
         }
     }
 

@@ -110,33 +110,6 @@ impl DomainAssignment {
         self.ring.retain(|_, p| p != peer_id);
     }
 
-    /// Get all domains that would move from old_owner to new_owner if new_owner joins
-    /// This is useful for understanding migration impact
-    pub fn domains_affected_by_join(
-        &self,
-        new_peer: &PeerId,
-        sample_domains: &[String],
-    ) -> Vec<(String, PeerId)> {
-        let mut affected = Vec::new();
-
-        // Create a temporary ring with the new peer
-        let mut temp_ring = self.clone();
-        temp_ring.on_node_join(new_peer.clone());
-
-        for domain in sample_domains {
-            let old_owner = self.assign_domain(domain);
-            let new_owner = temp_ring.assign_domain(domain);
-
-            if old_owner != new_owner {
-                if let Some(old) = old_owner {
-                    affected.push((domain.clone(), old));
-                }
-            }
-        }
-
-        affected
-    }
-
     /// Get the number of nodes in the ring
     pub fn node_count(&self) -> usize {
         let unique_peers: std::collections::HashSet<_> = self.ring.values().collect();

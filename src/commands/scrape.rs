@@ -5,17 +5,12 @@ use dindex::{
     config::Config,
     daemon::protocol::ScrapeOptions,
     embedding::init_embedding_engine,
-    index::{ChunkStorage, VectorIndex},
-    retrieval::{Bm25Index, HybridIndexer},
+    index::IndexStack,
     util::truncate_for_display,
-    scraping::{
-        coordinator::{ScrapingConfig as ScrapingCoordConfig, ScrapingCoordinator},
-        extractor::ExtractorConfig,
-        fetcher::FetchConfig,
-        politeness::PolitenessConfig,
+    scraping::coordinator::{
+        ProcessOutcome, ScrapingConfig as ScrapingCoordConfig, ScrapingCoordinator,
     },
 };
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 use url::Url;
@@ -128,35 +123,13 @@ pub async fn scrape_urls(
     println!();
 
     // Create scraping config
-    let scraping_config = ScrapingCoordConfig {
-        enabled: true,
-        max_concurrent_fetches: config.scraping.max_concurrent_fetches,
+    let scraping_config = ScrapingCoordConfig::from_config(
+        &config.scraping,
         max_depth,
         stay_on_domain,
-        include_patterns: config.scraping.include_patterns.clone(),
-        exclude_patterns: config.scraping.exclude_patterns.clone(),
-        max_pages_per_domain: max_pages,
-        scrape_interval: Duration::from_millis(100),
-        politeness: PolitenessConfig {
-            user_agent: config.scraping.user_agent.clone(),
-            default_delay: Duration::from_millis(delay_ms),
-            min_delay: Duration::from_millis(delay_ms / 2),
-            max_delay: Duration::from_secs(30),
-            cache_size: 10000,
-            request_timeout: Duration::from_secs(config.scraping.request_timeout_secs),
-        },
-        fetch: FetchConfig {
-            user_agent: config.scraping.user_agent.clone(),
-            timeout: Duration::from_secs(config.scraping.request_timeout_secs),
-            connect_timeout: Duration::from_secs(10),
-            max_content_size: 10 * 1024 * 1024,
-            max_redirects: 10,
-            min_text_ratio: 0.1,
-            enable_js_rendering: config.scraping.enable_js_rendering,
-            connections_per_host: 10,
-        },
-        extractor: ExtractorConfig::default(),
-    };
+        delay_ms,
+        max_pages,
+    );
 
     // Create coordinator
     let peer_id = format!("scraper_{}", uuid::Uuid::new_v4());
@@ -166,15 +139,12 @@ pub async fn scrape_urls(
     coordinator.add_seeds(seeds).await;
 
     // Initialize indexing components if needed
-    let (indexer, vector_index, chunk_storage) = if should_index {
-        let vi = Arc::new(VectorIndex::new(config.embedding.dimensions, &config.index)?);
-        let bm25_path = config.node.data_dir.join("bm25");
-        let bm25_index = Arc::new(Bm25Index::new(&bm25_path)?);
-        let cs = Arc::new(ChunkStorage::new(&config.node.data_dir)?);
-        let idx = HybridIndexer::new(vi.clone(), bm25_index, cs.clone());
-        (Some(idx), Some(vi), Some(cs))
+    let (indexer, stack) = if should_index {
+        let s = IndexStack::create(&config.node.data_dir, config.embedding.dimensions, &config.index)?;
+        let idx = s.indexer();
+        (Some(idx), Some(s))
     } else {
-        (None, None, None)
+        (None, None)
     };
 
     let splitter = TextSplitter::new(config.chunking.clone());
@@ -195,77 +165,81 @@ pub async fn scrape_urls(
         match next_url {
             Some(scored_url) => {
                 let result = coordinator.process_url(&scored_url.url).await;
+                let result_url = result.url.clone();
 
-                if result.success {
-                    pages_scraped += 1;
+                match result.outcome {
+                    ProcessOutcome::Success(processed) => {
+                        pages_scraped += 1;
 
-                    let word_count = result.content.as_ref().map(|c| c.word_count).unwrap_or(0);
-                    let urls_found = result.discovered_urls.len();
+                        let word_count = processed.content.word_count;
+                        let urls_found = result.discovered_urls.len();
 
-                    println!(
-                        "[{}/{}] {} - {} words, {} links found",
-                        pages_scraped,
-                        max_pages,
-                        truncate_for_display(result.url.as_str(), 60),
-                        word_count,
-                        urls_found
-                    );
+                        println!(
+                            "[{}/{}] {} - {} words, {} links found",
+                            pages_scraped,
+                            max_pages,
+                            truncate_for_display(result_url.as_str(), 60),
+                            word_count,
+                            urls_found
+                        );
 
-                    // Add discovered URLs
-                    coordinator
-                        .add_discovered_urls(result.discovered_urls, scored_url.depth)
-                        .await;
+                        // Add discovered URLs
+                        coordinator
+                            .add_discovered_urls(result.discovered_urls, scored_url.depth)
+                            .await;
 
-                    // Index content if requested
-                    if let (Some(ref indexer), Some(ref engine), Some(content), Some(metadata)) =
-                        (&indexer, &embedding_engine, result.content, result.metadata)
-                    {
-                        let doc = ScrapingCoordinator::to_document(&result.url, &content, &metadata);
-                        let chunks = splitter.split_document(&doc);
+                        // Index content if requested
+                        if let (Some(ref indexer), Some(ref engine)) =
+                            (&indexer, &embedding_engine)
+                        {
+                            let doc = ScrapingCoordinator::to_document(&result_url, &processed.content, &processed.metadata);
+                            let chunks = splitter.split_document(&doc);
 
-                        if !chunks.is_empty() {
-                            // Extract texts for batch embedding
-                            let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-                            let num_chunks = texts.len();
+                            if !chunks.is_empty() {
+                                // Extract texts for batch embedding
+                                let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+                                let num_chunks = texts.len();
 
-                            // Generate real embeddings
-                            match engine.embed_batch(&texts) {
-                                Ok(embeddings) => {
-                                    let chunks_with_embeddings: Vec<_> = chunks
-                                        .into_iter()
-                                        .zip(embeddings.into_iter())
-                                        .collect();
+                                // Generate real embeddings
+                                match engine.embed_batch(&texts) {
+                                    Ok(embeddings) => {
+                                        let chunks_with_embeddings: Vec<_> = chunks
+                                            .into_iter()
+                                            .zip(embeddings.into_iter())
+                                            .collect();
 
-                                    match indexer.index_batch(&chunks_with_embeddings) {
-                                        Ok(keys) => {
-                                            pages_indexed += 1;
-                                            chunks_created += keys.len();
-                                            tracing::debug!("Indexed {} chunks", keys.len());
-                                        }
-                                        Err(e) => {
-                                            index_errors += 1;
-                                            tracing::warn!("Failed to index chunks: {}", e);
+                                        match indexer.index_batch(&chunks_with_embeddings) {
+                                            Ok(keys) => {
+                                                pages_indexed += 1;
+                                                chunks_created += keys.len();
+                                                tracing::debug!("Indexed {} chunks", keys.len());
+                                            }
+                                            Err(e) => {
+                                                index_errors += 1;
+                                                tracing::warn!("Failed to index chunks: {}", e);
+                                            }
                                         }
                                     }
-                                }
-                                Err(e) => {
-                                    embedding_errors += 1;
-                                    tracing::warn!(
-                                        "Embedding failed for {} ({} chunks): {}",
-                                        truncate_for_display(result.url.as_str(), 40),
-                                        num_chunks,
-                                        e
-                                    );
+                                    Err(e) => {
+                                        embedding_errors += 1;
+                                        tracing::warn!(
+                                            "Embedding failed for {} ({} chunks): {}",
+                                            truncate_for_display(result_url.as_str(), 40),
+                                            num_chunks,
+                                            e
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
-                } else {
-                    tracing::debug!(
-                        "Failed: {} - {}",
-                        result.url,
-                        result.error.unwrap_or_default()
-                    );
+                    ProcessOutcome::Failure { error } => {
+                        tracing::debug!(
+                            "Failed: {} - {}",
+                            result_url,
+                            error
+                        );
+                    }
                 }
             }
             None => {
@@ -281,10 +255,9 @@ pub async fn scrape_urls(
     }
 
     // Save index if we indexed content
-    if let (Some(vi), Some(_cs)) = (vector_index, chunk_storage) {
-        let index_path = config.node.data_dir.join("vector.index");
-        vi.save(&index_path)?;
-        info!("Saved vector index to {}", index_path.display());
+    if let Some(ref s) = stack {
+        s.save_vector_index(&config.node.data_dir)?;
+        info!("Saved vector index");
     }
 
     // Print final stats

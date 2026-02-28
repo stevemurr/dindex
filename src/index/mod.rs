@@ -10,9 +10,11 @@
 mod hnsw;
 mod processor;
 mod registry;
+mod stack;
 mod storage;
 
 pub use hnsw::*;
 pub use processor::*;
 pub use registry::*;
+pub use stack::*;
 pub use storage::*;

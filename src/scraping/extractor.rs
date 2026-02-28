@@ -6,7 +6,8 @@
 //! - Parses metadata (title, author, date, etc.)
 
 use chrono::{DateTime, Utc};
-use scraper::{Html, Selector};
+use ego_tree::NodeRef;
+use scraper::{Html, Node, Selector};
 use std::collections::HashMap;
 use std::io::Cursor;
 use thiserror::Error;
@@ -223,21 +224,100 @@ impl ContentExtractor {
         })
     }
 
-    /// Extract full metadata from HTML
-    pub fn extract_metadata(&self, html: &str, url: &Url) -> ExtractedMetadata {
+    /// Extract both content and metadata from HTML, minimizing redundant parsing.
+    ///
+    /// Readability does its own internal HTML parsing (unavoidable), but all
+    /// remaining DOM queries (author, date, language, OpenGraph, JSON-LD, etc.)
+    /// share a single `Html::parse_document` call instead of parsing two or
+    /// three times.
+    pub fn extract_all(
+        &self,
+        html: &str,
+        url: &Url,
+    ) -> Result<(ExtractedContent, ExtractedMetadata), ExtractError> {
+        // 1. Readability for main content (does its own internal parse)
+        let mut cursor = Cursor::new(html.as_bytes());
+        let product = readability::extractor::extract(&mut cursor, url)
+            .map_err(|_| ExtractError::NoContent)?;
+
+        let text_content = product.text;
+        let title_from_readability = product.title;
+        let clean_html = Some(product.content);
+
+        if text_content.len() < self.config.min_content_length {
+            return Err(ExtractError::TooShort(text_content.len()));
+        }
+
+        let word_count = text_content.split_whitespace().count();
+        if word_count < self.config.min_word_count {
+            return Err(ExtractError::TooShort(word_count));
+        }
+
+        let reading_time = ((word_count as f32 / self.config.words_per_minute as f32).ceil()
+            as u8)
+            .max(1);
+
+        // 2. Parse the DOM once for all metadata queries
         let document = Html::parse_document(html);
 
+        let author = self.extract_author(&document);
+        let published_date = self.extract_date(&document);
+        let language = self.extract_language(&document);
+        let excerpt = self.extract_excerpt(&document, &text_content);
+
+        let content = ExtractedContent {
+            title: title_from_readability,
+            text_content: text_content.clone(),
+            clean_html,
+            author: author.clone(),
+            published_date,
+            excerpt,
+            language: language.clone(),
+            word_count,
+            reading_time_minutes: reading_time,
+        };
+
+        // 3. Build metadata from the same parsed document
+        let metadata = self.build_metadata_from_document(
+            &document,
+            url,
+            &text_content,
+            word_count,
+            reading_time,
+            author,
+            published_date,
+            language,
+        );
+
+        Ok((content, metadata))
+    }
+
+    /// Build `ExtractedMetadata` from an already-parsed `Html` document.
+    ///
+    /// Shared helper used by both `extract_all` and `extract_metadata` to
+    /// avoid duplicating the metadata assembly logic.
+    fn build_metadata_from_document(
+        &self,
+        document: &Html,
+        url: &Url,
+        text_content: &str,
+        word_count: usize,
+        reading_time: u8,
+        fallback_author: Option<String>,
+        fallback_date: Option<DateTime<Utc>>,
+        fallback_language: Option<String>,
+    ) -> ExtractedMetadata {
         // Extract JSON-LD
-        let json_ld = self.extract_json_ld(&document);
+        let json_ld = self.extract_json_ld(document);
 
         // Extract OpenGraph
-        let og = self.extract_opengraph(&document);
+        let og = self.extract_opengraph(document);
 
         // Extract Twitter cards
-        let twitter = self.extract_twitter_cards(&document);
+        let twitter = self.extract_twitter_cards(document);
 
         // Extract meta tags
-        let meta = self.extract_meta_tags(&document);
+        let meta = self.extract_meta_tags(document);
 
         // Extract title with fallback chain
         let title = json_ld
@@ -247,7 +327,7 @@ impl ContentExtractor {
             .or_else(|| twitter.get("title"))
             .or_else(|| meta.get("title"))
             .cloned()
-            .unwrap_or_else(|| self.extract_title(&document));
+            .unwrap_or_else(|| self.extract_title(document));
 
         // Extract description
         let description = json_ld
@@ -262,7 +342,7 @@ impl ContentExtractor {
             .get("author")
             .or_else(|| meta.get("author"))
             .cloned()
-            .or_else(|| self.extract_author(&document));
+            .or(fallback_author);
 
         // Extract dates
         let published_date = json_ld
@@ -270,10 +350,10 @@ impl ContentExtractor {
             .or_else(|| meta.get("date"))
             .and_then(|d| Self::parse_date(d))
             .or_else(|| {
-                // Try article:published_time meta property
-                self.get_meta_content(&document, "article:published_time")
+                self.get_meta_content(document, "article:published_time")
                     .and_then(|d| Self::parse_date(&d))
-            });
+            })
+            .or(fallback_date);
 
         let modified_date = json_ld
             .get("dateModified")
@@ -283,7 +363,8 @@ impl ContentExtractor {
         let language = meta
             .get("language")
             .cloned()
-            .or_else(|| self.extract_language(&document));
+            .or_else(|| self.extract_language(document))
+            .or(fallback_language);
 
         // Determine content type
         let content_type = json_ld
@@ -292,18 +373,15 @@ impl ContentExtractor {
             .unwrap_or_default();
 
         // Extract canonical URL
-        let canonical_url = self.extract_canonical(&document);
+        let canonical_url = self.extract_canonical(document);
 
-        // Calculate content metrics
-        let text_content = self.extract_text(&self.find_main_content(&document));
-        let word_count = text_content.split_whitespace().count();
-        let reading_time =
-            ((word_count as f32 / self.config.words_per_minute as f32).ceil() as u8).max(1);
-
-        let aggregator_score = self.compute_aggregator_score(&document, &text_content);
+        let aggregator_score = self.compute_aggregator_score(document, text_content);
         let mut extra = HashMap::new();
         if aggregator_score > 0.0 {
-            extra.insert("aggregator_score".to_string(), format!("{:.3}", aggregator_score));
+            extra.insert(
+                "aggregator_score".to_string(),
+                format!("{:.3}", aggregator_score),
+            );
         }
 
         ExtractedMetadata {
@@ -322,6 +400,28 @@ impl ContentExtractor {
             fetched_at: Utc::now(),
             extra,
         }
+    }
+
+    /// Extract full metadata from HTML
+    pub fn extract_metadata(&self, html: &str, url: &Url) -> ExtractedMetadata {
+        let document = Html::parse_document(html);
+
+        // Calculate content metrics from DOM
+        let text_content = self.extract_text(&self.find_main_content(&document));
+        let word_count = text_content.split_whitespace().count();
+        let reading_time =
+            ((word_count as f32 / self.config.words_per_minute as f32).ceil() as u8).max(1);
+
+        self.build_metadata_from_document(
+            &document,
+            url,
+            &text_content,
+            word_count,
+            reading_time,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Compute an aggregator score for a page (0.0 = original content, 1.0 = pure aggregator).
@@ -488,17 +588,32 @@ impl ContentExtractor {
         String::new()
     }
 
+    /// Check if a node has a `<pre>` or `<code>` ancestor
+    fn has_pre_ancestor(node: &NodeRef<Node>) -> bool {
+        let mut current = node.parent();
+        while let Some(parent) = current {
+            if let Some(elem) = parent.value().as_element() {
+                match elem.name() {
+                    "pre" | "code" => return true,
+                    _ => {}
+                }
+            }
+            current = parent.parent();
+        }
+        false
+    }
+
     /// Extract clean text from HTML, preserving structure as markdown
     fn extract_text(&self, html: &str) -> String {
         let fragment = Html::parse_fragment(html);
 
         let mut text = String::new();
         let mut last_was_block = false;
-        let mut in_pre = false;
         let mut list_depth: u32 = 0;
 
         for node in fragment.root_element().descendants() {
             if let Some(text_node) = node.value().as_text() {
+                let in_pre = Self::has_pre_ancestor(&node);
                 let t = if in_pre {
                     text_node.to_string()
                 } else {
@@ -565,11 +680,11 @@ impl ContentExtractor {
                         last_was_block = true;
                     }
                     // Preformatted/code blocks
-                    "pre" | "code" => {
-                        in_pre = true;
-                        if name == "pre" {
-                            text.push_str("\n\n```\n");
-                        }
+                    "pre" => {
+                        text.push_str("\n\n```\n");
+                        last_was_block = false;
+                    }
+                    "code" => {
                         last_was_block = false;
                     }
                     // Other block elements
@@ -1020,5 +1135,19 @@ mod tests {
         assert!(ContentExtractor::parse_date("2024-01-15").is_some());
         assert!(ContentExtractor::parse_date("2024-01-15T10:00:00Z").is_some());
         assert!(ContentExtractor::parse_date("January 15, 2024").is_some());
+    }
+
+    #[test]
+    fn test_extract_text_pre_does_not_leak() {
+        let extractor = ContentExtractor::default();
+        let html = r#"<pre>  code  block  </pre><p>Normal paragraph text here.</p>"#;
+        let text = extractor.extract_text(html);
+        // After the <pre> block, normal whitespace handling should resume:
+        // the paragraph text should be trimmed/collapsed, not preserved raw.
+        assert!(
+            text.contains("Normal paragraph text here."),
+            "Text after <pre> should have normal whitespace handling, got: {:?}",
+            text
+        );
     }
 }

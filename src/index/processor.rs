@@ -490,12 +490,6 @@ impl DocumentProcessorBuilder {
         self
     }
 
-    /// Enable/disable updating near-duplicates
-    pub fn with_update_near_duplicates(mut self, enabled: bool) -> Self {
-        self.config.update_near_duplicates = enabled;
-        self
-    }
-
     /// Build the processor
     pub fn build(self) -> Result<DocumentProcessor> {
         let registry = self

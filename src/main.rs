@@ -366,8 +366,8 @@ fn main() -> Result<()> {
             daemonize::Outcome::Child(Ok(_)) => {
                 // We're the child - continue to start the daemon
                 // Set up logging for file output, respecting config format
-                if config.logging.format == "json" {
-                    let log_level: Level = config.logging.level.parse().unwrap_or(Level::INFO);
+                if config.logging.format == dindex::config::LogFormat::Json {
+                    let log_level: Level = config.logging.level.as_str().parse().unwrap_or(Level::INFO);
                     tracing_subscriber::registry()
                         .with(tracing_subscriber::fmt::layer()
                             .json()
@@ -397,7 +397,7 @@ fn main() -> Result<()> {
             _ => Level::TRACE,
         };
 
-        if config.logging.format == "json" {
+        if config.logging.format == dindex::config::LogFormat::Json {
             tracing_subscriber::registry()
                 .with(tracing_subscriber::fmt::layer()
                     .json()

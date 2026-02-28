@@ -4,7 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Chunk, ChunkMetadata};
+use crate::daemon::protocol::ScrapeOptions;
+use crate::retrieval::RetrievalMethod;
 
 /// Search request body
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,64 +35,6 @@ pub struct SearchFilters {
     pub metadata_contains: Option<std::collections::HashMap<String, Vec<String>>>,
 }
 
-/// A single search result
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SearchResultJson {
-    /// The matched chunk
-    pub chunk: ChunkJson,
-    /// Relevance score (0.0 to 1.0)
-    pub relevance_score: f32,
-    /// Which retrieval methods matched
-    pub matched_by: Vec<String>,
-}
-
-/// Chunk data for JSON serialization
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChunkJson {
-    /// The chunk content text
-    pub content: String,
-    /// Chunk metadata
-    pub metadata: ChunkMetadataJson,
-}
-
-/// Chunk metadata for JSON serialization
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChunkMetadataJson {
-    /// Unique chunk identifier
-    pub chunk_id: String,
-    /// Parent document identifier
-    pub document_id: String,
-    /// Source URL if available
-    pub source_url: Option<String>,
-    /// Source title if available
-    pub source_title: Option<String>,
-}
-
-impl From<&Chunk> for ChunkJson {
-    fn from(chunk: &Chunk) -> Self {
-        Self {
-            content: chunk.content.clone(),
-            metadata: ChunkMetadataJson {
-                chunk_id: chunk.metadata.chunk_id.clone(),
-                document_id: chunk.metadata.document_id.clone(),
-                source_url: chunk.metadata.source_url.clone(),
-                source_title: chunk.metadata.source_title.clone(),
-            },
-        }
-    }
-}
-
-impl From<&ChunkMetadata> for ChunkMetadataJson {
-    fn from(meta: &ChunkMetadata) -> Self {
-        Self {
-            chunk_id: meta.chunk_id.clone(),
-            document_id: meta.document_id.clone(),
-            source_url: meta.source_url.clone(),
-            source_title: meta.source_title.clone(),
-        }
-    }
-}
-
 /// A matching chunk within a grouped search result (JSON)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchingChunkJson {
@@ -102,7 +45,7 @@ pub struct MatchingChunkJson {
     /// Relevance score (0.0 to 1.0)
     pub relevance_score: f32,
     /// Which retrieval methods matched
-    pub matched_by: Vec<String>,
+    pub matched_by: Vec<RetrievalMethod>,
     /// Section hierarchy in the document
     pub section_hierarchy: Vec<String>,
     /// Position in document (0.0 to 1.0)
@@ -255,50 +198,6 @@ pub struct ErrorResponse {
 
 // ============ Scrape Types ============
 
-/// Scrape options for HTTP API
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScrapeOptionsJson {
-    /// Maximum crawl depth (0 = current page only)
-    #[serde(default = "default_max_depth")]
-    pub max_depth: u8,
-    /// Stay on the same domain
-    #[serde(default = "default_stay_on_domain")]
-    pub stay_on_domain: bool,
-    /// Delay between requests in milliseconds
-    #[serde(default = "default_delay_ms")]
-    pub delay_ms: u64,
-    /// Maximum number of pages to scrape
-    #[serde(default = "default_max_pages")]
-    pub max_pages: usize,
-}
-
-fn default_max_depth() -> u8 {
-    2
-}
-
-fn default_stay_on_domain() -> bool {
-    true
-}
-
-fn default_delay_ms() -> u64 {
-    1000
-}
-
-fn default_max_pages() -> usize {
-    100
-}
-
-impl Default for ScrapeOptionsJson {
-    fn default() -> Self {
-        Self {
-            max_depth: default_max_depth(),
-            stay_on_domain: default_stay_on_domain(),
-            delay_ms: default_delay_ms(),
-            max_pages: default_max_pages(),
-        }
-    }
-}
-
 /// Scrape request body
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScrapeRequest {
@@ -306,7 +205,7 @@ pub struct ScrapeRequest {
     pub urls: Vec<String>,
     /// Scrape options
     #[serde(default)]
-    pub options: ScrapeOptionsJson,
+    pub options: ScrapeOptions,
 }
 
 /// Response when a job is started

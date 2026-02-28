@@ -6,7 +6,7 @@ use crate::config::IndexConfig;
 use crate::types::{ChunkId, Embedding};
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info};
@@ -17,6 +17,10 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 struct IndexMappings {
     key_to_chunk: HashMap<u64, ChunkId>,
     chunk_to_key: HashMap<ChunkId, u64>,
+    /// Keys that have been added or removed since last save
+    dirty_keys: HashSet<u64>,
+    /// Keys that have been removed since last save (need deletion from sled)
+    removed_keys: HashSet<u64>,
 }
 
 /// Vector index for storing and querying embeddings
@@ -73,6 +77,8 @@ impl VectorIndex {
             mappings: RwLock::new(IndexMappings {
                 key_to_chunk: HashMap::new(),
                 chunk_to_key: HashMap::new(),
+                dirty_keys: HashSet::new(),
+                removed_keys: HashSet::new(),
             }),
             next_key: AtomicU64::new(0),
             mappings_db: None, // Will be set on first save/load
@@ -195,6 +201,8 @@ impl VectorIndex {
             mappings: RwLock::new(IndexMappings {
                 key_to_chunk,
                 chunk_to_key,
+                dirty_keys: HashSet::new(),
+                removed_keys: HashSet::new(),
             }),
             next_key: AtomicU64::new(next_key),
             mappings_db,
@@ -203,7 +211,7 @@ impl VectorIndex {
         })
     }
 
-    /// Save index to disk
+    /// Save index to disk (incremental — only writes changed mappings)
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         info!("Saving vector index to: {}", path.display());
@@ -219,10 +227,32 @@ impl VectorIndex {
             sled::open(&mappings_db_path).context("Failed to open mappings database")?
         };
 
-        // Write all mappings (in case of new index or changes)
-        let mappings = self.mappings.read();
-        for (key, chunk_id) in mappings.key_to_chunk.iter() {
-            db.insert(&key.to_le_bytes(), chunk_id.as_bytes())?;
+        let mut mappings = self.mappings.write();
+
+        if mappings.dirty_keys.is_empty() && mappings.removed_keys.is_empty() {
+            // Only update next_key
+            let next_key = self.next_key.load(Ordering::SeqCst);
+            db.insert(b"__next_key__", &next_key.to_le_bytes())?;
+            db.flush().context("Failed to flush mappings database")?;
+            info!("No mapping changes to save ({} total)", mappings.key_to_chunk.len());
+            return Ok(());
+        }
+
+        let dirty_keys: Vec<u64> = mappings.dirty_keys.drain().collect();
+        let removed_keys: Vec<u64> = mappings.removed_keys.drain().collect();
+        let dirty_count = dirty_keys.len();
+        let removed_count = removed_keys.len();
+
+        // Write only dirty (new/updated) mappings
+        for key in dirty_keys {
+            if let Some(chunk_id) = mappings.key_to_chunk.get(&key) {
+                db.insert(&key.to_le_bytes(), chunk_id.as_bytes())?;
+            }
+        }
+
+        // Remove deleted mappings
+        for key in removed_keys {
+            db.remove(&key.to_le_bytes())?;
         }
 
         // Save next_key
@@ -231,7 +261,10 @@ impl VectorIndex {
 
         db.flush().context("Failed to flush mappings database")?;
 
-        info!("Saved {} mappings to sled", mappings.key_to_chunk.len());
+        info!(
+            "Saved {} new + {} removed mappings to sled ({} total)",
+            dirty_count, removed_count, mappings.key_to_chunk.len()
+        );
         Ok(())
     }
 
@@ -254,6 +287,7 @@ impl VectorIndex {
             let mut mappings = self.mappings.write();
             mappings.key_to_chunk.insert(key, chunk_id.clone());
             mappings.chunk_to_key.insert(chunk_id.clone(), key);
+            mappings.dirty_keys.insert(key);
         }
 
         debug!("Added chunk {} with key {}", chunk_id, key);
@@ -299,6 +333,8 @@ impl VectorIndex {
                 None => return Ok(false),
             };
             mappings.key_to_chunk.remove(&key);
+            mappings.dirty_keys.remove(&key);
+            mappings.removed_keys.insert(key);
             key
         };
 

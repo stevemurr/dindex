@@ -64,7 +64,7 @@ impl QueryRouter {
             return Vec::new();
         }
 
-        let mut candidates: Vec<CandidateNode> = Vec::new();
+        let mut candidates: Vec<CandidateNode> = Vec::with_capacity(node_ads.len());
 
         // Truncate query embedding to match centroid dimensions if needed
         let query_dims = query_embedding.len();

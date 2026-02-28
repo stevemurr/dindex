@@ -252,7 +252,7 @@ pub struct PolitenessConfig {
 impl Default for PolitenessConfig {
     fn default() -> Self {
         Self {
-            user_agent: "DecentralizedSearchBot/1.0".to_string(),
+            user_agent: crate::config::DEFAULT_USER_AGENT.to_string(),
             default_delay: Duration::from_millis(1000),
             min_delay: Duration::from_millis(500),
             max_delay: Duration::from_secs(30),

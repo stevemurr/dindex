@@ -34,6 +34,11 @@ impl PdfExtractor {
     }
 
     /// Extract text while suppressing stdout/stderr noise from pdf-extract
+    ///
+    /// NOTE: The FD redirection below is not thread-safe — it temporarily redirects
+    /// process-wide stdout/stderr, so other threads may lose output during extraction.
+    /// This is acceptable because pdf-extract's println! noise is purely cosmetic
+    /// (Unicode mismatch warnings, unknown glyph names) and the window is brief.
     fn extract_with_suppressed_stderr(bytes: &[u8]) -> Result<String, pdf_extract::OutputError> {
         // pdf-extract uses println! for warnings about Unicode mismatches,
         // unknown glyphs, missing chars, etc. These are not actionable by users

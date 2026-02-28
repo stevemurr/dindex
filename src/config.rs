@@ -2,7 +2,11 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::{Path, PathBuf};
+
+/// Default user agent for all HTTP requests (scraping, politeness, fetching)
+pub const DEFAULT_USER_AGENT: &str = "DecentralizedSearchBot/1.0 (+https://github.com/dindex)";
 
 // ============================================================================
 // Embedding Backend Configuration
@@ -676,7 +680,7 @@ impl Default for ScrapingConfig {
             max_pages_per_domain: 1000,
             politeness_delay_ms: 1000,
             request_timeout_secs: 30,
-            user_agent: "DecentralizedSearchBot/1.0 (+https://github.com/dindex)".to_string(),
+            user_agent: DEFAULT_USER_AGENT.to_string(),
             enable_js_rendering: false,
             robots_cache_ttl_secs: 86400, // 24 hours
             url_bloom_size: 10_000_000,
@@ -823,30 +827,67 @@ impl Default for MetricsConfig {
     }
 }
 
+/// Log output format
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    Text,
+    Json,
+}
+
+/// Log severity level
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Trace => "trace",
+            Self::Debug => "debug",
+            Self::Info => "info",
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Logging configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
-    /// Log format: "text" or "json"
+    /// Log format
     #[serde(default = "default_log_format")]
-    pub format: String,
-    /// Log level: "trace", "debug", "info", "warn", "error"
+    pub format: LogFormat,
+    /// Log level
     #[serde(default = "default_log_level")]
-    pub level: String,
+    pub level: LogLevel,
 }
 
-fn default_log_format() -> String {
-    "text".to_string()
+fn default_log_format() -> LogFormat {
+    LogFormat::Text
 }
 
-fn default_log_level() -> String {
-    "info".to_string()
+fn default_log_level() -> LogLevel {
+    LogLevel::Info
 }
 
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            format: "text".to_string(),
-            level: "info".to_string(),
+            format: LogFormat::Text,
+            level: LogLevel::Info,
         }
     }
 }

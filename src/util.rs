@@ -1,10 +1,13 @@
 //! Shared utility functions
 
+use std::borrow::Cow;
+
 /// Truncate a string to a maximum length, appending "..." if truncated.
 /// Handles multi-byte characters by finding a valid char boundary.
-pub fn truncate_str(s: &str, max_len: usize) -> String {
+/// Returns a `Cow<str>` to avoid allocation when input is already short enough.
+pub fn truncate_str(s: &str, max_len: usize) -> Cow<'_, str> {
     if s.len() <= max_len {
-        return s.to_string();
+        return Cow::Borrowed(s);
     }
     let suffix = "...";
     let target = max_len.saturating_sub(suffix.len());
@@ -13,7 +16,7 @@ pub fn truncate_str(s: &str, max_len: usize) -> String {
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}{}", &s[..end], suffix)
+    Cow::Owned(format!("{}{}", &s[..end], suffix))
 }
 
 /// Truncate a string for display, collapsing newlines to spaces.
@@ -64,6 +67,11 @@ pub fn compute_simhash<'a>(features: impl Iterator<Item = &'a str>) -> u64 {
         }
     }
     simhash
+}
+
+/// Fast non-cryptographic hash for strings (URL dedup, cache keys, etc.)
+pub fn fast_hash(s: &str) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(s.as_bytes())
 }
 
 /// Normalize an embedding vector to unit length, returning a new vector.

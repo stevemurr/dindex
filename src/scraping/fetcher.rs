@@ -7,6 +7,7 @@
 //! Note: Headless browser support requires external chromium installation
 //! and is optional. The HTTP tier handles most static content.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use url::Url;
@@ -95,7 +96,7 @@ pub struct FetchConfig {
 impl Default for FetchConfig {
     fn default() -> Self {
         Self {
-            user_agent: "DecentralizedSearchBot/1.0 (+https://github.com/dindex)".to_string(),
+            user_agent: crate::config::DEFAULT_USER_AGENT.to_string(),
             timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(10),
             max_content_size: 10 * 1024 * 1024, // 10 MB
@@ -117,21 +118,32 @@ pub struct FetchEngine {
     stats: FetchStats,
 }
 
-/// Fetch statistics
-#[derive(Debug, Clone, Default)]
+/// Fetch statistics using atomics for lock-free concurrent access
+#[derive(Debug, Default)]
 pub struct FetchStats {
     /// Total fetch attempts
-    pub total_fetches: u64,
+    pub total_fetches: AtomicU64,
     /// Successful HTTP fetches
-    pub http_successes: u64,
+    pub http_successes: AtomicU64,
     /// HTTP failures
-    pub http_failures: u64,
+    pub http_failures: AtomicU64,
     /// JS rendering attempts
-    pub js_attempts: u64,
+    pub js_attempts: AtomicU64,
     /// JS rendering successes
-    pub js_successes: u64,
-    /// Average fetch time (ms)
-    pub avg_fetch_time_ms: f64,
+    pub js_successes: AtomicU64,
+    /// Total fetch time in microseconds (divide by total_fetches for average)
+    pub total_fetch_time_us: AtomicU64,
+}
+
+impl FetchStats {
+    /// Get average fetch time in milliseconds
+    pub fn avg_fetch_time_ms(&self) -> f64 {
+        let total = self.total_fetches.load(Ordering::Relaxed);
+        if total == 0 {
+            return 0.0;
+        }
+        self.total_fetch_time_us.load(Ordering::Relaxed) as f64 / total as f64 / 1000.0
+    }
 }
 
 impl FetchEngine {
@@ -156,8 +168,8 @@ impl FetchEngine {
     }
 
     /// Fetch a URL, falling back to JS rendering if needed
-    pub async fn fetch(&mut self, url: &Url) -> Result<FetchResult, FetchError> {
-        self.stats.total_fetches += 1;
+    pub async fn fetch(&self, url: &Url) -> Result<FetchResult, FetchError> {
+        self.stats.total_fetches.fetch_add(1, Ordering::Relaxed);
         let start = Instant::now();
 
         // Tier 1: HTTP fetch
@@ -165,20 +177,20 @@ impl FetchEngine {
 
         match &result {
             Ok(response) => {
-                self.stats.http_successes += 1;
+                self.stats.http_successes.fetch_add(1, Ordering::Relaxed);
 
                 // Check if we need JS rendering
                 if self.config.enable_js_rendering && self.needs_js_rendering(response) {
-                    self.stats.js_attempts += 1;
+                    self.stats.js_attempts.fetch_add(1, Ordering::Relaxed);
                     // For now, just return the HTTP result
                     // In production, would invoke chromiumoxide here
                     tracing::debug!("Content at {} may need JS rendering", url);
                 }
 
-                self.update_timing(start.elapsed());
+                self.record_timing(start.elapsed());
             }
             Err(_) => {
-                self.stats.http_failures += 1;
+                self.stats.http_failures.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -320,12 +332,11 @@ impl FetchEngine {
         text_chars as f32 / total_len as f32
     }
 
-    fn update_timing(&mut self, duration: Duration) {
-        let ms = duration.as_secs_f64() * 1000.0;
-        let n = self.stats.total_fetches as f64;
-        // Running average
-        self.stats.avg_fetch_time_ms =
-            (self.stats.avg_fetch_time_ms * (n - 1.0) + ms) / n;
+    fn record_timing(&self, duration: Duration) {
+        self.stats.total_fetch_time_us.fetch_add(
+            duration.as_micros() as u64,
+            Ordering::Relaxed,
+        );
     }
 
     /// Get fetch statistics

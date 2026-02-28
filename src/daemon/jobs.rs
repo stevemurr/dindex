@@ -15,11 +15,9 @@ use crate::chunking::TextSplitter;
 use crate::config::Config;
 use crate::import::{DumpSource, WikimediaSource};
 use crate::scraping::coordinator::{
+    ProcessOutcome, ProcessResult, ProcessedContent,
     ScrapingConfig as CoordinatorScrapingConfig, ScrapingCoordinator,
 };
-use crate::scraping::extractor::ExtractorConfig;
-use crate::scraping::fetcher::FetchConfig;
-use crate::scraping::politeness::PolitenessConfig;
 use crate::types::Document;
 use url::Url;
 
@@ -63,6 +61,15 @@ pub enum JobType {
     Scrape { urls: Vec<String> },
 }
 
+/// How long to retain completed/failed/cancelled jobs before cleanup
+const JOB_RETENTION: Duration = Duration::from_secs(3600); // 1 hour
+
+/// Channel capacity for scrape SSE events
+const SCRAPE_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Maximum consecutive empty frontier iterations before declaring exhaustion
+const MAX_EMPTY_ITERATIONS: u32 = 10;
+
 /// Job manager for tracking and controlling background jobs
 pub struct JobManager {
     jobs: Arc<DashMap<Uuid, JobInfo>>,
@@ -98,6 +105,7 @@ impl JobManager {
         source: ImportSource,
         options: ImportOptions,
     ) -> Uuid {
+        self.cleanup_old_jobs();
         let job_id = Uuid::new_v4();
         let (cancel_tx, cancel_rx) = oneshot::channel();
 
@@ -178,9 +186,10 @@ impl JobManager {
         urls: Vec<String>,
         options: ScrapeOptions,
     ) -> Uuid {
+        self.cleanup_old_jobs();
         let job_id = Uuid::new_v4();
         let (cancel_tx, cancel_rx) = oneshot::channel();
-        let (event_tx, _) = broadcast::channel::<ScrapeEvent>(256);
+        let (event_tx, _) = broadcast::channel::<ScrapeEvent>(SCRAPE_EVENT_CHANNEL_CAPACITY);
         let url_statuses: Arc<DashMap<String, UrlInfo>> = Arc::new(DashMap::new());
 
         let job_info = JobInfo {
@@ -285,13 +294,6 @@ impl JobManager {
             .and_then(|job| job.event_tx.as_ref().map(|tx| tx.subscribe()))
     }
 
-    /// Get per-URL statuses for a scrape job
-    pub fn get_url_statuses(&self, job_id: Uuid) -> Option<Arc<DashMap<String, UrlInfo>>> {
-        self.jobs
-            .get(&job_id)
-            .and_then(|job| job.url_statuses.clone())
-    }
-
     /// Cancel a job
     pub fn cancel(&self, job_id: Uuid) -> bool {
         if let Some(mut job) = self.jobs.get_mut(&job_id) {
@@ -323,6 +325,16 @@ impl JobManager {
             .count()
     }
 
+    /// Remove completed/failed/cancelled jobs older than JOB_RETENTION
+    fn cleanup_old_jobs(&self) {
+        self.jobs.retain(|_, job| {
+            job.state == JobState::Running
+                || job
+                    .completed_at
+                    .map(|t| t.elapsed() < JOB_RETENTION)
+                    .unwrap_or(true)
+        });
+    }
 }
 
 /// Run an import job
@@ -502,35 +514,13 @@ fn build_coordinator_config(
     config: &crate::config::ScrapingConfig,
     options: &ScrapeOptions,
 ) -> CoordinatorScrapingConfig {
-    CoordinatorScrapingConfig {
-        enabled: true,
-        max_concurrent_fetches: config.max_concurrent_fetches,
-        max_depth: options.max_depth,
-        stay_on_domain: options.stay_on_domain,
-        include_patterns: config.include_patterns.clone(),
-        exclude_patterns: config.exclude_patterns.clone(),
-        max_pages_per_domain: config.max_pages_per_domain,
-        scrape_interval: Duration::from_millis(options.delay_ms.max(500)),
-        politeness: PolitenessConfig {
-            user_agent: config.user_agent.clone(),
-            default_delay: Duration::from_millis(options.delay_ms.max(500)),
-            min_delay: Duration::from_millis(500),
-            max_delay: Duration::from_secs(30),
-            cache_size: 10_000,
-            request_timeout: Duration::from_secs(config.request_timeout_secs),
-        },
-        fetch: FetchConfig {
-            user_agent: config.user_agent.clone(),
-            timeout: Duration::from_secs(config.request_timeout_secs),
-            connect_timeout: Duration::from_secs(10),
-            max_content_size: 10 * 1024 * 1024,
-            max_redirects: 5,
-            min_text_ratio: 0.1,
-            enable_js_rendering: config.enable_js_rendering,
-            connections_per_host: 2,
-        },
-        extractor: ExtractorConfig::default(),
-    }
+    CoordinatorScrapingConfig::from_config(
+        config,
+        options.max_depth,
+        options.stay_on_domain,
+        options.delay_ms,
+        options.max_pages,
+    )
 }
 
 /// Emit an SSE event, logging whether any subscribers received it.
@@ -545,7 +535,7 @@ fn emit(tx: &broadcast::Sender<ScrapeEvent>, event: ScrapeEvent) {
 /// Update per-URL status tracking.
 fn track_url(
     statuses: &DashMap<String, UrlInfo>,
-    url: &str,
+    url: String,
     status: UrlStatus,
     depth: u8,
     title: Option<String>,
@@ -553,10 +543,11 @@ fn track_url(
     chunks_created: usize,
     duration_ms: Option<u64>,
 ) {
+    let key = url.clone();
     statuses.insert(
-        url.to_string(),
+        key,
         UrlInfo {
-            url: url.to_string(),
+            url,
             status,
             depth,
             title,
@@ -636,12 +627,11 @@ async fn run_scrape_job(
                 source: UrlSource::Seed,
             },
         );
-        track_url(&url_statuses, &url_str, UrlStatus::Queued, 0, None, None, 0, None);
+        track_url(&url_statuses, url_str, UrlStatus::Queued, 0, None, None, 0, None);
     }
 
     let splitter = TextSplitter::new(config.chunking.clone());
     let mut empty_iterations = 0u32;
-    let max_empty_iterations = 10;
 
     // Main scraping loop
     loop {
@@ -671,7 +661,7 @@ async fn run_scrape_job(
             }
             None => {
                 empty_iterations += 1;
-                if empty_iterations >= max_empty_iterations {
+                if empty_iterations >= MAX_EMPTY_ITERATIONS {
                     info!("Scrape job {} frontier exhausted", job_id);
                     break;
                 }
@@ -692,7 +682,7 @@ async fn run_scrape_job(
         );
         track_url(
             &url_statuses,
-            &url_str,
+            url_str.clone(),
             UrlStatus::Fetching,
             scored_url.depth,
             None,
@@ -708,144 +698,145 @@ async fn run_scrape_job(
         let duration_ms = fetch_duration.as_millis() as u64;
         metrics.scrape_fetch_latency.observe(fetch_duration);
 
-        if result.success {
-            let content = result.content.as_ref().unwrap();
-            let metadata = result.metadata.as_ref().unwrap();
+        // Destructure to avoid partial-move issues
+        let ProcessResult { outcome, discovered_urls, .. } = result;
 
-            // Remove existing document for upsert behavior
-            if let Err(e) = index_manager.replace_by_url(&url_str) {
-                warn!("Failed to check/replace existing document for URL {}: {}", url_str, e);
-            }
+        match outcome {
+            ProcessOutcome::Success(ProcessedContent { content, metadata, .. }) => {
+                // Remove existing document for upsert behavior
+                if let Err(e) = index_manager.replace_by_url(&url_str) {
+                    warn!("Failed to check/replace existing document for URL {}: {}", url_str, e);
+                }
 
-            // Convert to Document and chunk
-            let document = ScrapingCoordinator::to_document(&scored_url.url, content, metadata);
-            let chunks = splitter.split_document(&document);
-            let chunk_count = chunks.len();
+                // Convert to Document and chunk
+                let document = ScrapingCoordinator::to_document(&scored_url.url, &content, &metadata);
+                let chunks = splitter.split_document(&document);
+                let chunk_count = chunks.len();
 
-            // Send chunks to write pipeline
-            for chunk in chunks {
-                write_pipeline
-                    .ingest(IngestItem::Chunk {
-                        stream_id: job_id,
-                        chunk,
-                        embedding: None,
-                    })
-                    .await?;
-            }
+                // Send chunks to write pipeline
+                for chunk in chunks {
+                    write_pipeline
+                        .ingest(IngestItem::Chunk {
+                            stream_id: job_id,
+                            chunk,
+                            embedding: None,
+                        })
+                        .await?;
+                }
 
-            chunks_indexed += chunk_count;
-            documents_processed += 1;
-            urls_succeeded += 1;
-            metrics.scrape_pages_indexed.inc();
+                chunks_indexed += chunk_count;
+                documents_processed += 1;
+                urls_succeeded += 1;
+                metrics.scrape_pages_indexed.inc();
 
-            // Add discovered URLs to frontier and emit events
-            let discovered_count = result.discovered_urls.len();
-            for disc_url in &result.discovered_urls {
-                emit(
-                    &event_tx,
-                    ScrapeEvent::UrlQueued {
-                        job_id,
-                        url: disc_url.as_str().to_string(),
-                        depth: scored_url.depth + 1,
-                        source: UrlSource::Discovered,
-                    },
-                );
-                track_url(
-                    &url_statuses,
-                    disc_url.as_str(),
-                    UrlStatus::Queued,
-                    scored_url.depth + 1,
-                    None,
-                    None,
-                    0,
-                    None,
-                );
-            }
-            coordinator
-                .add_discovered_urls(result.discovered_urls, scored_url.depth)
-                .await;
-
-            emit(
-                &event_tx,
-                ScrapeEvent::UrlIndexed {
-                    job_id,
-                    url: url_str.clone(),
-                    title: Some(content.title.clone()),
-                    word_count: content.word_count,
-                    chunks_created: chunk_count,
-                    duration_ms,
-                    discovered_urls: discovered_count,
-                },
-            );
-            track_url(
-                &url_statuses,
-                &url_str,
-                UrlStatus::Indexed,
-                scored_url.depth,
-                Some(content.title.clone()),
-                None,
-                chunk_count,
-                Some(duration_ms),
-            );
-        } else {
-            let error_msg = result.error.unwrap_or_default();
-
-            // Distinguish skips from failures
-            let is_skip = error_msg.contains("already seen")
-                || error_msg.contains("Duplicate")
-                || error_msg.contains("Near-duplicate")
-                || error_msg.contains("Disallowed by robots.txt");
-
-            if is_skip {
-                urls_skipped += 1;
-                // Not counted as a fetch error (skip is intentional)
-                emit(
-                    &event_tx,
-                    ScrapeEvent::UrlSkipped {
-                        job_id,
-                        url: url_str.clone(),
-                        reason: error_msg.clone(),
-                    },
-                );
-                track_url(
-                    &url_statuses,
-                    &url_str,
-                    UrlStatus::Skipped,
-                    scored_url.depth,
-                    None,
-                    Some(error_msg),
-                    0,
-                    Some(duration_ms),
-                );
-            } else {
-                urls_failed += 1;
-                metrics.scrape_fetch_errors_total.inc();
-                emit(
-                    &event_tx,
-                    ScrapeEvent::UrlFailed {
-                        job_id,
-                        url: url_str.clone(),
-                        error: error_msg.clone(),
-                        duration_ms,
-                    },
-                );
-                track_url(
-                    &url_statuses,
-                    &url_str,
-                    UrlStatus::Failed,
-                    scored_url.depth,
-                    None,
-                    Some(error_msg),
-                    0,
-                    Some(duration_ms),
-                );
-            }
-
-            // Still add discovered URLs even on extraction failure
-            if !result.discovered_urls.is_empty() {
+                // Add discovered URLs to frontier and emit events
+                let discovered_count = discovered_urls.len();
+                for disc_url in &discovered_urls {
+                    emit(
+                        &event_tx,
+                        ScrapeEvent::UrlQueued {
+                            job_id,
+                            url: disc_url.as_str().to_string(),
+                            depth: scored_url.depth + 1,
+                            source: UrlSource::Discovered,
+                        },
+                    );
+                    track_url(
+                        &url_statuses,
+                        disc_url.as_str().to_string(),
+                        UrlStatus::Queued,
+                        scored_url.depth + 1,
+                        None,
+                        None,
+                        0,
+                        None,
+                    );
+                }
                 coordinator
-                    .add_discovered_urls(result.discovered_urls, scored_url.depth)
+                    .add_discovered_urls(discovered_urls, scored_url.depth)
                     .await;
+
+                emit(
+                    &event_tx,
+                    ScrapeEvent::UrlIndexed {
+                        job_id,
+                        url: url_str.clone(),
+                        title: Some(content.title.clone()),
+                        word_count: content.word_count,
+                        chunks_created: chunk_count,
+                        duration_ms,
+                        discovered_urls: discovered_count,
+                    },
+                );
+                track_url(
+                    &url_statuses,
+                    url_str.clone(),
+                    UrlStatus::Indexed,
+                    scored_url.depth,
+                    Some(content.title.clone()),
+                    None,
+                    chunk_count,
+                    Some(duration_ms),
+                );
+            }
+            ProcessOutcome::Failure { error: error_msg } => {
+                // Distinguish skips from failures
+                let is_skip = error_msg.contains("already seen")
+                    || error_msg.contains("Duplicate")
+                    || error_msg.contains("Near-duplicate")
+                    || error_msg.contains("Disallowed by robots.txt");
+
+                if is_skip {
+                    urls_skipped += 1;
+                    // Not counted as a fetch error (skip is intentional)
+                    emit(
+                        &event_tx,
+                        ScrapeEvent::UrlSkipped {
+                            job_id,
+                            url: url_str.clone(),
+                            reason: error_msg.clone(),
+                        },
+                    );
+                    track_url(
+                        &url_statuses,
+                        url_str.clone(),
+                        UrlStatus::Skipped,
+                        scored_url.depth,
+                        None,
+                        Some(error_msg),
+                        0,
+                        Some(duration_ms),
+                    );
+                } else {
+                    urls_failed += 1;
+                    metrics.scrape_fetch_errors_total.inc();
+                    emit(
+                        &event_tx,
+                        ScrapeEvent::UrlFailed {
+                            job_id,
+                            url: url_str.clone(),
+                            error: error_msg.clone(),
+                            duration_ms,
+                        },
+                    );
+                    track_url(
+                        &url_statuses,
+                        url_str.clone(),
+                        UrlStatus::Failed,
+                        scored_url.depth,
+                        None,
+                        Some(error_msg),
+                        0,
+                        Some(duration_ms),
+                    );
+                }
+
+                // Still add discovered URLs even on extraction failure
+                if !discovered_urls.is_empty() {
+                    coordinator
+                        .add_discovered_urls(discovered_urls, scored_url.depth)
+                        .await;
+                }
             }
         }
 
@@ -905,109 +896,3 @@ async fn run_scrape_job(
     })
 }
 
-/// Fetch a URL and index its content (used by import jobs)
-#[allow(dead_code)]
-async fn fetch_and_index_url(
-    client: &reqwest::Client,
-    url: &str,
-    splitter: &TextSplitter,
-    write_pipeline: &WritePipeline,
-    index_manager: &IndexManager,
-    stream_id: Uuid,
-) -> anyhow::Result<usize> {
-    debug!("Fetching: {}", url);
-
-    // Remove any existing document for this URL (upsert behavior)
-    if let Err(e) = index_manager.replace_by_url(url) {
-        warn!("Failed to check/replace existing document for URL {}: {}", url, e);
-    }
-
-    let response = client.get(url).send().await?;
-    let html = response.text().await?;
-
-    // Extract text from HTML (simple extraction)
-    let text = extract_text_from_html(&html);
-
-    if text.len() < 100 {
-        return Ok(0);
-    }
-
-    // Create document and chunk
-    let document = Document::new(text).with_url(url.to_string());
-    let chunks = splitter.split_document(&document);
-    let chunk_count = chunks.len();
-
-    // Send chunks to write pipeline
-    for chunk in chunks {
-        write_pipeline
-            .ingest(IngestItem::Chunk {
-                stream_id,
-                chunk,
-                embedding: None,
-            })
-            .await?;
-    }
-
-    Ok(chunk_count)
-}
-
-/// Simple HTML text extraction (used by import jobs)
-#[allow(dead_code)]
-fn extract_text_from_html(html: &str) -> String {
-    // Use scraper crate for proper HTML parsing
-    use scraper::{Html, Selector};
-    use std::sync::OnceLock;
-
-    static BODY_SELECTOR: OnceLock<Selector> = OnceLock::new();
-    static TEXT_SELECTOR: OnceLock<Selector> = OnceLock::new();
-
-    let document = Html::parse_document(html);
-
-    let body_selector = BODY_SELECTOR.get_or_init(|| {
-        Selector::parse("body").expect("static 'body' CSS selector is valid")
-    });
-    let text_selector = TEXT_SELECTOR.get_or_init(|| {
-        Selector::parse("p, h1, h2, h3, h4, h5, h6, li, td, th, span, div")
-            .expect("static text CSS selector is valid")
-    });
-
-    let mut text = String::new();
-
-    if let Some(body) = document.select(&body_selector).next() {
-        for element in body.select(&text_selector) {
-            let element_text: String = element.text().collect();
-            let trimmed = element_text.trim();
-            if !trimmed.is_empty() {
-                text.push_str(trimmed);
-                text.push('\n');
-            }
-        }
-    }
-
-    text
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_text_from_html() {
-        let html = r#"
-            <html>
-            <body>
-                <h1>Title</h1>
-                <p>This is a paragraph.</p>
-                <script>var x = 1;</script>
-                <p>Another paragraph.</p>
-            </body>
-            </html>
-        "#;
-
-        let text = extract_text_from_html(html);
-        assert!(text.contains("Title"));
-        assert!(text.contains("This is a paragraph"));
-        assert!(text.contains("Another paragraph"));
-        assert!(!text.contains("var x"));
-    }
-}

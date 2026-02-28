@@ -4,13 +4,13 @@ use crate::types::{Chunk, ChunkId};
 
 #[cfg(test)]
 use crate::types::ChunkMetadata;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 use tantivy::{
     collector::TopDocs,
     directory::MmapDirectory,
     query::QueryParser,
-    schema::{Field, Schema, Value, STORED, TEXT},
+    schema::{Field, Schema, Value, STORED, STRING, TEXT},
     Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument,
 };
 use tracing::debug;
@@ -85,7 +85,7 @@ impl Bm25Index {
     fn build_schema() -> (Schema, Bm25Schema) {
         let mut schema_builder = Schema::builder();
 
-        let chunk_id = schema_builder.add_text_field("chunk_id", STORED);
+        let chunk_id = schema_builder.add_text_field("chunk_id", STRING | STORED);
         let document_id = schema_builder.add_text_field("document_id", STORED);
         let content = schema_builder.add_text_field("content", TEXT | STORED);
         let title = schema_builder.add_text_field("title", TEXT);
@@ -129,9 +129,7 @@ impl Bm25Index {
         let searcher = self.reader.searcher();
 
         let query_parser = QueryParser::for_index(&self.index, vec![self.schema.content]);
-        let query = query_parser
-            .parse_query(query_text)
-            .context("Failed to parse query")?;
+        let (query, _parse_errors) = query_parser.parse_query_lenient(query_text);
 
         let top_docs = searcher.search(&query, &TopDocs::with_limit(k))?;
 
@@ -215,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bm25_delete_does_not_error() {
+    fn test_bm25_delete_removes_chunk() {
         let index = Bm25Index::new_in_memory().unwrap();
 
         let chunk1 = make_chunk("chunk1", "doc1", "unique alpha bravo content");
@@ -230,15 +228,18 @@ mod tests {
         assert!(!results.is_empty());
         assert_eq!(results[0].chunk_id, "chunk1");
 
-        // Delete should not error (note: chunk_id field is STORED-only,
-        // so delete_term on it is effectively a no-op in Tantivy;
-        // the HybridIndexer compensates by also removing from vector
-        // index and chunk storage, filtering out the deleted chunk
-        // from final results)
+        // Delete chunk1 — with STRING | STORED on chunk_id, this now works
         index.delete("chunk1").unwrap();
         index.commit().unwrap();
 
-        // chunk2 should still be findable regardless
+        // chunk1 should no longer appear in results
+        let results = index.search("alpha bravo", 10).unwrap();
+        assert!(
+            results.iter().all(|r| r.chunk_id != "chunk1"),
+            "Deleted chunk should not appear in search results"
+        );
+
+        // chunk2 should still be findable
         let results = index.search("charlie delta", 10).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].chunk_id, "chunk2");
@@ -291,5 +292,20 @@ mod tests {
 
         let results = index.search("anything", 10).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_bm25_special_character_queries() {
+        let index = Bm25Index::new_in_memory().unwrap();
+
+        let chunk = make_chunk("chunk1", "doc1", "programming in c++ and c# languages");
+        index.add(&chunk).unwrap();
+        index.commit().unwrap();
+
+        // These would fail with parse_query() but succeed with parse_query_lenient()
+        assert!(index.search("c++", 10).is_ok());
+        assert!(index.search("c#", 10).is_ok());
+        assert!(index.search("\"unclosed quote", 10).is_ok());
+        assert!(index.search("field:value AND OR", 10).is_ok());
     }
 }

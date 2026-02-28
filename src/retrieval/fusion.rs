@@ -7,7 +7,8 @@ use crate::types::ChunkId;
 use std::collections::HashMap;
 
 /// Retrieval method identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RetrievalMethod {
     Dense,
     Bm25,
@@ -103,10 +104,12 @@ pub fn reciprocal_rank_fusion(
     results.sort_by(|a, b| b.rrf_score.total_cmp(&a.rrf_score));
 
     // Normalize scores to [0, 1] range.
-    // Theoretical max is num_lists/(k+1), achieved when a doc is rank 1 in all lists.
-    let num_lists = ranked_lists.len();
-    if num_lists > 0 {
-        let theoretical_max = num_lists as f32 / (config.k as f32 + 1.0);
+    // Theoretical max is num_nonempty_lists/(k+1), achieved when a doc is rank 1 in all
+    // non-empty lists. We use the count of non-empty lists so that a single retrieval
+    // method returning results still produces a top score of 1.0.
+    let num_nonempty = ranked_lists.iter().filter(|l| !l.is_empty()).count();
+    if num_nonempty > 0 {
+        let theoretical_max = num_nonempty as f32 / (config.k as f32 + 1.0);
         for result in &mut results {
             result.rrf_score /= theoretical_max;
         }
@@ -260,6 +263,12 @@ mod tests {
 
         assert_eq!(fused.len(), 1);
         assert_eq!(fused[0].chunk_id, "only");
+        // Top result from the only non-empty list should score 1.0
+        assert!(
+            (fused[0].rrf_score - 1.0).abs() < 1e-6,
+            "Top result should score 1.0 when only one method returns results, got {}",
+            fused[0].rrf_score
+        );
     }
 
     #[test]

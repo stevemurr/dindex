@@ -227,7 +227,6 @@ impl TextSplitter {
 
         // Look for paragraph break first (double newline)
         let search_start = target_end.saturating_sub(100);
-        let _search_end = (target_end + 100).min(content_len);
 
         for i in (search_start..target_end).rev() {
             if i + 1 < chars.len() && chars[i] == '\n' && chars[i + 1] == '\n' {

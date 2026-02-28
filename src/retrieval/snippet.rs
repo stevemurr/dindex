@@ -253,8 +253,12 @@ fn truncate_to_chars(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
         return s.to_string();
     }
+    // When max_chars is too small for "...", just hard-truncate
+    if max_chars < 4 {
+        return s[..s.floor_char_boundary(max_chars)].to_string();
+    }
     // Find a word boundary near max_chars - 3 (for "...")
-    let limit = max_chars.saturating_sub(3);
+    let limit = max_chars - 3;
     let truncated = &s[..s.floor_char_boundary(limit)];
     // Try to break at last space
     if let Some(last_space) = truncated.rfind(' ') {

@@ -92,8 +92,9 @@ impl QueryCoordinator {
         );
 
         // Execute queries
-        let mut all_results: Vec<(NodeId, Vec<SearchResult>)> = Vec::new();
-        let mut responding_nodes = Vec::new();
+        let mut all_results: Vec<(NodeId, Vec<SearchResult>)> =
+            Vec::with_capacity(plan.candidate_nodes.len() + 1);
+        let mut responding_nodes = Vec::with_capacity(plan.candidate_nodes.len() + 1);
         let mut timed_out_nodes = Vec::new();
 
         // Query local index
@@ -326,7 +327,7 @@ impl QueryCoordinator {
                 chunk_map.get(&f.chunk_id).map(|r| {
                     let mut result = r.clone();
                     result.relevance_score = f.rrf_score;
-                    result.matched_by = f.contributing_methods.iter().map(|m| m.to_string()).collect();
+                    result.matched_by = f.contributing_methods.clone();
                     result
                 })
             })

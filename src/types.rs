@@ -176,9 +176,19 @@ impl LshSignature {
         Self { bits, num_bits }
     }
 
-    /// Calculate Hamming distance between two signatures
+    /// Calculate Hamming distance between two signatures.
+    ///
+    /// Returns `num_bits` (maximum distance) if signatures have mismatched sizes.
     pub fn hamming_distance(&self, other: &LshSignature) -> usize {
-        assert_eq!(self.num_bits, other.num_bits);
+        debug_assert_eq!(self.num_bits, other.num_bits);
+        if self.num_bits != other.num_bits {
+            tracing::warn!(
+                "hamming_distance called with mismatched num_bits: {} vs {}",
+                self.num_bits,
+                other.num_bits
+            );
+            return self.num_bits.max(other.num_bits);
+        }
         self.bits
             .iter()
             .zip(other.bits.iter())
@@ -256,8 +266,8 @@ pub struct SearchResult {
     pub chunk: Chunk,
     pub relevance_score: f32,
     pub node_id: Option<NodeId>,
-    /// Which retrieval methods matched (dense, sparse, bm25)
-    pub matched_by: Vec<String>,
+    /// Which retrieval methods matched
+    pub matched_by: Vec<crate::retrieval::RetrievalMethod>,
 }
 
 impl SearchResult {
@@ -277,7 +287,7 @@ pub struct MatchingChunk {
     pub chunk_id: ChunkId,
     pub content: String,
     pub relevance_score: f32,
-    pub matched_by: Vec<String>,
+    pub matched_by: Vec<crate::retrieval::RetrievalMethod>,
     pub section_hierarchy: Vec<String>,
     pub position_in_doc: f32,
     /// Best-matching sentence snippet for citations
@@ -817,7 +827,7 @@ mod tests {
             chunk,
             relevance_score: score,
             node_id: None,
-            matched_by: vec!["dense".to_string()],
+            matched_by: vec![crate::retrieval::RetrievalMethod::Dense],
         }
     }
 
@@ -886,7 +896,7 @@ mod tests {
         let grouped = GroupedSearchResult::from_results(results, 10);
         assert_eq!(grouped[0].source_title, Some("Doc doc-1".to_string()));
         assert_eq!(grouped[0].source_url, Some("https://example.com/doc-1".to_string()));
-        assert_eq!(grouped[0].chunks[0].matched_by, vec!["dense".to_string()]);
+        assert_eq!(grouped[0].chunks[0].matched_by, vec![crate::retrieval::RetrievalMethod::Dense]);
     }
 
     #[test]
