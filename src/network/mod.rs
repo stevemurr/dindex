@@ -7,11 +7,13 @@
 //! - AutoNAT for NAT traversal
 
 mod behaviour;
+mod handle;
 mod messages;
 mod node;
 mod protocol;
 
 pub use behaviour::*;
+pub use handle::*;
 pub use messages::*;
 pub use node::*;
 pub use protocol::*;

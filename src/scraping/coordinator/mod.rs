@@ -4,187 +4,30 @@
 //! deduplication, and indexing. Manages the scraping lifecycle and integrates
 //! with the P2P network for distributed crawling.
 
+pub mod pipeline;
+mod types;
+mod url_filter;
+
+pub use types::*;
+
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::{RwLock, Semaphore};
 use url::Url;
 
 use super::{
     dedup::{ContentDeduplicator, SimHash},
     domain_assignment::{DomainAssignment, PeerId},
-    extractor::{ContentExtractor, ExtractedContent, ExtractedMetadata, ExtractorConfig},
-    fetcher::{extract_urls, FetchConfig, FetchEngine, FetchError, FetchResult},
+    extractor::{ContentExtractor, ExtractedContent, ExtractedMetadata},
+    fetcher::{extract_urls, FetchEngine, FetchError},
     frontier::{ScoredUrl, UrlFrontier},
-    politeness::{FetchDecision, PolitenessConfig, PolitenessController},
-    trap_detection::{self, TrapDetectorConfig},
+    politeness::{FetchDecision, PolitenessController},
 };
 
 use crate::index::{DocumentRegistry, DuplicateCheckResult};
 use crate::types::{Document, DocumentIdentity};
-
-/// Configuration for the scraping coordinator
-#[derive(Debug, Clone)]
-pub struct ScrapingConfig {
-    /// Enable scraping
-    pub enabled: bool,
-    /// Maximum concurrent fetches
-    pub max_concurrent_fetches: usize,
-    /// Maximum crawl depth
-    pub max_depth: u8,
-    /// Stay within seed domains only
-    pub stay_on_domain: bool,
-    /// URL patterns to include (regex)
-    pub include_patterns: Vec<String>,
-    /// URL patterns to exclude (regex)
-    pub exclude_patterns: Vec<String>,
-    /// Maximum pages per domain
-    pub max_pages_per_domain: usize,
-    /// Scraping interval (how often to check for new URLs)
-    pub scrape_interval: Duration,
-    /// Politeness configuration
-    pub politeness: PolitenessConfig,
-    /// Fetch configuration
-    pub fetch: FetchConfig,
-    /// Extractor configuration
-    pub extractor: ExtractorConfig,
-    /// Crawl trap detection configuration
-    pub trap_detector: TrapDetectorConfig,
-}
-
-impl ScrapingConfig {
-    /// Build a ScrapingConfig from the TOML ScrapingConfig + per-job overrides.
-    ///
-    /// Ensures consistent settings regardless of whether the scrape is initiated
-    /// from the CLI command or the daemon job manager.
-    pub fn from_config(
-        config: &crate::config::ScrapingConfig,
-        max_depth: u8,
-        stay_on_domain: bool,
-        delay_ms: u64,
-        max_pages: usize,
-    ) -> Self {
-        Self {
-            enabled: true,
-            max_concurrent_fetches: config.max_concurrent_fetches,
-            max_depth,
-            stay_on_domain,
-            include_patterns: config.include_patterns.clone(),
-            exclude_patterns: config.exclude_patterns.clone(),
-            max_pages_per_domain: max_pages,
-            scrape_interval: Duration::from_millis(100),
-            politeness: PolitenessConfig {
-                user_agent: config.user_agent.clone(),
-                default_delay: Duration::from_millis(delay_ms),
-                min_delay: Duration::from_millis(delay_ms / 2),
-                max_delay: Duration::from_secs(30),
-                cache_size: 10_000,
-                request_timeout: Duration::from_secs(config.request_timeout_secs),
-            },
-            fetch: FetchConfig {
-                user_agent: config.user_agent.clone(),
-                timeout: Duration::from_secs(config.request_timeout_secs),
-                connect_timeout: Duration::from_secs(10),
-                max_content_size: 10 * 1024 * 1024,
-                max_redirects: 10,
-                min_text_ratio: 0.1,
-                enable_js_rendering: config.enable_js_rendering,
-                connections_per_host: config.max_concurrent_fetches,
-            },
-            extractor: ExtractorConfig::default(),
-            trap_detector: TrapDetectorConfig::default(),
-        }
-    }
-}
-
-impl Default for ScrapingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_concurrent_fetches: 10,
-            max_depth: 3,
-            stay_on_domain: false,
-            include_patterns: Vec::new(),
-            exclude_patterns: Vec::new(),
-            max_pages_per_domain: 1000,
-            scrape_interval: Duration::from_secs(1),
-            politeness: PolitenessConfig::default(),
-            fetch: FetchConfig::default(),
-            extractor: ExtractorConfig::default(),
-            trap_detector: TrapDetectorConfig::default(),
-        }
-    }
-}
-
-/// Successfully processed content from a URL
-#[derive(Debug)]
-pub struct ProcessedContent {
-    pub content: ExtractedContent,
-    pub metadata: ExtractedMetadata,
-    pub simhash: SimHash,
-}
-
-/// Outcome of processing a single URL
-#[derive(Debug)]
-pub enum ProcessOutcome {
-    Success(ProcessedContent),
-    Failure { error: String },
-}
-
-/// Result of processing a single URL
-#[derive(Debug)]
-pub struct ProcessResult {
-    /// The URL that was processed
-    pub url: Url,
-    /// Processing outcome (success with content, or failure with error)
-    pub outcome: ProcessOutcome,
-    /// URLs discovered on this page
-    pub discovered_urls: Vec<Url>,
-    /// Processing duration
-    pub duration: Duration,
-}
-
-impl ProcessResult {
-    /// Create a failure result with no discovered URLs
-    fn failure(url: &Url, error: impl Into<String>, start: Instant) -> Self {
-        Self {
-            url: url.clone(),
-            outcome: ProcessOutcome::Failure { error: error.into() },
-            discovered_urls: Vec::new(),
-            duration: start.elapsed(),
-        }
-    }
-}
-
-/// Statistics from the scraping coordinator
-#[derive(Debug, Clone, Default)]
-pub struct ScrapingStats {
-    /// Total URLs processed
-    pub urls_processed: u64,
-    /// Successful fetches
-    pub successful_fetches: u64,
-    /// Failed fetches
-    pub failed_fetches: u64,
-    /// Duplicate content skipped
-    pub duplicates_skipped: u64,
-    /// URLs discovered
-    pub urls_discovered: u64,
-    /// URLs sent to other nodes
-    pub urls_exchanged: u64,
-    /// Average processing time (ms)
-    pub avg_processing_time_ms: f64,
-    /// Current queue size
-    pub queue_size: usize,
-    /// Domains being crawled
-    pub active_domains: usize,
-}
-
-/// Capacity of the content deduplicator (max number of tracked documents)
-const CONTENT_DEDUP_CAPACITY: usize = 100_000;
-
-/// Hamming distance threshold for near-duplicate detection
-const CONTENT_DEDUP_HAMMING_THRESHOLD: u32 = 3;
 
 /// Scraping coordinator managing the entire scraping pipeline
 pub struct ScrapingCoordinator {
@@ -234,7 +77,11 @@ impl ScrapingCoordinator {
         let fetcher = FetchEngine::new(config.fetch.clone())?;
         let extractor = Arc::new(ContentExtractor::new(config.extractor.clone()));
 
-        let content_dedup = ContentDeduplicator::new(CONTENT_DEDUP_CAPACITY, CONTENT_DEDUP_HAMMING_THRESHOLD, local_peer_id.clone());
+        let content_dedup = ContentDeduplicator::new(
+            CONTENT_DEDUP_CAPACITY,
+            CONTENT_DEDUP_HAMMING_THRESHOLD,
+            local_peer_id.clone(),
+        );
 
         // Pre-compile include/exclude regex patterns
         let compiled_include: Vec<regex::Regex> = config
@@ -431,7 +278,14 @@ impl ScrapingCoordinator {
         };
 
         // Extract URLs for further crawling
-        let discovered_urls = self.filter_discovered_urls(&response, url);
+        let discovered_urls = url_filter::filter_discovered_urls(
+            &response,
+            url,
+            &self.config,
+            &self.seed_domains,
+            &self.compiled_include,
+            &self.compiled_exclude,
+        );
 
         // Update stats
         {
@@ -455,47 +309,6 @@ impl ScrapingCoordinator {
             discovered_urls,
             duration: start.elapsed(),
         }
-    }
-
-    /// Filter discovered URLs based on configuration
-    fn filter_discovered_urls(&self, response: &FetchResult, source_url: &Url) -> Vec<Url> {
-        let all_urls = extract_urls(response);
-        let _source_domain = source_url.host_str().unwrap_or_default();
-
-        all_urls
-            .into_iter()
-            .filter(|url| {
-                // Check crawl trap detection
-                if trap_detection::is_crawl_trap(url, &self.config.trap_detector) {
-                    return false;
-                }
-
-                // Check stay_on_domain
-                if self.config.stay_on_domain {
-                    let domain = url.host_str().unwrap_or_default();
-                    if !self.seed_domains.contains(domain) {
-                        return false;
-                    }
-                }
-
-                // Check exclude patterns (compiled regex)
-                let url_str = url.as_str();
-                for pattern in &self.compiled_exclude {
-                    if pattern.is_match(url_str) {
-                        return false;
-                    }
-                }
-
-                // Check include patterns (if any, compiled regex)
-                if !self.compiled_include.is_empty() {
-                    if !self.compiled_include.iter().any(|p| p.is_match(url_str)) {
-                        return false;
-                    }
-                }
-
-                true
-            })
-            .collect()
     }
 
     /// Add discovered URLs to the frontier
@@ -621,32 +434,7 @@ impl ScrapingCoordinator {
         content: &ExtractedContent,
         metadata: &ExtractedMetadata,
     ) -> Document {
-        let mut doc = Document::new(&content.text_content)
-            .with_title(&content.title)
-            .with_url(url.as_str());
-
-        if let Some(author) = &metadata.author {
-            doc.metadata.insert("author".to_string(), author.clone());
-        }
-
-        if let Some(date) = &metadata.published_date {
-            doc.metadata.insert("published_date".to_string(), date.to_rfc3339());
-        }
-
-        if let Some(lang) = &metadata.language {
-            doc.metadata.insert("language".to_string(), lang.clone());
-        }
-
-        doc.metadata.insert("word_count".to_string(), content.word_count.to_string());
-        doc.metadata.insert("reading_time".to_string(), content.reading_time_minutes.to_string());
-        doc.metadata.insert("domain".to_string(), metadata.domain.clone());
-
-        // Propagate extra metadata from extraction (e.g., aggregator_score)
-        for (key, value) in &metadata.extra {
-            doc.metadata.insert(key.clone(), value.clone());
-        }
-
-        doc
+        pipeline::to_document(url, content, metadata)
     }
 
     /// Handle a node joining the network
@@ -683,6 +471,7 @@ impl ScrapingCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scraping::politeness::PolitenessConfig;
 
     fn default_coordinator() -> ScrapingCoordinator {
         let config = ScrapingConfig::default();
