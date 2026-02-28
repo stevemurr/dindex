@@ -111,22 +111,33 @@ pub async fn search(
             let total_documents = grouped.len();
             let total_chunks: usize = grouped.iter().map(|g| g.chunks.len()).sum();
 
+            let mut citations = Vec::with_capacity(grouped.len());
             let json_results: Vec<GroupedSearchResultJson> = grouped
                 .into_iter()
-                .map(|g| GroupedSearchResultJson {
-                    document_id: g.document_id,
-                    source_url: g.source_url,
-                    source_title: g.source_title,
-                    relevance_score: g.relevance_score,
-                    chunks: g.chunks.into_iter().map(|c| MatchingChunkJson {
-                        chunk_id: c.chunk_id,
-                        content: c.content,
-                        relevance_score: c.relevance_score,
-                        matched_by: c.matched_by,
-                        section_hierarchy: c.section_hierarchy,
-                        position_in_doc: c.position_in_doc,
-                        snippet: c.snippet,
-                    }).collect(),
+                .map(|g| {
+                    let top_snippet = g.chunks.first().and_then(|c| c.snippet.clone());
+                    citations.push(Citation {
+                        index: g.citation_index,
+                        source_title: g.source_title.clone(),
+                        source_url: g.source_url.clone(),
+                        snippet: top_snippet,
+                    });
+                    GroupedSearchResultJson {
+                        document_id: g.document_id,
+                        source_url: g.source_url,
+                        source_title: g.source_title,
+                        relevance_score: g.relevance_score,
+                        citation_index: g.citation_index,
+                        chunks: g.chunks.into_iter().map(|c| MatchingChunkJson {
+                            chunk_id: c.chunk_id,
+                            content: c.content,
+                            relevance_score: c.relevance_score,
+                            matched_by: c.matched_by,
+                            section_hierarchy: c.section_hierarchy,
+                            position_in_doc: c.position_in_doc,
+                            snippet: c.snippet,
+                        }).collect(),
+                    }
                 })
                 .collect();
 
@@ -134,6 +145,7 @@ pub async fn search(
                 StatusCode::OK,
                 Json(SearchResponse {
                     results: json_results,
+                    citations,
                     total_documents,
                     total_chunks,
                     query_time_ms,

@@ -79,7 +79,25 @@ fn output_search_results(results: &[dindex::types::SearchResult], format: &str, 
 
     match format {
         "json" | "json-pretty" => {
-            match serde_json::to_string_pretty(&grouped) {
+            // Build a response with citations
+            let citations: Vec<serde_json::Value> = grouped.iter().map(|g| {
+                let top_snippet = g.chunks.first().and_then(|c| c.snippet.clone());
+                serde_json::json!({
+                    "index": g.citation_index,
+                    "source_title": g.source_title,
+                    "source_url": g.source_url,
+                    "snippet": top_snippet,
+                })
+            }).collect();
+
+            let response = serde_json::json!({
+                "results": grouped,
+                "citations": citations,
+                "total_documents": grouped.len(),
+                "total_chunks": total_chunks,
+            });
+
+            match serde_json::to_string_pretty(&response) {
                 Ok(json) => println!("{}", json),
                 Err(e) => eprintln!("Failed to serialize results: {}", e),
             }
@@ -90,10 +108,10 @@ fn output_search_results(results: &[dindex::types::SearchResult], format: &str, 
                 grouped.len(),
                 total_chunks,
             );
-            for (i, group) in grouped.iter().enumerate() {
+            for group in &grouped {
                 println!(
-                    "{}. [Score: {:.4}] {}",
-                    i + 1,
+                    "[{}] [Score: {:.4}] {}",
+                    group.citation_index,
                     group.relevance_score,
                     group.source_title.as_deref().unwrap_or("(untitled)"),
                 );

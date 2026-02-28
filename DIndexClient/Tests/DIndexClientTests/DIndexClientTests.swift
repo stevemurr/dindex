@@ -63,6 +63,7 @@ final class DIndexClientTests: XCTestCase {
                     "source_url": "https://example.com",
                     "source_title": "Example",
                     "relevance_score": 0.95,
+                    "citation_index": 1,
                     "chunks": [
                         {
                             "chunk_id": "chunk1",
@@ -70,9 +71,18 @@ final class DIndexClientTests: XCTestCase {
                             "relevance_score": 0.95,
                             "matched_by": ["dense", "bm25"],
                             "section_hierarchy": [],
-                            "position_in_doc": 0.0
+                            "position_in_doc": 0.0,
+                            "snippet": "Machine learning transforms industries"
                         }
                     ]
+                }
+            ],
+            "citations": [
+                {
+                    "index": 1,
+                    "source_title": "Example",
+                    "source_url": "https://example.com",
+                    "snippet": "Machine learning transforms industries"
                 }
             ],
             "total_documents": 1,
@@ -94,12 +104,22 @@ final class DIndexClientTests: XCTestCase {
         XCTAssertEqual(group.sourceUrl, "https://example.com")
         XCTAssertEqual(group.sourceTitle, "Example")
         XCTAssertEqual(group.relevanceScore, 0.95, accuracy: 0.001)
+        XCTAssertEqual(group.citationIndex, 1)
 
         let chunk = group.chunks[0]
         XCTAssertEqual(chunk.chunkId, "chunk1")
         XCTAssertEqual(chunk.content, "Test content")
         XCTAssertEqual(chunk.relevanceScore, 0.95, accuracy: 0.001)
         XCTAssertEqual(chunk.matchedBy, ["dense", "bm25"])
+        XCTAssertEqual(chunk.snippet, "Machine learning transforms industries")
+
+        // Verify citations
+        XCTAssertEqual(response.citations.count, 1)
+        let citation = response.citations[0]
+        XCTAssertEqual(citation.index, 1)
+        XCTAssertEqual(citation.sourceTitle, "Example")
+        XCTAssertEqual(citation.sourceUrl, "https://example.com")
+        XCTAssertEqual(citation.snippet, "Machine learning transforms industries")
     }
 
     func testIndexStatsDecoding() throws {

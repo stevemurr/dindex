@@ -66,6 +66,9 @@ public struct GroupedSearchResult: Codable, Sendable, Equatable {
     /// Maximum relevance score among all matching chunks
     public let relevanceScore: Float
 
+    /// 1-based citation index linking to the citations array
+    public let citationIndex: Int
+
     /// Matching chunks sorted by score descending
     public let chunks: [MatchingChunk]
 
@@ -74,6 +77,7 @@ public struct GroupedSearchResult: Codable, Sendable, Equatable {
         case sourceUrl = "source_url"
         case sourceTitle = "source_title"
         case relevanceScore = "relevance_score"
+        case citationIndex = "citation_index"
         case chunks
     }
 
@@ -82,13 +86,49 @@ public struct GroupedSearchResult: Codable, Sendable, Equatable {
         sourceUrl: String? = nil,
         sourceTitle: String? = nil,
         relevanceScore: Float,
+        citationIndex: Int = 0,
         chunks: [MatchingChunk]
     ) {
         self.documentId = documentId
         self.sourceUrl = sourceUrl
         self.sourceTitle = sourceTitle
         self.relevanceScore = relevanceScore
+        self.citationIndex = citationIndex
         self.chunks = chunks
+    }
+}
+
+/// A citation entry bundling source metadata and the best snippet
+public struct Citation: Codable, Sendable, Equatable {
+    /// 1-based citation index
+    public let index: Int
+
+    /// Source title if available
+    public let sourceTitle: String?
+
+    /// Source URL if available
+    public let sourceUrl: String?
+
+    /// Best snippet from the top-scoring chunk
+    public let snippet: String?
+
+    enum CodingKeys: String, CodingKey {
+        case index
+        case sourceTitle = "source_title"
+        case sourceUrl = "source_url"
+        case snippet
+    }
+
+    public init(
+        index: Int,
+        sourceTitle: String? = nil,
+        sourceUrl: String? = nil,
+        snippet: String? = nil
+    ) {
+        self.index = index
+        self.sourceTitle = sourceTitle
+        self.sourceUrl = sourceUrl
+        self.snippet = snippet
     }
 }
 
@@ -96,6 +136,9 @@ public struct GroupedSearchResult: Codable, Sendable, Equatable {
 public struct SearchResponse: Codable, Sendable {
     /// Search results grouped by document
     public let results: [GroupedSearchResult]
+
+    /// Citation entries for each grouped result
+    public let citations: [Citation]
 
     /// Total number of unique documents matched
     public let totalDocuments: Int
@@ -108,13 +151,15 @@ public struct SearchResponse: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case results
+        case citations
         case totalDocuments = "total_documents"
         case totalChunks = "total_chunks"
         case queryTimeMs = "query_time_ms"
     }
 
-    public init(results: [GroupedSearchResult], totalDocuments: Int, totalChunks: Int, queryTimeMs: UInt64) {
+    public init(results: [GroupedSearchResult], citations: [Citation] = [], totalDocuments: Int, totalChunks: Int, queryTimeMs: UInt64) {
         self.results = results
+        self.citations = citations
         self.totalDocuments = totalDocuments
         self.totalChunks = totalChunks
         self.queryTimeMs = queryTimeMs

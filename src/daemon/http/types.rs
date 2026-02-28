@@ -66,8 +66,23 @@ pub struct GroupedSearchResultJson {
     pub source_title: Option<String>,
     /// Maximum relevance score among all matching chunks
     pub relevance_score: f32,
+    /// 1-based citation index linking to the citations array
+    pub citation_index: usize,
     /// Matching chunks sorted by score descending
     pub chunks: Vec<MatchingChunkJson>,
+}
+
+/// A citation entry bundling source metadata and the best snippet
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Citation {
+    /// 1-based citation index
+    pub index: usize,
+    /// Source title if available
+    pub source_title: Option<String>,
+    /// Source URL if available
+    pub source_url: Option<String>,
+    /// Best snippet from the top-scoring chunk
+    pub snippet: Option<String>,
 }
 
 /// Search response
@@ -75,6 +90,8 @@ pub struct GroupedSearchResultJson {
 pub struct SearchResponse {
     /// Search results grouped by document
     pub results: Vec<GroupedSearchResultJson>,
+    /// Citation entries for each grouped result
+    pub citations: Vec<Citation>,
     /// Total number of unique documents matched
     pub total_documents: usize,
     /// Total number of matching chunks across all documents

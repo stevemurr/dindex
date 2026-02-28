@@ -303,6 +303,9 @@ pub struct GroupedSearchResult {
     pub source_title: Option<String>,
     /// Maximum relevance score among all matching chunks
     pub relevance_score: f32,
+    /// 1-based citation index assigned after ranking
+    #[serde(default)]
+    pub citation_index: usize,
     /// Matching chunks sorted by score descending
     pub chunks: Vec<MatchingChunk>,
 }
@@ -337,6 +340,7 @@ impl GroupedSearchResult {
                     source_url: result.chunk.metadata.source_url.clone(),
                     source_title: result.chunk.metadata.source_title.clone(),
                     relevance_score: result.relevance_score,
+                    citation_index: 0,
                     chunks: vec![matching_chunk],
                 });
         }
@@ -391,6 +395,12 @@ impl GroupedSearchResult {
         }
 
         grouped.truncate(top_k);
+
+        // Assign 1-based citation indices
+        for (i, group) in grouped.iter_mut().enumerate() {
+            group.citation_index = i + 1;
+        }
+
         grouped
     }
 }
