@@ -237,6 +237,8 @@ enum DevAction {
         #[arg(short, long)]
         force: bool,
     },
+    /// Rebuild BM25 index from existing chunk storage
+    RebuildBm25,
 }
 
 fn main() -> Result<()> {
