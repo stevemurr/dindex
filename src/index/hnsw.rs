@@ -586,4 +586,47 @@ mod tests {
         let result = index.search(&wrong_query, 1);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_similarity_clamped_to_zero_one() {
+        let index = create_test_index(); // 4 dimensions
+
+        // Add vectors that are orthogonal and opposite to stress cosine distance range.
+        // Cosine distance can range [0, 2], so similarity = 1 - distance can be [-1, 1].
+        // The clamp should keep similarity in [0, 1].
+        index
+            .add(&"pos".to_string(), &vec![1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(&"neg".to_string(), &vec![-1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(&"ortho".to_string(), &vec![0.0, 1.0, 0.0, 0.0])
+            .unwrap();
+
+        // Search with the positive vector — should find all three
+        let results = index.search(&vec![1.0, 0.0, 0.0, 0.0], 3).unwrap();
+
+        for r in &results {
+            assert!(
+                r.similarity >= 0.0 && r.similarity <= 1.0,
+                "Similarity for chunk '{}' should be in [0.0, 1.0], got {} (distance={})",
+                r.chunk_id,
+                r.similarity,
+                r.distance
+            );
+        }
+
+        // Search with the negative vector — the "neg" chunk should be closest
+        let results_neg = index.search(&vec![-1.0, 0.0, 0.0, 0.0], 3).unwrap();
+        for r in &results_neg {
+            assert!(
+                r.similarity >= 0.0 && r.similarity <= 1.0,
+                "Similarity for chunk '{}' should be in [0.0, 1.0], got {} (distance={})",
+                r.chunk_id,
+                r.similarity,
+                r.distance
+            );
+        }
+    }
 }

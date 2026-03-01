@@ -159,4 +159,56 @@ mod tests {
         let tok = create_tokenizer(&config);
         assert_eq!(tok.name(), "heuristic");
     }
+
+    #[test]
+    fn test_encoding_for_e5_models() {
+        assert_eq!(encoding_for_model("e5-small"), Some("cl100k_base"));
+        assert_eq!(encoding_for_model("e5-large"), Some("cl100k_base"));
+        assert_eq!(
+            encoding_for_model("intfloat/e5-large-v2"),
+            Some("cl100k_base")
+        );
+    }
+
+    #[test]
+    fn test_encoding_for_cohere_models() {
+        assert_eq!(
+            encoding_for_model("embed-english-v3.0"),
+            Some("cl100k_base")
+        );
+        assert_eq!(
+            encoding_for_model("embed-multilingual-v3.0"),
+            Some("cl100k_base")
+        );
+    }
+
+    #[test]
+    fn test_create_tokenizer_with_invalid_encoding_falls_back() {
+        // Explicit but invalid encoding should fall through to model inference or heuristic
+        let mut config = EmbeddingConfig::default();
+        config.tokenizer_encoding = Some("nonexistent_encoding_xyz".to_string());
+        // model_name is "all-MiniLM-L6-v2" which is unknown, so should fall back to heuristic
+        let tok = create_tokenizer(&config);
+        assert_eq!(
+            tok.name(),
+            "heuristic",
+            "invalid encoding with unknown model should fall back to heuristic"
+        );
+    }
+
+    #[test]
+    fn test_create_tokenizer_model_name_used_as_fallback() {
+        // When config.model is None, model_name should be used for inference
+        let mut config = EmbeddingConfig::default();
+        config.model = None;
+        config.model_name = "bge-m3".to_string();
+        config.tokenizer_encoding = None;
+        let tok = create_tokenizer(&config);
+        // bge-m3 is recognized by encoding_for_model, so should get BPE
+        assert_eq!(
+            tok.name(),
+            "cl100k_base",
+            "model_name 'bge-m3' should be used when config.model is None"
+        );
+    }
 }

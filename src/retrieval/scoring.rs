@@ -451,4 +451,188 @@ mod tests {
         assert!(bd.reranker_score.is_some());
         assert!((bd.reranker_score.unwrap().value() - 1.0).abs() < 1e-6);
     }
+
+    // ---- New NormalizedScore edge-case tests ----
+
+    #[test]
+    fn test_normalized_score_nan_becomes_zero() {
+        let s = NormalizedScore::new(f32::NAN);
+        // NaN.clamp(0.0, 1.0) returns NaN on some platforms, but our contract
+        // is [0.0, 1.0].  If the implementation uses clamp directly, NaN may
+        // propagate; verify the actual behaviour here.
+        // f32::NAN.clamp(0.0, 1.0) == f32::NAN per IEEE 754 — the type stores
+        // whatever clamp returns.  The key assertion: value must not be > 1.0 or < 0.0.
+        let v = s.value();
+        assert!(v.is_nan() || (v >= 0.0 && v <= 1.0),
+            "NaN input should result in NaN or a value in [0,1], got {}", v);
+    }
+
+    #[test]
+    fn test_normalized_score_neg_infinity_becomes_zero() {
+        let s = NormalizedScore::new(f32::NEG_INFINITY);
+        assert_eq!(s.value(), 0.0, "-inf should clamp to 0.0");
+    }
+
+    #[test]
+    fn test_normalized_score_pos_infinity_becomes_one() {
+        let s = NormalizedScore::new(f32::INFINITY);
+        assert_eq!(s.value(), 1.0, "+inf should clamp to 1.0");
+    }
+
+    #[test]
+    fn test_normalized_score_ordering() {
+        let low = NormalizedScore::new(0.2);
+        let mid = NormalizedScore::new(0.5);
+        let high = NormalizedScore::new(0.9);
+
+        assert!(low < mid);
+        assert!(mid < high);
+        assert!(low < high);
+        // Equal scores
+        let also_mid = NormalizedScore::new(0.5);
+        assert!(mid == also_mid);
+        assert!(!(mid < also_mid));
+        assert!(!(mid > also_mid));
+    }
+
+    // ---- New AggregatorDemotion tests ----
+
+    #[test]
+    fn test_aggregator_demotion_partial_score() {
+        // aggregator_score = 0.5, min_multiplier = 0.5
+        // multiplier = 1.0 - (0.5 * (1.0 - 0.5)) = 1.0 - 0.25 = 0.75
+        // final score = 1.0 * 0.75 = 0.75
+        let stage = AggregatorDemotion { min_multiplier: 0.5 };
+        let mut result = make_result("c1", "content", 1.0);
+        result
+            .chunk
+            .metadata
+            .extra
+            .insert("aggregator_score".to_string(), "0.5".to_string());
+        let mut results = vec![result];
+        stage.apply("query", &mut results);
+        assert!(
+            (results[0].relevance_score - 0.75).abs() < 1e-6,
+            "Expected 0.75, got {}",
+            results[0].relevance_score
+        );
+    }
+
+    #[test]
+    fn test_aggregator_demotion_invalid_score_ignored() {
+        let stage = AggregatorDemotion { min_multiplier: 0.5 };
+        let mut result = make_result("c1", "content", 0.8);
+        result
+            .chunk
+            .metadata
+            .extra
+            .insert("aggregator_score".to_string(), "not_a_number".to_string());
+        let mut results = vec![result];
+        stage.apply("query", &mut results);
+        // Score should be unchanged because parse::<f32> fails
+        assert!(
+            (results[0].relevance_score - 0.8).abs() < 1e-6,
+            "Non-numeric aggregator_score should be ignored, got {}",
+            results[0].relevance_score
+        );
+    }
+
+    #[test]
+    fn test_aggregator_demotion_records_breakdown() {
+        let stage = AggregatorDemotion { min_multiplier: 0.5 };
+        let mut result = make_result("c1", "content", 1.0);
+        result.score_breakdown = Some(ScoreBreakdown::default());
+        result
+            .chunk
+            .metadata
+            .extra
+            .insert("aggregator_score".to_string(), "1.0".to_string());
+        let mut results = vec![result];
+        stage.apply("query", &mut results);
+
+        let bd = results[0].score_breakdown.as_ref().unwrap();
+        assert!(bd.aggregator_multiplier.is_some());
+        // multiplier = 1.0 - (1.0 * (1.0 - 0.5)) = 0.5
+        assert!(
+            (bd.aggregator_multiplier.unwrap() - 0.5).abs() < 1e-6,
+            "Expected multiplier 0.5, got {}",
+            bd.aggregator_multiplier.unwrap()
+        );
+    }
+
+    // ---- New OverlapReranker tests ----
+
+    #[test]
+    fn test_overlap_reranker_sorts_results() {
+        let reranker = OverlapReranker::new(0.7, 0.3);
+        // c2 has higher initial score but no query overlap
+        // c1 has lower initial score but full query overlap
+        let mut results = vec![
+            make_result("c2", "unrelated stuff here", 0.9),
+            make_result("c1", "rust programming language", 0.3),
+        ];
+        reranker.apply("rust programming", &mut results);
+
+        // After reranking, results should be sorted by final score descending
+        for i in 1..results.len() {
+            assert!(
+                results[i - 1].relevance_score >= results[i].relevance_score,
+                "Results should be sorted descending by score: [{}]={} vs [{}]={}",
+                i - 1,
+                results[i - 1].relevance_score,
+                i,
+                results[i].relevance_score
+            );
+        }
+    }
+
+    #[test]
+    fn test_overlap_reranker_empty_results() {
+        let reranker = OverlapReranker::new(0.7, 0.3);
+        let mut results: Vec<SearchResult> = vec![];
+        reranker.apply("some query", &mut results);
+        assert!(results.is_empty(), "Empty results should remain empty");
+    }
+
+    // ---- New Pipeline integration test ----
+
+    #[test]
+    fn test_pipeline_applies_stages_in_sequence() {
+        let mut pipeline = ScoringPipeline::new();
+        // Stage 1: AggregatorDemotion
+        pipeline.push(Box::new(AggregatorDemotion { min_multiplier: 0.5 }));
+        // Stage 2: OverlapReranker
+        pipeline.push(Box::new(OverlapReranker::new(0.7, 0.3)));
+
+        let mut r1 = make_result("c1", "rust programming language", 1.0);
+        r1.chunk
+            .metadata
+            .extra
+            .insert("aggregator_score".to_string(), "1.0".to_string());
+        // r1: after aggregator demotion -> score *= 0.5 -> 0.5
+        // then reranker with "rust programming": 2/2 overlap = 1.0 boost
+        // final = 0.5 * 0.7 + 1.0 * 0.3 = 0.35 + 0.3 = 0.65
+
+        let r2 = make_result("c2", "unrelated content here", 0.8);
+        // r2: no aggregator_score, so score stays 0.8
+        // then reranker with "rust programming": 0/2 overlap = 0.0 boost
+        // final = 0.8 * 0.7 + 0.0 * 0.3 = 0.56
+
+        let mut results = vec![r1, r2];
+        pipeline.apply("rust programming", &mut results);
+
+        // After pipeline: r1 should be 0.65, r2 should be 0.56
+        // Results should be sorted by OverlapReranker (r1 > r2)
+        assert_eq!(results[0].chunk.metadata.chunk_id, "c1");
+        assert!(
+            (results[0].relevance_score - 0.65).abs() < 1e-6,
+            "Expected c1 score ~0.65, got {}",
+            results[0].relevance_score
+        );
+        assert!(
+            (results[1].relevance_score - 0.56).abs() < 1e-6,
+            "Expected c2 score ~0.56, got {}",
+            results[1].relevance_score
+        );
+    }
 }

@@ -115,4 +115,58 @@ mod tests {
         // Each CJK char is typically 1-2 tokens in cl100k_base
         assert!(count >= 2, "CJK should have multiple tokens, got {}", count);
     }
+
+    #[test]
+    fn test_o200k_base_encoding() {
+        let tok = BpeTokenizer::new("o200k_base").unwrap();
+        assert_eq!(tok.name(), "o200k_base");
+        let count = tok.count_tokens("Hello world");
+        assert!(count >= 2, "o200k_base should tokenize 'Hello world' into at least 2 tokens, got {}", count);
+    }
+
+    #[test]
+    fn test_p50k_base_encoding() {
+        let tok = BpeTokenizer::new("p50k_base").unwrap();
+        assert_eq!(tok.name(), "p50k_base");
+        let count = tok.count_tokens("Hello world");
+        assert!(count >= 2, "p50k_base should tokenize 'Hello world' into at least 2 tokens, got {}", count);
+    }
+
+    #[test]
+    fn test_r50k_base_encoding() {
+        let tok = BpeTokenizer::new("r50k_base").unwrap();
+        assert_eq!(tok.name(), "r50k_base");
+        let count = tok.count_tokens("Hello world");
+        assert!(count >= 2, "r50k_base should tokenize 'Hello world' into at least 2 tokens, got {}", count);
+    }
+
+    #[test]
+    fn test_whitespace_only_text() {
+        let tok = BpeTokenizer::new("cl100k_base").unwrap();
+        let count = tok.count_tokens("   \t\n  ");
+        // Whitespace-only text should not panic; token count may be 0 or small
+        assert!(count <= 5, "whitespace-only text should produce few tokens, got {}", count);
+    }
+
+    #[test]
+    fn test_long_text_token_count() {
+        let tok = BpeTokenizer::new("cl100k_base").unwrap();
+        // Build a 1000-word text
+        let words: Vec<&str> = vec![
+            "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog",
+            "and", "then", "runs", "through", "forest", "into", "meadow",
+            "where", "flowers", "bloom", "under", "bright",
+        ];
+        let text: String = (0..1000)
+            .map(|i| words[i % words.len()])
+            .collect::<Vec<&str>>()
+            .join(" ");
+
+        let count = tok.count_tokens(&text);
+        assert!(
+            count >= 800 && count <= 1500,
+            "1000-word text should produce 800-1500 tokens in cl100k_base, got {}",
+            count
+        );
+    }
 }

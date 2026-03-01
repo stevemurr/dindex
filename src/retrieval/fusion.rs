@@ -407,4 +407,71 @@ mod tests {
         let expected = 62.0 / 63.0;
         assert!((result.rrf_score - expected).abs() < 1e-6);
     }
+
+    #[test]
+    fn test_normalize_bm25_scores_negative_values() {
+        // BM25 can produce negative scores in some implementations
+        let mut results = vec![
+            ("c1".to_string(), -5.0),
+            ("c2".to_string(), 0.0),
+            ("c3".to_string(), 10.0),
+        ];
+        normalize_bm25_scores(&mut results);
+        // min = -5.0, max = 10.0, range = 15.0
+        // c1: (-5.0 - -5.0) / 15.0 = 0.0
+        // c2: (0.0 - -5.0) / 15.0 = 5.0/15.0 = 1/3
+        // c3: (10.0 - -5.0) / 15.0 = 1.0
+        assert!((results[0].1 - 0.0).abs() < 1e-6, "c1 should be 0.0, got {}", results[0].1);
+        assert!(
+            (results[1].1 - (1.0 / 3.0)).abs() < 1e-6,
+            "c2 should be ~0.333, got {}",
+            results[1].1
+        );
+        assert!((results[2].1 - 1.0).abs() < 1e-6, "c3 should be 1.0, got {}", results[2].1);
+
+        // All results should be in [0, 1]
+        for (id, score) in &results {
+            assert!(
+                *score >= 0.0 && *score <= 1.0,
+                "Score for {} should be in [0,1], got {}",
+                id,
+                score
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_bm25_scores_large_range() {
+        let mut results = vec![
+            ("c1".to_string(), 0.0),
+            ("c2".to_string(), 50000.0),
+            ("c3".to_string(), 100000.0),
+        ];
+        normalize_bm25_scores(&mut results);
+        // min = 0, max = 100000, range = 100000
+        assert!((results[0].1 - 0.0).abs() < 1e-6, "c1 should be 0.0, got {}", results[0].1);
+        assert!((results[1].1 - 0.5).abs() < 1e-6, "c2 should be 0.5, got {}", results[1].1);
+        assert!((results[2].1 - 1.0).abs() < 1e-6, "c3 should be 1.0, got {}", results[2].1);
+    }
+
+    #[test]
+    fn test_retrieval_method_serde_roundtrip() {
+        // Serialize and deserialize Dense
+        let dense_json = serde_json::to_string(&RetrievalMethod::Dense).unwrap();
+        assert_eq!(dense_json, "\"dense\"");
+        let dense_back: RetrievalMethod = serde_json::from_str(&dense_json).unwrap();
+        assert_eq!(dense_back, RetrievalMethod::Dense);
+
+        // Serialize and deserialize Bm25
+        let bm25_json = serde_json::to_string(&RetrievalMethod::Bm25).unwrap();
+        assert_eq!(bm25_json, "\"bm25\"");
+        let bm25_back: RetrievalMethod = serde_json::from_str(&bm25_json).unwrap();
+        assert_eq!(bm25_back, RetrievalMethod::Bm25);
+
+        // Roundtrip through a Vec
+        let methods = vec![RetrievalMethod::Dense, RetrievalMethod::Bm25];
+        let json = serde_json::to_string(&methods).unwrap();
+        let roundtripped: Vec<RetrievalMethod> = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped, methods);
+    }
 }

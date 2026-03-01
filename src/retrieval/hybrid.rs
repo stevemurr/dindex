@@ -894,4 +894,61 @@ mod tests {
 
         assert_eq!(results.len(), 2, "Empty filters should not exclude any results");
     }
+
+    #[test]
+    fn test_pipeline_built_with_reranking_enabled() {
+        let harness = TestHarness::new(64);
+        let retriever = harness.retriever(true);
+        // With reranking enabled, pipeline should have 2 stages:
+        // 1. AggregatorDemotion
+        // 2. OverlapReranker
+        assert_eq!(
+            retriever.scoring_pipeline.len(),
+            2,
+            "Pipeline with reranking enabled should have 2 stages"
+        );
+    }
+
+    #[test]
+    fn test_pipeline_built_with_reranking_disabled() {
+        let harness = TestHarness::new(64);
+        let retriever = harness.retriever(false);
+        // With reranking disabled, pipeline should have 1 stage:
+        // 1. AggregatorDemotion only
+        assert_eq!(
+            retriever.scoring_pipeline.len(),
+            1,
+            "Pipeline with reranking disabled should have 1 stage (aggregator only)"
+        );
+    }
+
+    #[test]
+    fn test_matched_by_populated_after_search() {
+        let harness = TestHarness::new(64);
+
+        let c1 = make_chunk("c1", "doc1", "machine learning algorithms overview");
+        let c2 = make_chunk("c2", "doc2", "machine learning neural networks overview");
+
+        harness
+            .indexer
+            .index_batch(&[
+                (c1, create_test_embedding(1, 64)),
+                (c2, create_test_embedding(2, 64)),
+            ])
+            .unwrap();
+
+        let retriever = harness.retriever(false);
+        let query = Query::new("machine learning", 10);
+        let embedding = create_test_embedding(1, 64);
+        let results = retriever.search(&query, Some(&embedding)).unwrap();
+
+        assert!(!results.is_empty(), "Should have results");
+        for result in &results {
+            assert!(
+                !result.matched_by.is_empty(),
+                "matched_by should be populated for chunk '{}'",
+                result.chunk.metadata.chunk_id
+            );
+        }
+    }
 }

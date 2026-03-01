@@ -231,4 +231,63 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
     }
+
+    #[test]
+    fn test_embed_batch_validated_single_item() {
+        let engine = make_engine(None);
+        let texts = vec!["single item".to_string()];
+        let result = engine.embed_batch_validated(&texts);
+        assert!(result.is_ok());
+        let embeddings = result.unwrap();
+        assert_eq!(embeddings.len(), 1, "single text should produce exactly 1 embedding");
+        assert_eq!(embeddings[0].len(), 4, "embedding should have 4 dimensions");
+    }
+
+    #[test]
+    fn test_cosine_similarity_mismatched_dimensions() {
+        // In debug builds, cosine_similarity panics via debug_assert_eq!;
+        // in release builds it returns 0.0. Use catch_unwind to handle both.
+        let result = std::panic::catch_unwind(|| {
+            let a = vec![1.0, 0.0, 0.0];
+            let b = vec![1.0, 0.0];
+            cosine_similarity(&a, &b)
+        });
+        match result {
+            Ok(sim) => {
+                // Release mode: should return 0.0
+                assert!(
+                    (sim - 0.0).abs() < 1e-6,
+                    "mismatched dimensions should return 0.0, got {}",
+                    sim
+                );
+            }
+            Err(_) => {
+                // Debug mode: panicked on debug_assert_eq!, which is expected
+            }
+        }
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vectors() {
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![0.0, 0.0, 0.0];
+        let result = cosine_similarity(&a, &b);
+        assert!(
+            (result - 0.0).abs() < 1e-6,
+            "zero vectors should return 0.0, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_identical_vectors() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0, 3.0];
+        let result = cosine_similarity(&a, &b);
+        assert!(
+            (result - 1.0).abs() < 1e-6,
+            "identical vectors should return 1.0, got {}",
+            result
+        );
+    }
 }

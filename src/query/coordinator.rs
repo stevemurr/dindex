@@ -682,4 +682,293 @@ mod tests {
             q_consistent, q_varied
         );
     }
+
+    // --- New tests for Distributed Query Merging (Redesign 3) ---
+
+    /// Helper to create a Chunk with a given chunk_id.
+    fn make_chunk(chunk_id: &str) -> Chunk {
+        Chunk {
+            metadata: crate::types::ChunkMetadata::new(chunk_id.to_string(), "d1".to_string()),
+            content: format!("content for {}", chunk_id),
+            token_count: 3,
+        }
+    }
+
+    #[test]
+    fn test_aggregation_three_nodes_max_score() {
+        let coordinator = make_coordinator();
+        let chunk = make_chunk("c1");
+
+        // Same chunk from 3 nodes with scores 0.5, 0.9, 0.7 — should keep 0.9
+        let all_results = vec![
+            ("node1".to_string(), vec![SearchResult::new(chunk.clone(), 0.5)]),
+            ("node2".to_string(), vec![SearchResult::new(chunk.clone(), 0.9)]),
+            ("node3".to_string(), vec![SearchResult::new(chunk.clone(), 0.7)]),
+        ];
+
+        let aggregated = coordinator.aggregate_results(all_results, 10);
+        assert_eq!(aggregated.len(), 1, "same chunk from 3 nodes should deduplicate to 1");
+        assert!(
+            (aggregated[0].relevance_score - 0.9).abs() < 1e-6,
+            "should keep max score 0.9, got {}",
+            aggregated[0].relevance_score,
+        );
+        assert_eq!(
+            aggregated[0].node_id,
+            Some("node2".to_string()),
+            "node_id should be from the highest-scoring source",
+        );
+    }
+
+    #[test]
+    fn test_aggregation_top_k_truncation() {
+        let coordinator = make_coordinator();
+
+        // Create 20 unique chunks with descending scores
+        let results: Vec<SearchResult> = (0..20)
+            .map(|i| {
+                let chunk = make_chunk(&format!("c_{}", i));
+                SearchResult::new(chunk, 1.0 - i as f32 * 0.04) // 1.0, 0.96, 0.92, ...
+            })
+            .collect();
+
+        let all_results = vec![("node1".to_string(), results)];
+        let aggregated = coordinator.aggregate_results(all_results, 5);
+
+        assert_eq!(aggregated.len(), 5, "top_k=5 should return exactly 5 results");
+        // Verify the top 5 highest scores are returned
+        assert!(
+            (aggregated[0].relevance_score - 1.0).abs() < 1e-6,
+            "first result should have score 1.0",
+        );
+        assert!(
+            (aggregated[4].relevance_score - 0.84).abs() < 1e-6,
+            "fifth result should have score 0.84, got {}",
+            aggregated[4].relevance_score,
+        );
+    }
+
+    #[test]
+    fn test_aggregation_empty_results() {
+        let coordinator = make_coordinator();
+        let all_results: Vec<(NodeId, Vec<SearchResult>)> = vec![];
+
+        let aggregated = coordinator.aggregate_results(all_results, 10);
+        assert!(aggregated.is_empty(), "empty node_results should return empty vec");
+    }
+
+    #[test]
+    fn test_aggregation_single_node() {
+        let coordinator = make_coordinator();
+
+        let chunk_a = make_chunk("ca");
+        let chunk_b = make_chunk("cb");
+        let results = vec![
+            SearchResult::new(chunk_a, 0.8),
+            SearchResult::new(chunk_b, 0.6),
+        ];
+
+        let all_results = vec![("only-node".to_string(), results)];
+        let aggregated = coordinator.aggregate_results(all_results, 10);
+
+        assert_eq!(aggregated.len(), 2, "single node results should pass through");
+        // Both should be tagged with the source node
+        for result in &aggregated {
+            assert_eq!(result.node_id, Some("only-node".to_string()));
+        }
+        // Should still be sorted by score
+        assert!(aggregated[0].relevance_score >= aggregated[1].relevance_score);
+    }
+
+    #[test]
+    fn test_aggregation_preserves_existing_node_id() {
+        let coordinator = make_coordinator();
+
+        let chunk = make_chunk("c1");
+        let mut result = SearchResult::new(chunk, 0.75);
+        result.node_id = Some("original-node".to_string());
+
+        let all_results = vec![("aggregating-node".to_string(), vec![result])];
+        let aggregated = coordinator.aggregate_results(all_results, 10);
+
+        assert_eq!(aggregated.len(), 1);
+        assert_eq!(
+            aggregated[0].node_id,
+            Some("original-node".to_string()),
+            "pre-set node_id should not be overwritten by the aggregation node_id",
+        );
+    }
+
+    #[test]
+    fn test_quality_estimate_no_candidates() {
+        let coordinator = make_coordinator();
+
+        // Plan with zero candidate nodes and no local query
+        let plan = QueryPlan {
+            embedding: vec![0.0; 768],
+            candidate_nodes: vec![],
+            query_local: false,
+            timeout: Duration::from_secs(10),
+        };
+
+        let responding: Vec<NodeId> = vec![];
+        let timed_out: Vec<NodeId> = vec![];
+        let results: Vec<(NodeId, Vec<SearchResult>)> = vec![];
+
+        let quality = coordinator.estimate_quality(&responding, &timed_out, &plan, &results);
+        assert!(
+            (quality - 1.0).abs() < 1e-6,
+            "zero candidates should return quality 1.0, got {}",
+            quality,
+        );
+    }
+
+    #[test]
+    fn test_quality_single_result_has_full_confidence() {
+        let coordinator = make_coordinator();
+
+        let plan = QueryPlan {
+            embedding: vec![0.0; 768],
+            candidate_nodes: vec![
+                CandidateNode { node_id: "node1".to_string(), similarity: 0.9, matching_centroids: vec![0] },
+            ],
+            query_local: false,
+            timeout: Duration::from_secs(10),
+        };
+
+        let responding = vec!["node1".to_string()];
+        let timed_out: Vec<NodeId> = vec![];
+
+        // Single result — confidence component should be 1.0
+        let results = make_test_results(&[0.7]);
+        let quality = coordinator.estimate_quality(&responding, &timed_out, &plan, &results);
+
+        // Manually compute expected quality:
+        // coverage: responded=1, expected=1 → response_ratio=1.0
+        //   weighted_coverage=1.0/1.0=1.0, total_weight=1.0 → coverage_score=(1.0+1.0)/2=1.0
+        // avg_score: 0.7
+        // confidence: 1.0 (single result)
+        // sufficiency: min(1/1, 1.0) = 1.0
+        // total = 1.0*0.3 + 0.7*0.3 + 1.0*0.2 + 1.0*0.2 = 0.3 + 0.21 + 0.2 + 0.2 = 0.91
+        let expected = 1.0 * 0.3 + 0.7 * 0.3 + 1.0 * 0.2 + 1.0 * 0.2;
+        assert!(
+            (quality - expected).abs() < 1e-5,
+            "single result should yield confidence=1.0 component; expected {}, got {}",
+            expected, quality,
+        );
+    }
+
+    #[test]
+    fn test_quality_sufficiency_capped_at_one() {
+        let coordinator = make_coordinator();
+
+        let plan = QueryPlan {
+            embedding: vec![0.0; 768],
+            candidate_nodes: vec![
+                CandidateNode { node_id: "node1".to_string(), similarity: 0.9, matching_centroids: vec![0] },
+                CandidateNode { node_id: "node2".to_string(), similarity: 0.8, matching_centroids: vec![1] },
+            ],
+            query_local: false,
+            timeout: Duration::from_secs(10),
+        };
+
+        let responding = vec!["node1".to_string(), "node2".to_string()];
+        let timed_out: Vec<NodeId> = vec![];
+
+        // 100 results from 2 candidates — sufficiency = 100/2 = 50, capped at 1.0
+        let many_scores: Vec<f32> = (0..100).map(|i| 0.8 - (i as f32) * 0.005).collect();
+        let results = make_test_results(&many_scores);
+        let quality = coordinator.estimate_quality(&responding, &timed_out, &plan, &results);
+
+        // Quality must be <= 1.0 (sufficiency capped)
+        assert!(
+            quality <= 1.0,
+            "quality should not exceed 1.0 even with many results, got {}",
+            quality,
+        );
+        // Also verify it's a reasonable value (all components should be positive)
+        assert!(
+            quality > 0.0,
+            "quality should be positive, got {}",
+            quality,
+        );
+    }
+
+    #[test]
+    fn test_aggregation_different_chunks_from_nodes() {
+        let coordinator = make_coordinator();
+
+        // Three nodes, each returning a unique chunk
+        let all_results = vec![
+            ("node1".to_string(), vec![SearchResult::new(make_chunk("c1"), 0.9)]),
+            ("node2".to_string(), vec![SearchResult::new(make_chunk("c2"), 0.8)]),
+            ("node3".to_string(), vec![SearchResult::new(make_chunk("c3"), 0.7)]),
+        ];
+
+        let aggregated = coordinator.aggregate_results(all_results, 10);
+        assert_eq!(aggregated.len(), 3, "unique chunks from each node should all appear");
+
+        let chunk_ids: Vec<&str> = aggregated.iter().map(|r| r.chunk.metadata.chunk_id.as_str()).collect();
+        assert!(chunk_ids.contains(&"c1"));
+        assert!(chunk_ids.contains(&"c2"));
+        assert!(chunk_ids.contains(&"c3"));
+
+        // Verify correct node_id tagging
+        for result in &aggregated {
+            match result.chunk.metadata.chunk_id.as_str() {
+                "c1" => assert_eq!(result.node_id, Some("node1".to_string())),
+                "c2" => assert_eq!(result.node_id, Some("node2".to_string())),
+                "c3" => assert_eq!(result.node_id, Some("node3".to_string())),
+                _ => panic!("unexpected chunk_id"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_aggregation_score_ordering_with_many_chunks() {
+        let coordinator = make_coordinator();
+
+        // 10 chunks with deliberately non-sorted scores spread across two nodes
+        let node1_results = vec![
+            SearchResult::new(make_chunk("c1"), 0.3),
+            SearchResult::new(make_chunk("c2"), 0.95),
+            SearchResult::new(make_chunk("c3"), 0.1),
+            SearchResult::new(make_chunk("c4"), 0.7),
+            SearchResult::new(make_chunk("c5"), 0.55),
+        ];
+        let node2_results = vec![
+            SearchResult::new(make_chunk("c6"), 0.88),
+            SearchResult::new(make_chunk("c7"), 0.42),
+            SearchResult::new(make_chunk("c8"), 0.61),
+            SearchResult::new(make_chunk("c9"), 0.2),
+            SearchResult::new(make_chunk("c10"), 0.77),
+        ];
+
+        let all_results = vec![
+            ("node1".to_string(), node1_results),
+            ("node2".to_string(), node2_results),
+        ];
+
+        let aggregated = coordinator.aggregate_results(all_results, 10);
+        assert_eq!(aggregated.len(), 10, "all 10 unique chunks should appear");
+
+        // Verify strictly descending score order
+        for i in 1..aggregated.len() {
+            assert!(
+                aggregated[i - 1].relevance_score >= aggregated[i].relevance_score,
+                "results should be sorted descending by score: position {} has {} but position {} has {}",
+                i - 1, aggregated[i - 1].relevance_score, i, aggregated[i].relevance_score,
+            );
+        }
+
+        // Verify the expected order: 0.95, 0.88, 0.77, 0.7, 0.61, 0.55, 0.42, 0.3, 0.2, 0.1
+        let expected_scores = [0.95, 0.88, 0.77, 0.7, 0.61, 0.55, 0.42, 0.3, 0.2, 0.1];
+        for (i, &expected) in expected_scores.iter().enumerate() {
+            assert!(
+                (aggregated[i].relevance_score - expected).abs() < 1e-6,
+                "position {} should have score {}, got {}",
+                i, expected, aggregated[i].relevance_score,
+            );
+        }
+    }
 }

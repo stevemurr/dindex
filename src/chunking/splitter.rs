@@ -671,4 +671,162 @@ mod tests {
             assert!(chunk.token_count > 0);
         }
     }
+
+    #[test]
+    fn test_bpe_splitter_respects_token_budget() {
+        let config = ChunkingConfig {
+            chunk_size: 30,
+            overlap_fraction: 0.15,
+            min_chunk_size: 5,
+            max_chunk_size: 200,
+        };
+        let splitter = bpe_splitter(config.clone());
+        let tok = BpeTokenizer::new("cl100k_base").unwrap();
+
+        let doc = Document::new(
+            "The quick brown fox jumps over the lazy dog. \
+             Pack my box with five dozen liquor jugs. \
+             How vexingly quick daft zebras jump. \
+             The five boxing wizards jump quickly. \
+             Bright vixens jump and dozy fowl quack. \
+             Quick wafting zephyrs vex bold Jim."
+        );
+
+        let chunks = splitter.split_document(&doc);
+        assert!(!chunks.is_empty(), "should produce at least one chunk");
+
+        for chunk in &chunks {
+            let actual_tokens = tok.count_tokens(&chunk.content);
+            assert!(
+                actual_tokens <= config.chunk_size * 2,
+                "chunk has {} tokens, exceeds 2x target of {} tokens: {:?}",
+                actual_tokens,
+                config.chunk_size,
+                &chunk.content[..chunk.content.len().min(60)]
+            );
+        }
+    }
+
+    #[test]
+    fn test_splitter_with_no_sentence_boundaries() {
+        let config = ChunkingConfig {
+            chunk_size: 20,
+            overlap_fraction: 0.15,
+            min_chunk_size: 5,
+            max_chunk_size: 100,
+        };
+        let splitter = heuristic_splitter(config);
+
+        // Text with no periods, newlines, exclamation marks, or question marks
+        let doc = Document::new(
+            "word ".repeat(100).trim().to_string()
+        );
+
+        let chunks = splitter.split_document(&doc);
+        assert!(
+            !chunks.is_empty(),
+            "text without sentence boundaries should still be chunked"
+        );
+        for chunk in &chunks {
+            assert!(!chunk.content.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_split_into_sentences_exclamation_and_question() {
+        let sentences = split_into_sentences("Hello! How are you? Fine.");
+        assert_eq!(
+            sentences.len(),
+            3,
+            "should split into 3 sentences, got {:?}",
+            sentences
+        );
+    }
+
+    #[test]
+    fn test_split_into_sentences_preserves_trailing_space() {
+        let original = "Hello world. This is a test. And another sentence.";
+        let sentences = split_into_sentences(original);
+        let reconstructed: String = sentences.concat();
+        assert_eq!(
+            reconstructed, original,
+            "concatenation of sentences should reproduce original text"
+        );
+    }
+
+    #[test]
+    fn test_splitter_document_metadata_propagation() {
+        let config = ChunkingConfig {
+            chunk_size: 100,
+            overlap_fraction: 0.15,
+            min_chunk_size: 5,
+            max_chunk_size: 200,
+        };
+        let splitter = heuristic_splitter(config);
+
+        let mut doc = Document::new("Some content for a document that should be chunked.");
+        doc.url = Some("https://example.com/page".to_string());
+        doc.title = Some("Test Page".to_string());
+        doc.metadata.insert("author".to_string(), "Alice".to_string());
+
+        let chunks = splitter.split_document(&doc);
+        assert!(!chunks.is_empty());
+
+        for chunk in &chunks {
+            assert_eq!(
+                chunk.metadata.source_url.as_deref(),
+                Some("https://example.com/page"),
+                "source_url should be propagated"
+            );
+            assert_eq!(
+                chunk.metadata.source_title.as_deref(),
+                Some("Test Page"),
+                "source_title should be propagated"
+            );
+            assert_eq!(
+                chunk.metadata.extra.get("author").map(|s| s.as_str()),
+                Some("Alice"),
+                "extra metadata should be propagated"
+            );
+        }
+    }
+
+    #[test]
+    fn test_splitter_position_in_doc() {
+        let config = ChunkingConfig {
+            chunk_size: 20,
+            overlap_fraction: 0.1,
+            min_chunk_size: 5,
+            max_chunk_size: 100,
+        };
+        let splitter = heuristic_splitter(config);
+
+        let doc = Document::new(
+            "First sentence here. Second sentence here. \
+             Third sentence here. Fourth sentence here. \
+             Fifth sentence here. Sixth sentence here. \
+             Seventh sentence here. Eighth sentence here."
+        );
+
+        let chunks = splitter.split_document(&doc);
+        if chunks.len() >= 2 {
+            // position_in_doc should increase through chunks
+            for i in 1..chunks.len() {
+                assert!(
+                    chunks[i].metadata.position_in_doc >= chunks[i - 1].metadata.position_in_doc,
+                    "position_in_doc should increase: chunk {} has {}, chunk {} has {}",
+                    i - 1,
+                    chunks[i - 1].metadata.position_in_doc,
+                    i,
+                    chunks[i].metadata.position_in_doc
+                );
+            }
+            // First chunk should start at or near 0
+            assert!(
+                chunks[0].metadata.position_in_doc < 0.1,
+                "first chunk position should be near 0, got {}",
+                chunks[0].metadata.position_in_doc
+            );
+        }
+    }
 }

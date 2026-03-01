@@ -111,4 +111,51 @@ mod tests {
         let tok = HeuristicTokenizer::new();
         assert!(tok.max_token_length().is_none());
     }
+
+    #[test]
+    fn test_punctuation_heavy_text() {
+        let tok = HeuristicTokenizer::new();
+        let count = tok.count_tokens("Hello!!! What??? No... Yes; maybe: okay.");
+        // There are recognizable words here, so token count should be reasonable
+        assert!(
+            count >= 3,
+            "punctuation-heavy text should still have at least 3 tokens, got {}",
+            count
+        );
+    }
+
+    #[test]
+    fn test_single_word() {
+        let tok = HeuristicTokenizer::new();
+        let count = tok.count_tokens("hello");
+        assert!(count >= 1, "single word should return at least 1 token, got {}", count);
+    }
+
+    #[test]
+    fn test_korean_text() {
+        let tok = HeuristicTokenizer::new();
+        // Korean Hangul text: "안녕하세요 세계" (Hello world)
+        let count = tok.count_tokens("안녕하세요 세계");
+        // "안녕하세요" = 5 Hangul syllables, "세계" = 2 Hangul syllables
+        // Each Hangul syllable is in the CJK block and counts as ~1 token
+        assert!(
+            count >= 5,
+            "Korean text with 7 Hangul chars should have at least 5 tokens, got {}",
+            count
+        );
+    }
+
+    #[test]
+    fn test_japanese_mixed_text() {
+        let tok = HeuristicTokenizer::new();
+        // Mixed Japanese: Hiragana + Katakana + Kanji
+        // "こんにちは" (Hiragana, 5 chars) + "カタカナ" (Katakana, 4 chars) + "漢字" (Kanji, 2 chars)
+        let count = tok.count_tokens("こんにちは カタカナ 漢字");
+        // 5 Hiragana + 4 Katakana + 2 Kanji = 11 CJK chars total
+        assert!(
+            count >= 8,
+            "Japanese mixed text with 11 CJK chars should have at least 8 tokens, got {}",
+            count
+        );
+    }
 }
