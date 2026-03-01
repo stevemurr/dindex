@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use tracing::{debug, info};
 
 use crate::config::Config;
-use crate::embedding::{generate_with_fallback, EmbeddingEngine};
+use crate::embedding::{generate_embedding, EmbeddingEngine};
 use crate::index::{ChunkStorage, IndexStack, VectorIndex};
 use crate::retrieval::{Bm25Index, HybridIndexer, HybridRetriever};
 use crate::types::{Chunk, Query, QueryFilters, SearchResult};
@@ -74,8 +74,8 @@ impl IndexManager {
         let start = Instant::now();
         debug!("Searching for: {} (top_k={}, filters={:?})", query_text, top_k, filters.is_some());
 
-        // Generate query embedding (uses real engine if available, hash-based fallback otherwise)
-        let query_embedding = self.generate_embedding(query_text);
+        // Generate query embedding
+        let query_embedding = self.generate_embedding(query_text)?;
 
         // Create query with filters — HybridRetriever handles filtering internally
         let mut query = Query::new(query_text, top_k);
@@ -110,14 +110,27 @@ impl IndexManager {
 
     /// Index chunks without embeddings (will generate them)
     pub fn index_chunks(&self, chunks: Vec<Chunk>) -> Result<Vec<u64>> {
-        // Generate embeddings for each chunk (uses real engine if available, hash-based fallback otherwise)
-        let chunks_with_embeddings: Vec<_> = chunks
-            .into_iter()
-            .map(|c| {
-                let embedding = self.generate_embedding(&c.content);
-                (c, embedding)
-            })
-            .collect();
+        // Generate embeddings for each chunk, skipping chunks that fail
+        let mut chunks_with_embeddings = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            match self.generate_embedding(&chunk.content) {
+                Ok(embedding) => chunks_with_embeddings.push((chunk, embedding)),
+                Err(e) => {
+                    tracing::warn!(
+                        "Skipping chunk {}: embedding generation failed: {}",
+                        chunk.metadata.chunk_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        if chunks_with_embeddings.is_empty() {
+            anyhow::bail!(
+                "All chunks failed embedding generation. \
+                 Ensure an embedding backend is configured in dindex.toml."
+            );
+        }
 
         self.index_batch(&chunks_with_embeddings)
     }
@@ -274,11 +287,13 @@ impl IndexManager {
         *guard = Some(engine);
     }
 
-    /// Generate embedding for content using real embedding engine
-    fn generate_embedding(&self, content: &str) -> Vec<f32> {
+    /// Generate embedding for content using the real embedding engine.
+    ///
+    /// Returns an error if no engine is available or embedding generation fails.
+    fn generate_embedding(&self, content: &str) -> Result<Vec<f32>> {
         let guard = self.embedding_engine.read();
         let engine_ref = guard.as_ref().map(|arc| arc.as_ref());
-        generate_with_fallback(engine_ref, content, self.config.embedding.dimensions)
+        generate_embedding(engine_ref, content)
     }
 
     /// Get file size, returning 0 if file doesn't exist

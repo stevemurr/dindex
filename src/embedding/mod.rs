@@ -31,6 +31,6 @@ mod service;
 
 pub use engine::*;
 pub use service::{
-    generate_with_fallback, hash_based_embedding,
+    generate_embedding, hash_based_embedding,
     init_embedding_engine,
 };

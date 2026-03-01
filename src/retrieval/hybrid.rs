@@ -2,8 +2,11 @@
 
 use super::{
     bm25::Bm25Index,
-    fusion::{reciprocal_rank_fusion, to_ranked_results, RankedResult, RetrievalMethod, RrfConfig},
-    reranker::SimpleReranker,
+    fusion::{
+        normalize_bm25_scores, reciprocal_rank_fusion, to_ranked_results, RankedResult,
+        RetrievalMethod, RrfConfig,
+    },
+    scoring::{AggregatorDemotion, OverlapReranker, ScoringPipeline},
 };
 use crate::config::RetrievalConfig;
 use crate::embedding::EmbeddingEngine;
@@ -27,10 +30,16 @@ pub struct HybridRetriever {
     embedding_engine: Option<Arc<EmbeddingEngine>>,
     /// Configuration
     config: RetrievalConfig,
+    /// Post-fusion scoring pipeline (aggregator demotion, reranking, etc.)
+    scoring_pipeline: ScoringPipeline,
 }
 
 impl HybridRetriever {
-    /// Create a new hybrid retriever
+    /// Create a new hybrid retriever.
+    ///
+    /// Builds the scoring pipeline from config: aggregator demotion is always
+    /// active, overlap reranking is enabled via `config.enable_reranking`, and
+    /// reranker weights come from `config.reranker_score_weight` / `reranker_overlap_weight`.
     pub fn new(
         vector_index: Arc<VectorIndex>,
         bm25_index: Arc<Bm25Index>,
@@ -38,13 +47,35 @@ impl HybridRetriever {
         embedding_engine: Option<Arc<EmbeddingEngine>>,
         config: RetrievalConfig,
     ) -> Self {
+        let scoring_pipeline = Self::build_pipeline(&config);
         Self {
             vector_index,
             bm25_index,
             chunk_storage,
             embedding_engine,
             config,
+            scoring_pipeline,
         }
+    }
+
+    /// Build the scoring pipeline from retrieval config.
+    fn build_pipeline(config: &RetrievalConfig) -> ScoringPipeline {
+        let mut pipeline = ScoringPipeline::new();
+
+        // Aggregator demotion is always active (noop when no metadata present)
+        pipeline.push(Box::new(AggregatorDemotion {
+            min_multiplier: config.aggregator_min_multiplier,
+        }));
+
+        // Overlap reranker, gated by config
+        if config.enable_reranking {
+            pipeline.push(Box::new(OverlapReranker::with_stop_words(
+                config.reranker_score_weight,
+                config.reranker_overlap_weight,
+            )));
+        }
+
+        pipeline
     }
 
     /// Search using hybrid retrieval
@@ -100,10 +131,12 @@ impl HybridRetriever {
         // BM25 search
         if self.config.enable_bm25 {
             let bm25_results = self.bm25_index.search(&query.text, candidate_count)?;
-            let ranked: Vec<(ChunkId, f32)> = bm25_results
+            let mut ranked: Vec<(ChunkId, f32)> = bm25_results
                 .iter()
                 .map(|r| (r.chunk_id.clone(), r.score))
                 .collect();
+            // Normalize raw BM25 scores to [0, 1] for consistent scoring
+            normalize_bm25_scores(&mut ranked);
             ranked_lists.push(to_ranked_results(&ranked, RetrievalMethod::Bm25));
             debug!("BM25 search: {} results", bm25_results.len());
         }
@@ -150,21 +183,8 @@ impl HybridRetriever {
             }
         }
 
-        // Apply aggregator score demotion
-        for result in &mut results {
-            if let Some(score_str) = result.chunk.metadata.extra.get("aggregator_score") {
-                if let Ok(aggregator_score) = score_str.parse::<f32>() {
-                    let multiplier = 1.0 - (aggregator_score * (1.0 - self.config.aggregator_min_multiplier));
-                    result.relevance_score *= multiplier;
-                }
-            }
-        }
-
-        // Apply reranking if enabled
-        if self.config.enable_reranking {
-            debug!("Reranking {} results", results.len());
-            SimpleReranker::rerank(&query.text, &mut results);
-        }
+        // Apply scoring pipeline (aggregator demotion, reranking, etc.)
+        self.scoring_pipeline.apply(&query.text, &mut results);
 
         info!(
             "Hybrid search for '{}': {} results",

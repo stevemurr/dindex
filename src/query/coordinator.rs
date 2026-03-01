@@ -3,9 +3,7 @@
 use crate::config::Config;
 use crate::embedding::EmbeddingEngine;
 use crate::network::NetworkHandle;
-use crate::retrieval::{
-    reciprocal_rank_fusion, HybridRetriever, RrfConfig, SimpleReranker,
-};
+use crate::retrieval::HybridRetriever;
 use crate::routing::{CandidateNode, QueryRouter};
 use crate::types::{Embedding, NodeId, Query, SearchResult};
 use anyhow::Result;
@@ -122,16 +120,23 @@ impl QueryCoordinator {
                 .filter_map(|c| c.node_id.parse().ok())
                 .collect();
 
-            // If no candidates from semantic routing, fall back to all connected peers
+            // If no candidates from semantic routing, fall back to a random subset
+            // of connected peers (capped at max_fanout_peers) instead of all peers
             if peer_ids.is_empty() {
                 match network.get_peers().await {
                     Ok(peers) => {
-                        peer_ids = peers.into_iter().map(|p| p.peer_id).collect();
-                        if !peer_ids.is_empty() {
+                        let mut fallback_peers: Vec<PeerId> =
+                            peers.into_iter().map(|p| p.peer_id).collect();
+                        if !fallback_peers.is_empty() {
+                            use rand::seq::SliceRandom;
+                            fallback_peers.shuffle(&mut rand::thread_rng());
+                            fallback_peers
+                                .truncate(self.config.retrieval.max_fanout_peers);
                             debug!(
-                                "No semantic routing candidates, querying all {} connected peers",
-                                peer_ids.len()
+                                "No semantic routing candidates, querying random subset of {} connected peers",
+                                fallback_peers.len()
                             );
+                            peer_ids = fallback_peers;
                         }
                     }
                     Err(e) => {
@@ -228,13 +233,8 @@ impl QueryCoordinator {
         // Calculate quality estimate (before aggregate_results consumes all_results)
         let quality = self.estimate_quality(&responding_nodes, &timed_out_nodes, &plan, &all_results);
 
-        // Aggregate results using RRF
-        let aggregated = self.aggregate_results(all_results, query.top_k);
-
-        // Rerank results
-        let mut final_results = aggregated;
-        SimpleReranker::rerank(&query.text, &mut final_results);
-        final_results.truncate(query.top_k);
+        // Aggregate results using score-based merge (no double-RRF)
+        let final_results = self.aggregate_results(all_results, query.top_k);
 
         let total_time = start.elapsed().as_millis() as u64;
 
@@ -281,7 +281,13 @@ impl QueryCoordinator {
         })
     }
 
-    /// Aggregate results from multiple nodes using RRF
+    /// Aggregate results from multiple nodes using score-based merge.
+    ///
+    /// Each node's results already have RRF-fused scores from their local hybrid
+    /// retriever. Rather than re-applying RRF (which destroys score meaning by
+    /// treating rank-1 results identically regardless of score), we take the max
+    /// score per chunk_id across all nodes. This preserves the quality signal from
+    /// each node's retrieval pipeline and keeps `matched_by` attribution intact.
     fn aggregate_results(
         &self,
         node_results: Vec<(NodeId, Vec<SearchResult>)>,
@@ -291,34 +297,16 @@ impl QueryCoordinator {
             return Vec::new();
         }
 
-        // Convert to ranked lists for RRF
-        let ranked_lists: Vec<Vec<crate::retrieval::RankedResult>> = node_results
-            .iter()
-            .map(|(_node_id, results)| {
-                results
-                    .iter()
-                    .enumerate()
-                    .map(|(rank, r)| crate::retrieval::RankedResult {
-                        chunk_id: r.chunk.metadata.chunk_id.clone(),
-                        rank: rank + 1,
-                        original_score: r.relevance_score,
-                        method: crate::retrieval::RetrievalMethod::Dense,
-                    })
-                    .collect()
-            })
-            .collect();
-
-        let rrf_config = RrfConfig {
-            k: self.config.retrieval.rrf_k,
-        };
-        let fused = reciprocal_rank_fusion(&ranked_lists, &rrf_config);
-
-        // Map back to SearchResult, keeping the highest-scored version of each chunk
-        let mut chunk_map: HashMap<String, SearchResult> = HashMap::new();
-        for (_, results) in node_results {
-            for result in results {
-                chunk_map
-                    .entry(result.chunk.metadata.chunk_id.clone())
+        // Keep the highest-scored version of each chunk across all nodes.
+        // This preserves matched_by and node_id from the best-scoring source.
+        let mut best: HashMap<String, SearchResult> = HashMap::new();
+        for (node_id, results) in node_results {
+            for mut result in results {
+                // Tag with source node if not already set
+                if result.node_id.is_none() {
+                    result.node_id = Some(node_id.clone());
+                }
+                best.entry(result.chunk.metadata.chunk_id.clone())
                     .and_modify(|existing| {
                         if result.relevance_score > existing.relevance_score {
                             *existing = result.clone();
@@ -328,25 +316,18 @@ impl QueryCoordinator {
             }
         }
 
-        fused
-            .into_iter()
-            .take(top_k)
-            .filter_map(|f| {
-                chunk_map.get(&f.chunk_id).map(|r| {
-                    let mut result = r.clone();
-                    result.relevance_score = f.rrf_score;
-                    result.matched_by = f.contributing_methods.clone();
-                    result
-                })
-            })
-            .collect()
+        let mut merged: Vec<SearchResult> = best.into_values().collect();
+        merged.sort_by(|a, b| b.relevance_score.total_cmp(&a.relevance_score));
+        merged.truncate(top_k);
+        merged
     }
 
-    /// Estimate query result quality using response coverage, result scores, and sufficiency.
+    /// Estimate query result quality using response coverage, result scores, confidence, and sufficiency.
     ///
     /// Quality is a weighted combination of:
-    /// - Response coverage (40%): fraction of expected peers that responded, weighted by rank
-    /// - Average relevance score (40%): mean score of all returned results
+    /// - Response coverage (30%): fraction of expected peers that responded, weighted by rank
+    /// - Average relevance score (30%): mean score of all returned results
+    /// - Score confidence (20%): 1 - coefficient of variation; high variance = uncertain results
     /// - Result sufficiency (20%): total_results / expected (capped at 1.0)
     fn estimate_quality(
         &self,
@@ -383,21 +364,40 @@ impl QueryCoordinator {
         };
 
         // 2. Average relevance score of returned results
-        let total_results: usize = results.iter().map(|(_, r)| r.len()).sum();
+        let scores: Vec<f32> = results
+            .iter()
+            .flat_map(|(_, r)| r.iter().map(|s| s.relevance_score))
+            .collect();
+        let total_results = scores.len();
         let avg_score = if total_results > 0 {
-            results.iter()
-                .flat_map(|(_, r)| r.iter().map(|s| s.relevance_score))
-                .sum::<f32>() / total_results as f32
+            scores.iter().sum::<f32>() / total_results as f32
         } else {
             0.0
         };
 
-        // 3. Result sufficiency: did we get enough results?
+        // 3. Score confidence: 1 - coefficient of variation (clamped to [0, 1])
+        // High variance among result scores suggests uncertain/mixed quality results.
+        let confidence = if total_results > 1 && avg_score > 0.0 {
+            let variance = scores
+                .iter()
+                .map(|s| (s - avg_score).powi(2))
+                .sum::<f32>()
+                / total_results as f32;
+            let std_dev = variance.sqrt();
+            let cv = std_dev / avg_score; // coefficient of variation
+            (1.0 - cv).clamp(0.0, 1.0)
+        } else if total_results == 1 {
+            1.0 // single result has perfect confidence
+        } else {
+            0.0 // no results = no confidence
+        };
+
+        // 4. Result sufficiency: did we get enough results?
         let expected_results = plan.candidate_nodes.len().max(1); // at least 1
         let sufficiency = (total_results as f32 / expected_results as f32).min(1.0);
 
         // Weighted combination
-        coverage_score * 0.4 + avg_score * 0.4 + sufficiency * 0.2
+        coverage_score * 0.3 + avg_score * 0.3 + confidence * 0.2 + sufficiency * 0.2
     }
 }
 
@@ -573,5 +573,113 @@ mod tests {
 
         let aggregated = coordinator.aggregate_results(all_results, 10);
         assert_eq!(aggregated.len(), 1);
+        // Score-based merge keeps the highest score (0.9), not a re-fused score
+        assert!(
+            (aggregated[0].relevance_score - 0.9).abs() < 1e-6,
+            "should keep max score, got {}",
+            aggregated[0].relevance_score,
+        );
+    }
+
+    #[test]
+    fn test_aggregation_preserves_matched_by() {
+        let coordinator = make_coordinator();
+
+        let chunk = Chunk {
+            metadata: crate::types::ChunkMetadata::new("c1".to_string(), "d1".to_string()),
+            content: "content 1".to_string(),
+            token_count: 2,
+        };
+
+        let mut result = SearchResult::new(chunk, 0.8);
+        result.matched_by = vec![
+            crate::retrieval::RetrievalMethod::Dense,
+            crate::retrieval::RetrievalMethod::Bm25,
+        ];
+
+        let all_results = vec![("node1".to_string(), vec![result])];
+        let aggregated = coordinator.aggregate_results(all_results, 10);
+
+        assert_eq!(aggregated.len(), 1);
+        // matched_by from the remote node should be preserved, not overwritten
+        assert_eq!(aggregated[0].matched_by.len(), 2);
+        assert!(aggregated[0].matched_by.contains(&crate::retrieval::RetrievalMethod::Dense));
+        assert!(aggregated[0].matched_by.contains(&crate::retrieval::RetrievalMethod::Bm25));
+    }
+
+    #[test]
+    fn test_aggregation_tags_node_id() {
+        let coordinator = make_coordinator();
+
+        let chunk = Chunk {
+            metadata: crate::types::ChunkMetadata::new("c1".to_string(), "d1".to_string()),
+            content: "content 1".to_string(),
+            token_count: 2,
+        };
+
+        let result = SearchResult::new(chunk, 0.8);
+        let all_results = vec![("remote-node".to_string(), vec![result])];
+        let aggregated = coordinator.aggregate_results(all_results, 10);
+
+        assert_eq!(aggregated[0].node_id, Some("remote-node".to_string()));
+    }
+
+    #[test]
+    fn test_aggregation_sorts_by_score() {
+        let coordinator = make_coordinator();
+
+        let chunk_a = Chunk {
+            metadata: crate::types::ChunkMetadata::new("ca".to_string(), "d1".to_string()),
+            content: "low score".to_string(),
+            token_count: 2,
+        };
+        let chunk_b = Chunk {
+            metadata: crate::types::ChunkMetadata::new("cb".to_string(), "d1".to_string()),
+            content: "high score".to_string(),
+            token_count: 2,
+        };
+
+        let all_results = vec![(
+            "node1".to_string(),
+            vec![
+                SearchResult::new(chunk_a, 0.3),
+                SearchResult::new(chunk_b, 0.9),
+            ],
+        )];
+
+        let aggregated = coordinator.aggregate_results(all_results, 10);
+        assert_eq!(aggregated.len(), 2);
+        assert_eq!(aggregated[0].chunk.metadata.chunk_id, "cb");
+        assert_eq!(aggregated[1].chunk.metadata.chunk_id, "ca");
+    }
+
+    #[test]
+    fn test_quality_confidence_penalizes_high_variance() {
+        let coordinator = make_coordinator();
+        let plan = QueryPlan {
+            embedding: vec![0.0; 768],
+            candidate_nodes: vec![
+                CandidateNode { node_id: "node1".to_string(), similarity: 0.9, matching_centroids: vec![0] },
+            ],
+            query_local: false,
+            timeout: Duration::from_secs(10),
+        };
+
+        let responding = vec!["node1".to_string()];
+        let timed_out: Vec<NodeId> = vec![];
+
+        // Consistent high scores -> high confidence
+        let consistent = make_test_results(&[0.9, 0.85, 0.88]);
+        let q_consistent = coordinator.estimate_quality(&responding, &timed_out, &plan, &consistent);
+
+        // Wildly varying scores -> low confidence
+        let varied = make_test_results(&[0.95, 0.1, 0.5]);
+        let q_varied = coordinator.estimate_quality(&responding, &timed_out, &plan, &varied);
+
+        assert!(
+            q_consistent > q_varied,
+            "consistent scores ({}) should yield higher quality than varied scores ({})",
+            q_consistent, q_varied
+        );
     }
 }

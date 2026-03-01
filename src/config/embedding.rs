@@ -115,6 +115,11 @@ pub struct EmbeddingConfig {
     /// GPU device ID
     #[serde(default)]
     pub gpu_device_id: usize,
+    /// Explicit tiktoken encoding name (e.g., "cl100k_base", "o200k_base").
+    /// When set, the BPE tokenizer is used for accurate token counting.
+    /// If not set, the factory infers from the model name or falls back to heuristic.
+    #[serde(default)]
+    pub tokenizer_encoding: Option<String>,
 }
 
 fn default_model_name() -> String {
@@ -200,6 +205,7 @@ impl Default for EmbeddingConfig {
                 .min(8),
             use_gpu: default_use_gpu(),
             gpu_device_id: 0,
+            tokenizer_encoding: None,
         }
     }
 }

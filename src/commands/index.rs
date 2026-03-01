@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use dindex::{
-    chunking::TextSplitter,
+    chunking::{create_tokenizer, TextSplitter},
     client::{self, ClientError},
     config::Config,
     content::{extract_from_bytes_with_url, extract_from_path, ContentType},
@@ -100,8 +100,9 @@ pub async fn index_document(
         doc = doc.with_url(u);
     }
 
-    // Split into chunks
-    let splitter = TextSplitter::new(config.chunking.clone());
+    // Split into chunks using tokenizer matched to embedding model
+    let tokenizer = create_tokenizer(&config.embedding);
+    let splitter = TextSplitter::new(config.chunking.clone(), tokenizer);
     let chunks = splitter.split_document(&doc);
 
     info!("Created {} chunks", chunks.len());
@@ -137,12 +138,12 @@ pub async fn index_document(
     // Extract texts for batch embedding
     let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
 
-    // Generate real embeddings using the embedding engine
+    // Generate real embeddings using the embedding engine (with count validation)
     let embeddings = engine
-        .embed_batch(&texts)
+        .embed_batch_validated(&texts)
         .context("Failed to generate embeddings")?;
 
-    // Pair chunks with embeddings
+    // Pair chunks with embeddings (validated: counts are guaranteed to match)
     let chunks_with_embeddings: Vec<_> = chunks
         .into_iter()
         .zip(embeddings.into_iter())

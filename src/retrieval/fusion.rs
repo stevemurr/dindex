@@ -118,6 +118,31 @@ pub fn reciprocal_rank_fusion(
     results
 }
 
+/// Normalize BM25 scores within a result set using min-max scaling to [0, 1].
+///
+/// Raw BM25 scores are unbounded and vary across queries.  Min-max scaling
+/// within the result set maps them to a consistent range so they can be
+/// compared with dense similarity scores.  When all scores are identical
+/// (max == min), every result receives 1.0.
+pub fn normalize_bm25_scores(results: &mut [(ChunkId, f32)]) {
+    if results.is_empty() {
+        return;
+    }
+    let min = results.iter().map(|(_, s)| *s).fold(f32::INFINITY, f32::min);
+    let max = results.iter().map(|(_, s)| *s).fold(f32::NEG_INFINITY, f32::max);
+    let range = max - min;
+    if range > f32::EPSILON {
+        for (_, score) in results.iter_mut() {
+            *score = (*score - min) / range;
+        }
+    } else {
+        // All scores identical — assign 1.0 to all
+        for (_, score) in results.iter_mut() {
+            *score = 1.0;
+        }
+    }
+}
+
 /// Convert raw search results to ranked results
 pub fn to_ranked_results(
     results: &[(ChunkId, f32)],
@@ -315,6 +340,44 @@ mod tests {
     fn test_rrf_config_default() {
         let config = RrfConfig::default();
         assert_eq!(config.k, 60);
+    }
+
+    #[test]
+    fn test_normalize_bm25_scores_basic() {
+        let mut results = vec![
+            ("c1".to_string(), 10.0),
+            ("c2".to_string(), 5.0),
+            ("c3".to_string(), 0.0),
+        ];
+        normalize_bm25_scores(&mut results);
+        assert!((results[0].1 - 1.0).abs() < 1e-6, "max should be 1.0");
+        assert!((results[1].1 - 0.5).abs() < 1e-6, "mid should be 0.5");
+        assert!((results[2].1 - 0.0).abs() < 1e-6, "min should be 0.0");
+    }
+
+    #[test]
+    fn test_normalize_bm25_scores_identical() {
+        let mut results = vec![
+            ("c1".to_string(), 5.0),
+            ("c2".to_string(), 5.0),
+        ];
+        normalize_bm25_scores(&mut results);
+        assert!((results[0].1 - 1.0).abs() < 1e-6);
+        assert!((results[1].1 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_normalize_bm25_scores_empty() {
+        let mut results: Vec<(String, f32)> = vec![];
+        normalize_bm25_scores(&mut results);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_bm25_scores_single() {
+        let mut results = vec![("c1".to_string(), 42.0)];
+        normalize_bm25_scores(&mut results);
+        assert!((results[0].1 - 1.0).abs() < 1e-6);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use dindex::{
-    chunking::TextSplitter,
+    chunking::{create_tokenizer, TextSplitter},
     client::{self, ClientError},
     config::Config,
     daemon::protocol::{ProgressStage, ScrapeOptions},
@@ -147,7 +147,8 @@ pub async fn scrape_urls(
         (None, None)
     };
 
-    let splitter = TextSplitter::new(config.chunking.clone());
+    let tokenizer = create_tokenizer(&config.embedding);
+    let splitter = TextSplitter::new(config.chunking.clone(), tokenizer);
 
     // Process URLs
     let mut pages_scraped = 0;
@@ -200,8 +201,8 @@ pub async fn scrape_urls(
                                 let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
                                 let num_chunks = texts.len();
 
-                                // Generate real embeddings
-                                match engine.embed_batch(&texts) {
+                                // Generate real embeddings (with count validation)
+                                match engine.embed_batch_validated(&texts) {
                                     Ok(embeddings) => {
                                         let chunks_with_embeddings: Vec<_> = chunks
                                             .into_iter()

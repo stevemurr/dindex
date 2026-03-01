@@ -315,8 +315,10 @@ impl VectorIndex {
                     chunk_id: chunk_id.clone(),
                     key,
                     distance,
-                    // Convert distance to similarity (for cosine, similarity = 1 - distance)
-                    similarity: 1.0 - distance,
+                    // Convert distance to similarity (for cosine, similarity = 1 - distance).
+                    // USearch cosine distances can range [0, 2], giving similarity [-1, 1].
+                    // Clamp to [0, 1] so downstream scoring stages receive valid inputs.
+                    similarity: (1.0 - distance).clamp(0.0, 1.0),
                 })
             })
             .collect();

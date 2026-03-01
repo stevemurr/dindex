@@ -268,6 +268,9 @@ pub struct SearchResult {
     pub node_id: Option<NodeId>,
     /// Which retrieval methods matched
     pub matched_by: Vec<crate::retrieval::RetrievalMethod>,
+    /// Optional detailed breakdown of how the score was computed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_breakdown: Option<crate::retrieval::ScoreBreakdown>,
 }
 
 impl SearchResult {
@@ -277,6 +280,7 @@ impl SearchResult {
             relevance_score,
             node_id: None,
             matched_by: Vec::new(),
+            score_breakdown: None,
         }
     }
 }
@@ -838,6 +842,7 @@ mod tests {
             relevance_score: score,
             node_id: None,
             matched_by: vec![crate::retrieval::RetrievalMethod::Dense],
+            score_breakdown: None,
         }
     }
 

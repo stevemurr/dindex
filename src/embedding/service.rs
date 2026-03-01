@@ -36,37 +36,33 @@ pub fn init_embedding_engine(config: &Config) -> Result<Arc<EmbeddingEngine>> {
     Ok(Arc::new(engine))
 }
 
-/// Generate an embedding with hash-based fallback
+/// Generate an embedding, returning an error if no engine is available or embedding fails.
 ///
-/// Tries the real embedding engine first. If it fails or is not available,
-/// falls back to a deterministic hash-based embedding.
-pub fn generate_with_fallback(
+/// Unlike the previous `generate_with_fallback`, this does NOT silently produce
+/// hash-based embeddings. Callers must handle the error explicitly — either by
+/// skipping the chunk or by explicitly opting into `hash_based_embedding`.
+pub fn generate_embedding(
     engine: Option<&EmbeddingEngine>,
     content: &str,
-    fallback_dims: usize,
-) -> Vec<f32> {
-    if let Some(engine) = engine {
-        match engine.embed(content) {
-            Ok(embedding) => return embedding,
-            Err(e) => {
-                tracing::warn!("Embedding generation failed, using fallback: {}", e);
-                return hash_based_embedding(content, engine.dimensions());
-            }
-        }
-    }
+) -> Result<Vec<f32>> {
+    let engine = engine.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No embedding engine available. Configure an embedding backend in dindex.toml \
+             (e.g., backend = \"http\", endpoint = \"...\")."
+        )
+    })?;
 
-    tracing::warn!("No embedding engine available, using hash-based fallback");
-    hash_based_embedding(content, fallback_dims)
+    engine.embed(content)
 }
 
-/// Generate a deterministic hash-based embedding (fallback when embedding engine unavailable)
+/// Generate a deterministic hash-based embedding for testing purposes.
 ///
-/// This produces embeddings that are deterministic for the same content but have no
-/// semantic meaning. Use only as a fallback for testing or when the embedding model
-/// is unavailable. Values are in the range [-1, 1].
+/// This produces embeddings that are deterministic for the same content but have
+/// **no semantic meaning**. Use only for:
+/// - Unit/integration tests that need embeddings but not semantic quality
+/// - Explicit fallback when the user has opted in via configuration
 ///
 /// WARNING: Hash-based embeddings will not produce meaningful search results.
-/// Always prefer using a real embedding engine when possible.
 pub fn hash_based_embedding(content: &str, dims: usize) -> Vec<f32> {
     let mut embedding: Vec<f32> = (0..dims)
         .map(|i| {

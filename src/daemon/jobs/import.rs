@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::chunking::TextSplitter;
+use crate::chunking::{create_tokenizer, TextSplitter};
 use crate::config::Config;
 use crate::import::{DumpSource, WikimediaSource};
 use crate::types::Document;
@@ -62,7 +62,8 @@ pub(super) async fn run_import_job(
         }
     }
 
-    let splitter = TextSplitter::new(config.chunking.clone());
+    let tokenizer = create_tokenizer(&config.embedding);
+    let splitter = TextSplitter::new(config.chunking.clone(), tokenizer);
 
     match source {
         ImportSource::WikimediaXml { path } => {

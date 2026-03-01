@@ -75,6 +75,25 @@ impl EmbeddingEngine {
             .context("Failed to generate batch embeddings")
     }
 
+    /// Generate embeddings for a batch of texts with count validation.
+    ///
+    /// Returns an error if the backend returns a different number of embeddings
+    /// than the number of input texts. This prevents the silent data loss that
+    /// occurs when using `.zip()` on mismatched iterators.
+    pub fn embed_batch_validated(&self, texts: &[String]) -> Result<Vec<Embedding>> {
+        let expected = texts.len();
+        let embeddings = self.embed_batch(texts)?;
+        if embeddings.len() != expected {
+            anyhow::bail!(
+                "Embedding count mismatch: sent {} texts, got {} embeddings back. \
+                 This may indicate the backend dropped or batched incorrectly.",
+                expected,
+                embeddings.len()
+            );
+        }
+        Ok(embeddings)
+    }
+
     /// Get the full embedding dimensions
     pub fn dimensions(&self) -> usize {
         self.backend.dimensions()
@@ -124,6 +143,44 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embedding::backend::{EmbeddingBackend, EmbeddingResult};
+
+    /// Mock backend that returns a fixed number of embeddings (for testing validation)
+    #[derive(Debug)]
+    struct MockBackend {
+        dims: usize,
+        /// If set, embed_batch returns this many embeddings regardless of input size
+        override_count: Option<usize>,
+    }
+
+    impl EmbeddingBackend for MockBackend {
+        fn embed(&self, _text: &str) -> EmbeddingResult<Embedding> {
+            Ok(vec![0.1; self.dims])
+        }
+
+        fn embed_batch(&self, texts: &[String]) -> EmbeddingResult<Vec<Embedding>> {
+            let count = self.override_count.unwrap_or(texts.len());
+            Ok((0..count).map(|_| vec![0.1; self.dims]).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            self.dims
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+    }
+
+    fn make_engine(override_count: Option<usize>) -> EmbeddingEngine {
+        EmbeddingEngine {
+            backend: Arc::new(MockBackend {
+                dims: 4,
+                override_count,
+            }),
+            truncated_dimensions: 4,
+        }
+    }
 
     #[test]
     fn test_normalize_embedding() {
@@ -143,4 +200,35 @@ mod tests {
         assert!((cosine_similarity(&a, &c) - 1.0).abs() < 1e-6);
     }
 
+    #[test]
+    fn test_embed_batch_validated_ok() {
+        let engine = make_engine(None); // returns same count as input
+        let texts = vec!["hello".to_string(), "world".to_string()];
+        let result = engine.embed_batch_validated(&texts);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_embed_batch_validated_mismatch() {
+        let engine = make_engine(Some(1)); // always returns 1 embedding
+        let texts = vec!["hello".to_string(), "world".to_string()];
+        let result = engine.embed_batch_validated(&texts);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("count mismatch"),
+            "error should mention count mismatch, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_embed_batch_validated_empty() {
+        let engine = make_engine(None);
+        let texts: Vec<String> = vec![];
+        let result = engine.embed_batch_validated(&texts);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
 }

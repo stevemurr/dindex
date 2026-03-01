@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 use url::Url;
 use uuid::Uuid;
 
-use crate::chunking::TextSplitter;
+use crate::chunking::{create_tokenizer, TextSplitter};
 use crate::config::Config;
 use crate::scraping::coordinator::{
     ProcessOutcome, ProcessResult, ProcessedContent,
@@ -147,7 +147,8 @@ pub(super) async fn run_scrape_job(
         track_url(&url_statuses, url_str, UrlStatus::Queued, 0, None, None, 0, None);
     }
 
-    let splitter = TextSplitter::new(config.chunking.clone());
+    let tokenizer = create_tokenizer(&config.embedding);
+    let splitter = TextSplitter::new(config.chunking.clone(), tokenizer);
     let mut empty_iterations = 0u32;
 
     // Main scraping loop

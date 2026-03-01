@@ -549,7 +549,7 @@ mod tests {
             chunk_storage,
         ));
 
-        let splitter = TextSplitter::new(ChunkingConfig {
+        let splitter = TextSplitter::new_with_heuristic(ChunkingConfig {
             chunk_size: 100,
             overlap_fraction: 0.1,
             min_chunk_size: 10,
@@ -679,7 +679,7 @@ mod tests {
             bm25_index,
             chunk_storage,
         ));
-        let splitter = TextSplitter::new(ChunkingConfig::default());
+        let splitter = TextSplitter::new_with_heuristic(ChunkingConfig::default());
 
         let config = ProcessorConfig {
             min_content_length: 20,
@@ -729,7 +729,7 @@ mod tests {
             bm25_index,
             chunk_storage,
         ));
-        let splitter = TextSplitter::new(ChunkingConfig::default());
+        let splitter = TextSplitter::new_with_heuristic(ChunkingConfig::default());
 
         let processor = DocumentProcessorBuilder::new()
             .with_registry(registry)

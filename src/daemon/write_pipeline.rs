@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::embedding::{generate_with_fallback, EmbeddingEngine};
+use crate::embedding::{generate_embedding, EmbeddingEngine};
 use crate::types::Chunk;
 
 use super::index_manager::IndexManager;
@@ -138,9 +138,19 @@ impl WritePipelineWorker {
                             debug!("Received chunk for stream {}", stream_id);
 
                             // Generate embedding if not provided
-                            let embedding = embedding.unwrap_or_else(|| {
-                                self.generate_embedding(&chunk.content)
-                            });
+                            let embedding = match embedding {
+                                Some(e) => e,
+                                None => match self.generate_embedding(&chunk.content) {
+                                    Ok(e) => e,
+                                    Err(e) => {
+                                        warn!(
+                                            "Skipping chunk {}: embedding failed: {}",
+                                            chunk.metadata.chunk_id, e
+                                        );
+                                        continue;
+                                    }
+                                },
+                            };
 
                             batch.push((chunk, embedding));
 
@@ -216,27 +226,26 @@ impl WritePipelineWorker {
         batch.clear();
     }
 
-    /// Generate embedding for content using real embedding engine
-    fn generate_embedding(&self, content: &str) -> Vec<f32> {
+    /// Generate embedding for content using the real embedding engine.
+    ///
+    /// Returns an error if no engine is available or embedding fails.
+    fn generate_embedding(&self, content: &str) -> anyhow::Result<Vec<f32>> {
         if let Some(ref metrics) = self.metrics {
             metrics.embedding_requests_total.inc();
             let start = std::time::Instant::now();
-            let result = generate_with_fallback(
+            let result = generate_embedding(
                 self.embedding_engine.as_deref(),
                 content,
-                self.index_manager.dimensions(),
             );
             metrics.embedding_latency.observe(start.elapsed());
-            // If no embedding engine is present, we used the fallback
-            if self.embedding_engine.is_none() {
+            if result.is_err() {
                 metrics.embedding_errors_total.inc();
             }
             result
         } else {
-            generate_with_fallback(
+            generate_embedding(
                 self.embedding_engine.as_deref(),
                 content,
-                self.index_manager.dimensions(),
             )
         }
     }

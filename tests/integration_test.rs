@@ -80,7 +80,7 @@ fn test_indexing_and_retrieval_pipeline() {
     .with_title("Test Document");
 
     let chunking_config = ChunkingConfig::default();
-    let splitter = TextSplitter::new(chunking_config);
+    let splitter = TextSplitter::new_with_heuristic(chunking_config);
     let chunks = splitter.split_document(&document);
 
     // Index the chunks using test embeddings
@@ -119,7 +119,7 @@ fn test_document_chunking() {
         overlap_fraction: 0.1,
     };
 
-    let splitter = TextSplitter::new(config);
+    let splitter = TextSplitter::new_with_heuristic(config);
 
     let document = Document::new(
         "First paragraph with some text. Second paragraph with more text. Third paragraph to ensure we have enough content for multiple chunks."
@@ -771,7 +771,7 @@ This final paragraph ensures we have enough content for multiple chunks to be cr
         overlap_fraction: 0.1,
     };
 
-    let splitter = TextSplitter::new(config);
+    let splitter = TextSplitter::new_with_heuristic(config);
     let chunks = splitter.split_document(&document);
 
     // Should have multiple chunks

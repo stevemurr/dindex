@@ -88,6 +88,12 @@ pub struct RetrievalConfig {
     /// At aggregator_score=1.0, the result score is multiplied by this value.
     #[serde(default = "default_aggregator_min_multiplier")]
     pub aggregator_min_multiplier: f32,
+    /// Weight given to original score in the overlap reranker (0.0-1.0)
+    #[serde(default = "default_reranker_score_weight")]
+    pub reranker_score_weight: f32,
+    /// Weight given to query-term overlap in the overlap reranker (0.0-1.0)
+    #[serde(default = "default_reranker_overlap_weight")]
+    pub reranker_overlap_weight: f32,
 }
 
 fn default_fanout_quality_threshold() -> f32 {
@@ -114,6 +120,14 @@ fn default_aggregator_min_multiplier() -> f32 {
     0.5
 }
 
+fn default_reranker_score_weight() -> f32 {
+    0.7
+}
+
+fn default_reranker_overlap_weight() -> f32 {
+    0.3
+}
+
 impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
@@ -129,6 +143,8 @@ impl Default for RetrievalConfig {
             fanout_score_threshold: default_fanout_score_threshold(),
             fanout_timeout_fraction: default_fanout_timeout_fraction(),
             aggregator_min_multiplier: default_aggregator_min_multiplier(),
+            reranker_score_weight: default_reranker_score_weight(),
+            reranker_overlap_weight: default_reranker_overlap_weight(),
         }
     }
 }

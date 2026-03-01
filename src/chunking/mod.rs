@@ -4,9 +4,12 @@
 //! - Semantic-aware text splitting
 //! - Configurable chunk sizes with overlap
 //! - Section hierarchy detection
+//! - Pluggable tokenizers (heuristic or BPE)
 
 mod splitter;
-mod tokenizer;
+pub mod tokenizer;
 
 pub use splitter::*;
-pub use tokenizer::*;
+pub use tokenizer::{
+    create_tokenizer, BpeTokenizer, HeuristicTokenizer, SharedTokenizer, Tokenizer,
+};

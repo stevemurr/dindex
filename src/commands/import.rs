@@ -173,6 +173,7 @@ pub async fn import_dump(
         .with_min_content_length(min_length)
         .with_max_documents(max_docs)
         .with_embedding_engine(engine)
+        .with_embedding_config(config.embedding.clone())
         .with_chunking_config(config.chunking.clone())
         .with_index_config(config.index.clone())
         .with_quiet(quiet)

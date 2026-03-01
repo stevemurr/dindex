@@ -2,8 +2,8 @@
 
 use super::progress::ImportProgress;
 use super::source::{DumpSource, ImportCheckpoint, ImportConfig, ImportError, ImportStats};
-use crate::chunking::TextSplitter;
-use crate::config::{ChunkingConfig, DedupConfig, IndexConfig};
+use crate::chunking::{create_tokenizer, TextSplitter};
+use crate::config::{ChunkingConfig, DedupConfig, EmbeddingConfig, IndexConfig};
 use crate::embedding::EmbeddingEngine;
 use crate::index::{
     DocumentProcessor, DocumentRegistry, IndexStack, ProcessingResult, ProcessorConfig,
@@ -38,6 +38,7 @@ impl ImportCoordinator {
         index_config: IndexConfig,
         dedup_config: DedupConfig,
         embedding_engine: Arc<EmbeddingEngine>,
+        embedding_config: &EmbeddingConfig,
     ) -> Result<Self, ImportError> {
         let data_dir = data_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&data_dir).map_err(ImportError::Io)?;
@@ -57,7 +58,8 @@ impl ImportCoordinator {
         let vector_index = stack.vector_index.clone();
         let indexer = Arc::new(stack.indexer());
 
-        let splitter = TextSplitter::new(chunking_config);
+        let tokenizer = create_tokenizer(embedding_config);
+        let splitter = TextSplitter::new(chunking_config, tokenizer);
 
         // Create processor config from dedup config
         let processor_config = ProcessorConfig {
@@ -249,6 +251,7 @@ pub struct ImportCoordinatorBuilder {
     chunking_config: ChunkingConfig,
     index_config: IndexConfig,
     dedup_config: DedupConfig,
+    embedding_config: EmbeddingConfig,
     embedding_engine: Option<Arc<EmbeddingEngine>>,
     quiet: bool,
 }
@@ -262,6 +265,7 @@ impl ImportCoordinatorBuilder {
             chunking_config: ChunkingConfig::default(),
             index_config: IndexConfig::default(),
             dedup_config: DedupConfig::default(),
+            embedding_config: EmbeddingConfig::default(),
             embedding_engine: None,
             quiet: false,
         }
@@ -315,6 +319,12 @@ impl ImportCoordinatorBuilder {
         self
     }
 
+    /// Set embedding configuration (for tokenizer resolution)
+    pub fn with_embedding_config(mut self, config: EmbeddingConfig) -> Self {
+        self.embedding_config = config;
+        self
+    }
+
     /// Set quiet mode
     pub fn with_quiet(mut self, quiet: bool) -> Self {
         self.quiet = quiet;
@@ -334,6 +344,7 @@ impl ImportCoordinatorBuilder {
             self.index_config,
             self.dedup_config,
             engine,
+            &self.embedding_config,
         )
         .map(|c| c.with_quiet(self.quiet))
     }
