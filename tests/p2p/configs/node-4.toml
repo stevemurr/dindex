@@ -1,0 +1,55 @@
+# DIndex P2P Test - Node 4
+
+[node]
+listen_addr = "/ip4/0.0.0.0/udp/4001/quic-v1"
+data_dir = "/data"
+bootstrap_peers = []
+enable_mdns = true
+replication_factor = 3
+query_timeout_secs = 15
+
+[embedding]
+backend = "http"
+endpoint = "http://p2p-test-embeddings:8000/v1/embeddings"
+model = "BAAI/bge-m3"
+dimensions = 1024
+
+[index]
+hnsw_m = 16
+hnsw_ef_construction = 200
+hnsw_ef_search = 100
+memory_mapped = true
+max_capacity = 1000000
+
+[chunking]
+chunk_size = 512
+overlap_fraction = 0.15
+min_chunk_size = 50
+max_chunk_size = 2048
+
+[retrieval]
+enable_dense = true
+enable_bm25 = true
+rrf_k = 60
+candidate_count = 100
+enable_reranking = true
+
+[routing]
+num_centroids = 100
+lsh_bits = 128
+lsh_num_hashes = 8
+bloom_bits_per_item = 10
+candidate_nodes = 5
+
+[http]
+listen_addr = "127.0.0.1:8080"
+cors_enabled = false
+enabled = false
+
+[metrics]
+system_metrics_interval_secs = 15
+enabled = false
+
+[logging]
+format = "text"
+level = "info"

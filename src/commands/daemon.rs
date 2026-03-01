@@ -99,7 +99,7 @@ pub async fn start_node_inner(
     // Create QueryExecutor for handling incoming peer queries
     let query_executor = Arc::new(QueryExecutor::new(
         daemon.index_manager().retriever(),
-        None, // No embedding engine for now - queries should include embeddings
+        daemon.index_manager().embedding_engine(),
     ));
 
     // Initialize P2P components
@@ -129,7 +129,7 @@ pub async fn start_node_inner(
     // Create QueryCoordinator for distributed search
     let query_coordinator = Arc::new(QueryCoordinator::new(
         Some(daemon.index_manager().retriever()),
-        None, // Embedding engine - queries will include embeddings
+        daemon.index_manager().embedding_engine(),
         query_router,
         Some(handle.clone()),
         config.clone(),

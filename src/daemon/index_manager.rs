@@ -263,6 +263,11 @@ impl IndexManager {
         self.config.embedding.dimensions
     }
 
+    /// Get the embedding engine (if initialized)
+    pub fn embedding_engine(&self) -> Option<Arc<EmbeddingEngine>> {
+        self.embedding_engine.read().clone()
+    }
+
     /// Set the embedding engine for generating query embeddings
     pub fn set_embedding_engine(&self, engine: Arc<EmbeddingEngine>) {
         let mut guard = self.embedding_engine.write();

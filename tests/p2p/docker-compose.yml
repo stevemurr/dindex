@@ -1,0 +1,213 @@
+services:
+  embeddings:
+    image: nvcr.io/nvidia/vllm:25.11-py3
+    container_name: p2p-test-embeddings
+    command:
+      - vllm
+      - serve
+      - BAAI/bge-m3
+      - --task
+      - embedding
+      - --gpu-memory-utilization
+      - "0.1"
+    volumes:
+      - ~/.cache:/root/.cache
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - HF_HUB_OFFLINE=1
+    ipc: host
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - p2p-testnet
+    profiles:
+      - with-embeddings
+
+  node-1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: dindex:p2p-test
+    container_name: p2p-test-node-1
+    command:
+      - --config
+      - /etc/dindex/config.toml
+      - start
+      - --foreground
+      - --listen
+      - /ip4/0.0.0.0/udp/4001/quic-v1
+    tmpfs:
+      - /run/dindex:uid=1000,gid=1000
+    volumes:
+      - ./configs/node-1.toml:/etc/dindex/config.toml:ro
+      - node-1-data:/data
+    environment:
+      - RUST_LOG=info
+      - DINDEX_DATA_DIR=/data
+      - XDG_RUNTIME_DIR=/run/dindex
+    networks:
+      p2p-testnet:
+        ipv4_address: 172.30.0.10
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/dindex/dindex/dindex.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+
+  node-2:
+    image: dindex:p2p-test
+    container_name: p2p-test-node-2
+    command:
+      - --config
+      - /etc/dindex/config.toml
+      - start
+      - --foreground
+      - --listen
+      - /ip4/0.0.0.0/udp/4001/quic-v1
+    tmpfs:
+      - /run/dindex:uid=1000,gid=1000
+    volumes:
+      - ./configs/node-2.toml:/etc/dindex/config.toml:ro
+      - node-2-data:/data
+    environment:
+      - RUST_LOG=info
+      - DINDEX_DATA_DIR=/data
+      - XDG_RUNTIME_DIR=/run/dindex
+    depends_on:
+      node-1:
+        condition: service_healthy
+    networks:
+      p2p-testnet:
+        ipv4_address: 172.30.0.11
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/dindex/dindex/dindex.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+
+  node-3:
+    image: dindex:p2p-test
+    container_name: p2p-test-node-3
+    command:
+      - --config
+      - /etc/dindex/config.toml
+      - start
+      - --foreground
+      - --listen
+      - /ip4/0.0.0.0/udp/4001/quic-v1
+    tmpfs:
+      - /run/dindex:uid=1000,gid=1000
+    volumes:
+      - ./configs/node-3.toml:/etc/dindex/config.toml:ro
+      - node-3-data:/data
+    environment:
+      - RUST_LOG=info
+      - DINDEX_DATA_DIR=/data
+      - XDG_RUNTIME_DIR=/run/dindex
+    depends_on:
+      node-1:
+        condition: service_healthy
+    networks:
+      p2p-testnet:
+        ipv4_address: 172.30.0.12
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/dindex/dindex/dindex.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+
+  node-4:
+    image: dindex:p2p-test
+    container_name: p2p-test-node-4
+    command:
+      - --config
+      - /etc/dindex/config.toml
+      - start
+      - --foreground
+      - --listen
+      - /ip4/0.0.0.0/udp/4001/quic-v1
+    tmpfs:
+      - /run/dindex:uid=1000,gid=1000
+    volumes:
+      - ./configs/node-4.toml:/etc/dindex/config.toml:ro
+      - node-4-data:/data
+    environment:
+      - RUST_LOG=info
+      - DINDEX_DATA_DIR=/data
+      - XDG_RUNTIME_DIR=/run/dindex
+    depends_on:
+      node-1:
+        condition: service_healthy
+    networks:
+      p2p-testnet:
+        ipv4_address: 172.30.0.13
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/dindex/dindex/dindex.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+    profiles:
+      - five-nodes
+
+  node-5:
+    image: dindex:p2p-test
+    container_name: p2p-test-node-5
+    command:
+      - --config
+      - /etc/dindex/config.toml
+      - start
+      - --foreground
+      - --listen
+      - /ip4/0.0.0.0/udp/4001/quic-v1
+    tmpfs:
+      - /run/dindex:uid=1000,gid=1000
+    volumes:
+      - ./configs/node-5.toml:/etc/dindex/config.toml:ro
+      - node-5-data:/data
+    environment:
+      - RUST_LOG=info
+      - DINDEX_DATA_DIR=/data
+      - XDG_RUNTIME_DIR=/run/dindex
+    depends_on:
+      node-1:
+        condition: service_healthy
+    networks:
+      p2p-testnet:
+        ipv4_address: 172.30.0.14
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/dindex/dindex/dindex.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+    profiles:
+      - five-nodes
+
+volumes:
+  node-1-data:
+  node-2-data:
+  node-3-data:
+  node-4-data:
+  node-5-data:
+
+networks:
+  p2p-testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
