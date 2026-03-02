@@ -6,13 +6,14 @@ Search engines return links. DIndex returns answers — semantically relevant te
 
 ## Technical Highlights
 
-- ~30k lines of Rust, 448 tests (424 unit + 23 integration + 1 doc)
+- ~31k lines of Rust, 501 tests (477 unit + 23 integration + 1 doc), plus 4 Docker cluster tests
 - Hybrid retrieval: dense vectors (HNSW) + BM25 + Reciprocal Rank Fusion
 - Composable scoring pipeline with pluggable stages (aggregator demotion, overlap reranker, stop word filter)
 - Token-aware chunking with BPE tokenizer (tiktoken-rs) matched to embedding model
 - Multi-band LSH (8x8-bit) semantic routing with bloom filters
 - Score-based distributed merge (no double-RRF) with adaptive fan-out
 - Crawl trap detection, URL frontier dedup
+- JSON-based IPC with read-only index fallback (no lock contention)
 - Decomposed module architecture with type-safe enums throughout
 
 ## Architecture
@@ -47,9 +48,10 @@ Search engines return links. DIndex returns answers — semantically relevant te
 | Vector Index | USearch (HNSW, F32) |
 | Lexical Search | Tantivy (BM25) |
 | Tokenization | tiktoken-rs (BPE, cl100k_base/o200k_base) |
-| HTTP API | Axum |
+| HTTP API | Axum + tower-http |
 | Async Runtime | Tokio |
-| Metadata Store | sled |
+| Chunk Storage | sled (embedded database) |
+| Serialization | serde_json (IPC), bincode (storage, P2P) |
 | HTTP Client | reqwest |
 
 ## Features
@@ -138,12 +140,15 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full config reference
 ```
 src/
 ├── main.rs              # CLI entry point (clap)
+├── lib.rs               # Library root, module declarations
 ├── types.rs             # Core data types (Chunk, Query, SearchResult, ScoreBreakdown)
+├── util.rs              # Shared utilities (SimHash, URL normalization, hashing)
 ├── config/              # TOML configuration and validation
 ├── embedding/           # HTTP embedding backends (OpenAI-compatible), batch validation
-├── index/               # USearch HNSW vector index + IndexStack factory
+├── index/               # USearch HNSW vector index, IndexStack factory, sled chunk storage
 ├── retrieval/           # Hybrid search (dense + BM25 + RRF fusion)
-│   └── scoring.rs       # Composable ScoringStage pipeline
+│   ├── scoring.rs       # Composable ScoringStage pipeline
+│   └── bm25.rs          # Tantivy BM25 index (read-write + read-only modes)
 ├── chunking/            # Document chunking (token-aware, sentence-granular)
 │   └── tokenizer/       # Pluggable tokenizers (BPE via tiktoken-rs, heuristic)
 ├── network/             # libp2p (Kademlia DHT, GossipSub, QUIC)
@@ -151,10 +156,10 @@ src/
 ├── query/               # Query coordination, score-based merge, adaptive fan-out
 ├── scraping/            # Web crawling (URL frontier, fetch engine)
 ├── import/              # Bulk import (Wikipedia XML streaming)
-├── content/             # Content extraction and processing
-├── daemon/              # Background daemon management
+├── content/             # Content extraction (HTML, PDF, plain text)
+├── daemon/              # Background daemon (IPC protocol, HTTP API, job management)
 ├── commands/            # CLI command implementations
-└── client/              # Swift client library
+└── client/              # IPC client library (Unix socket communication)
 ```
 
 ## Clients
