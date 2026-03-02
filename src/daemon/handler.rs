@@ -639,6 +639,140 @@ mod tests {
         (handler, temp_dir)
     }
 
+    // ============ Label Generation Tests ============
+
+    #[test]
+    fn test_label_from_title_keywords() {
+        let urls = vec![
+            "https://arxiv.org/abs/2301.001".to_string(),
+            "https://arxiv.org/abs/2301.002".to_string(),
+            "https://arxiv.org/abs/2301.003".to_string(),
+        ];
+        let mut documents = HashMap::new();
+        documents.insert(
+            urls[0].clone(),
+            DocumentInfo {
+                title: Some("Scaling Laws for Neural Language Models".to_string()),
+                snippet: "...".to_string(),
+            },
+        );
+        documents.insert(
+            urls[1].clone(),
+            DocumentInfo {
+                title: Some("Neural Network Pruning Techniques".to_string()),
+                snippet: "...".to_string(),
+            },
+        );
+        documents.insert(
+            urls[2].clone(),
+            DocumentInfo {
+                title: Some("Deep Neural Architecture Search".to_string()),
+                snippet: "...".to_string(),
+            },
+        );
+
+        let label = generate_cluster_label(&urls, &documents);
+        // "neural" appears 3 times — should be top keyword
+        assert!(
+            label.contains("Neural"),
+            "Expected 'Neural' in label, got: {}",
+            label
+        );
+    }
+
+    #[test]
+    fn test_label_domain_fallback_when_no_titles() {
+        let urls = vec![
+            "https://github.com/rust-lang/rust".to_string(),
+            "https://github.com/tokio-rs/tokio".to_string(),
+            "https://docs.rs/serde".to_string(),
+        ];
+        let mut documents = HashMap::new();
+        // No titles — just snippets
+        for url in &urls {
+            documents.insert(
+                url.clone(),
+                DocumentInfo {
+                    title: None,
+                    snippet: "Some content".to_string(),
+                },
+            );
+        }
+
+        let label = generate_cluster_label(&urls, &documents);
+        // github.com has 2 occurrences, docs.rs has 1 — should pick github.com
+        assert_eq!(label, "github.com");
+    }
+
+    #[test]
+    fn test_label_uncategorized_fallback() {
+        let urls: Vec<String> = Vec::new();
+        let documents = HashMap::new();
+
+        let label = generate_cluster_label(&urls, &documents);
+        assert_eq!(label, "Uncategorized");
+    }
+
+    #[test]
+    fn test_label_filters_stop_words_and_short_words() {
+        let urls = vec!["https://example.com/1".to_string()];
+        let mut documents = HashMap::new();
+        documents.insert(
+            urls[0].clone(),
+            DocumentInfo {
+                // "the", "and", "for" are stop words; "AI" is < 4 chars
+                title: Some("The AI and Machine Learning for Research".to_string()),
+                snippet: "...".to_string(),
+            },
+        );
+
+        let label = generate_cluster_label(&urls, &documents);
+        // Should pick "machine" and "learning" (both 7+ chars, not stop words)
+        assert!(
+            label.contains("Machine") || label.contains("Learning") || label.contains("Research"),
+            "Expected meaningful keywords, got: {}",
+            label
+        );
+        assert!(
+            !label.to_lowercase().contains("the "),
+            "Should not contain stop words, got: {}",
+            label
+        );
+    }
+
+    #[test]
+    fn test_label_title_case() {
+        assert_eq!(title_case("machine"), "Machine");
+        assert_eq!(title_case("LEARNING"), "Learning");
+        assert_eq!(title_case(""), "");
+    }
+
+    #[test]
+    fn test_label_at_most_two_keywords() {
+        let urls = vec!["https://example.com/1".to_string()];
+        let mut documents = HashMap::new();
+        documents.insert(
+            urls[0].clone(),
+            DocumentInfo {
+                title: Some(
+                    "Advanced Machine Learning Algorithms Research".to_string(),
+                ),
+                snippet: "...".to_string(),
+            },
+        );
+
+        let label = generate_cluster_label(&urls, &documents);
+        let word_count = label.split_whitespace().count();
+        assert!(
+            word_count <= 2,
+            "Label should have at most 2 words, got {}: '{}'",
+            word_count,
+            label
+        );
+    }
+
+    // ============ Handler Tests ============
+
     #[tokio::test]
     async fn test_ping() {
         let (handler, _temp) = create_test_handler().await;
@@ -669,6 +803,215 @@ mod tests {
                 assert_eq!(stats.total_chunks, 0);
             }
             _ => panic!("Expected Stats response"),
+        }
+    }
+
+    // ============ Cluster Handler Integration Tests ============
+
+    /// Seed a document into the temp directory's ChunkStorage for handler tests
+    fn seed_test_document(
+        data_dir: &std::path::Path,
+        url: &str,
+        title: &str,
+        content: &str,
+        embedding: Vec<f32>,
+    ) {
+        let storage = crate::index::ChunkStorage::new(data_dir).unwrap();
+        let doc_id = format!("doc-{}", crate::util::fast_hash(url));
+        let chunk_id = format!("chunk-{}-0", doc_id);
+
+        let mut metadata = crate::types::ChunkMetadata::new(chunk_id, doc_id);
+        metadata.source_url = Some(url.to_string());
+        metadata.source_title = Some(title.to_string());
+
+        let chunk = crate::types::Chunk {
+            metadata,
+            content: content.to_string(),
+            token_count: 10,
+        };
+
+        let indexed = crate::types::IndexedChunk {
+            chunk,
+            embedding,
+            lsh_signature: None,
+            index_key: 0,
+        };
+
+        storage.store(&indexed).unwrap();
+        storage.save().unwrap();
+    }
+
+    async fn create_seeded_handler() -> (RequestHandler, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Seed documents before loading the IndexManager
+        seed_test_document(
+            temp_dir.path(),
+            "https://arxiv.org/abs/2301.001",
+            "Scaling Laws for Neural Language Models",
+            "We study empirical scaling laws for language model performance.",
+            vec![0.9, 0.1, 0.0],
+        );
+        seed_test_document(
+            temp_dir.path(),
+            "https://arxiv.org/abs/2301.002",
+            "Neural Network Pruning Techniques",
+            "This paper presents structured pruning methods for transformers.",
+            vec![0.85, 0.15, 0.0],
+        );
+        seed_test_document(
+            temp_dir.path(),
+            "https://github.com/rust-lang/rust",
+            "The Rust Programming Language",
+            "Rust is a systems programming language focused on safety.",
+            vec![0.0, 0.0, 1.0],
+        );
+
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = temp_dir.path().to_path_buf();
+
+        let index_manager = Arc::new(IndexManager::load(&config).unwrap());
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let write_pipeline = Arc::new(WritePipeline::start(
+            index_manager.clone(),
+            None,
+            100,
+            Duration::from_secs(60),
+            shutdown_rx,
+        ));
+
+        let metrics = DaemonMetrics::shared();
+        let handler =
+            RequestHandler::new(index_manager, write_pipeline, config, shutdown_tx, metrics);
+        (handler, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn test_cluster_documents_returns_clusters_and_labels() {
+        let (handler, _temp) = create_seeded_handler().await;
+
+        let response = handler
+            .handle(Request::ClusterDocuments {
+                document_urls: vec![
+                    "https://arxiv.org/abs/2301.001".to_string(),
+                    "https://arxiv.org/abs/2301.002".to_string(),
+                    "https://github.com/rust-lang/rust".to_string(),
+                ],
+                max_clusters: 2,
+            })
+            .await;
+
+        match response {
+            Response::ClusterResults {
+                clusters,
+                documents,
+                unmatched_urls,
+                cluster_time_ms,
+            } => {
+                // Should have clusters (at least 1, at most 2)
+                assert!(!clusters.is_empty(), "Expected at least one cluster");
+                assert!(clusters.len() <= 2, "Expected at most 2 clusters");
+
+                // All cluster IDs should be well-formed
+                for cluster in &clusters {
+                    assert!(cluster.cluster_id.starts_with("cluster_"));
+                    assert!(!cluster.label.is_empty(), "Label should not be empty");
+                    assert!(
+                        !cluster.document_urls.is_empty(),
+                        "Each cluster should have documents"
+                    );
+                }
+
+                // All 3 docs should appear across clusters
+                let total_docs: usize = clusters.iter().map(|c| c.document_urls.len()).sum();
+                assert_eq!(total_docs, 3);
+
+                // Documents map should have entries for all matched URLs
+                assert_eq!(documents.len(), 3);
+                assert!(documents.contains_key("https://arxiv.org/abs/2301.001"));
+                assert!(documents.contains_key("https://github.com/rust-lang/rust"));
+
+                // Title should be preserved
+                let arxiv_doc = &documents["https://arxiv.org/abs/2301.001"];
+                assert_eq!(
+                    arxiv_doc.title.as_deref(),
+                    Some("Scaling Laws for Neural Language Models")
+                );
+
+                // No unmatched URLs
+                assert!(unmatched_urls.is_empty());
+
+                // Timing should be populated
+                assert!(cluster_time_ms < 10_000, "Clustering should be fast");
+            }
+            other => panic!("Expected ClusterResults, got: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cluster_documents_with_unmatched_urls() {
+        let (handler, _temp) = create_seeded_handler().await;
+
+        let response = handler
+            .handle(Request::ClusterDocuments {
+                document_urls: vec![
+                    "https://arxiv.org/abs/2301.001".to_string(),
+                    "https://not-indexed.com/missing".to_string(),
+                    "https://also-missing.org/page".to_string(),
+                ],
+                max_clusters: 5,
+            })
+            .await;
+
+        match response {
+            Response::ClusterResults {
+                clusters,
+                documents,
+                unmatched_urls,
+                ..
+            } => {
+                // One matched doc → one cluster
+                assert_eq!(clusters.len(), 1);
+                assert_eq!(clusters[0].document_urls.len(), 1);
+
+                // Documents map has only the matched one
+                assert_eq!(documents.len(), 1);
+
+                // Two unmatched
+                assert_eq!(unmatched_urls.len(), 2);
+                assert!(unmatched_urls.contains(&"https://not-indexed.com/missing".to_string()));
+                assert!(unmatched_urls.contains(&"https://also-missing.org/page".to_string()));
+            }
+            other => panic!("Expected ClusterResults, got: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cluster_documents_all_unmatched() {
+        let (handler, _temp) = create_test_handler().await;
+
+        let response = handler
+            .handle(Request::ClusterDocuments {
+                document_urls: vec![
+                    "https://nothing.com/a".to_string(),
+                    "https://nothing.com/b".to_string(),
+                ],
+                max_clusters: 3,
+            })
+            .await;
+
+        match response {
+            Response::ClusterResults {
+                clusters,
+                documents,
+                unmatched_urls,
+                ..
+            } => {
+                assert!(clusters.is_empty());
+                assert!(documents.is_empty());
+                assert_eq!(unmatched_urls.len(), 2);
+            }
+            other => panic!("Expected ClusterResults, got: {:?}", std::mem::discriminant(&other)),
         }
     }
 }

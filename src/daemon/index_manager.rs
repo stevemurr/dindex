@@ -409,12 +409,49 @@ pub struct ClusterDocumentsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::ChunkStorage;
+    use crate::types::{ChunkMetadata, IndexedChunk};
     use tempfile::TempDir;
 
     fn test_config(data_dir: &std::path::Path) -> Config {
         let mut config = Config::default();
         config.node.data_dir = data_dir.to_path_buf();
         config
+    }
+
+    /// Seed a document (multiple chunks) into ChunkStorage at the given data_dir.
+    /// Returns the document_id used.
+    fn seed_document(
+        data_dir: &std::path::Path,
+        url: &str,
+        title: &str,
+        content: &str,
+        embedding: Vec<f32>,
+    ) -> String {
+        let storage = ChunkStorage::new(data_dir).unwrap();
+        let doc_id = format!("doc-{}", crate::util::fast_hash(url));
+        let chunk_id = format!("chunk-{}-0", doc_id);
+
+        let mut metadata = ChunkMetadata::new(chunk_id.clone(), doc_id.clone());
+        metadata.source_url = Some(url.to_string());
+        metadata.source_title = Some(title.to_string());
+
+        let chunk = crate::types::Chunk {
+            metadata,
+            content: content.to_string(),
+            token_count: 10,
+        };
+
+        let indexed = IndexedChunk {
+            chunk,
+            embedding,
+            lsh_signature: None,
+            index_key: 0,
+        };
+
+        storage.store(&indexed).unwrap();
+        storage.save().unwrap();
+        doc_id
     }
 
     #[test]
@@ -436,5 +473,97 @@ mod tests {
 
         assert_eq!(stats.total_chunks, 0);
         assert_eq!(stats.total_documents, 0);
+    }
+
+    #[test]
+    fn test_cluster_documents_with_matched_and_unmatched() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Seed two documents with distinct embeddings
+        seed_document(
+            temp_dir.path(),
+            "https://example.com/ml-paper",
+            "Machine Learning Research",
+            "This paper explores deep learning methods for NLP tasks.",
+            vec![1.0, 0.0, 0.0],
+        );
+        seed_document(
+            temp_dir.path(),
+            "https://example.com/systems-paper",
+            "Distributed Systems Design",
+            "We present a novel approach to consensus algorithms.",
+            vec![0.0, 1.0, 0.0],
+        );
+
+        let config = test_config(temp_dir.path());
+        let manager = IndexManager::load(&config).unwrap();
+
+        let urls = vec![
+            "https://example.com/ml-paper".to_string(),
+            "https://example.com/systems-paper".to_string(),
+            "https://not-indexed.com/missing".to_string(),
+        ];
+
+        let result = manager.cluster_documents(&urls, 2).unwrap();
+
+        // Two matched, one unmatched
+        assert_eq!(result.matched_docs.len(), 2);
+        assert_eq!(result.unmatched_urls, vec!["https://not-indexed.com/missing"]);
+
+        // Assignments vector matches matched docs length
+        assert_eq!(result.assignments.len(), 2);
+
+        // Verify titles and snippets were extracted
+        assert_eq!(
+            result.matched_docs[0].title.as_deref(),
+            Some("Machine Learning Research")
+        );
+        assert_eq!(
+            result.matched_docs[1].title.as_deref(),
+            Some("Distributed Systems Design")
+        );
+        assert!(!result.matched_docs[0].snippet.is_empty());
+    }
+
+    #[test]
+    fn test_cluster_documents_all_unmatched() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(temp_dir.path());
+        let manager = IndexManager::load(&config).unwrap();
+
+        let urls = vec![
+            "https://not-indexed.com/a".to_string(),
+            "https://not-indexed.com/b".to_string(),
+        ];
+
+        let result = manager.cluster_documents(&urls, 3).unwrap();
+
+        assert!(result.matched_docs.is_empty());
+        assert_eq!(result.unmatched_urls.len(), 2);
+        assert!(result.assignments.is_empty());
+    }
+
+    #[test]
+    fn test_cluster_documents_single_url() {
+        let temp_dir = TempDir::new().unwrap();
+
+        seed_document(
+            temp_dir.path(),
+            "https://example.com/only-doc",
+            "Solo Document",
+            "The only document in the index.",
+            vec![1.0, 0.0, 0.0],
+        );
+
+        let config = test_config(temp_dir.path());
+        let manager = IndexManager::load(&config).unwrap();
+
+        let urls = vec!["https://example.com/only-doc".to_string()];
+        let result = manager.cluster_documents(&urls, 5).unwrap();
+
+        assert_eq!(result.matched_docs.len(), 1);
+        assert_eq!(result.assignments.len(), 1);
+        assert_eq!(result.assignments[0], 0); // Single doc → cluster 0
+        assert!(result.unmatched_urls.is_empty());
     }
 }

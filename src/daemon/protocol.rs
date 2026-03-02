@@ -414,6 +414,101 @@ mod tests {
     }
 
     #[test]
+    fn test_cluster_request_roundtrip() {
+        let req = Request::ClusterDocuments {
+            document_urls: vec![
+                "https://example.com/doc1".to_string(),
+                "https://example.com/doc2".to_string(),
+            ],
+            max_clusters: 5,
+        };
+
+        let encoded = encode_message(&req).unwrap();
+        let decoded: Request = decode_message(&encoded[4..]).unwrap();
+
+        match decoded {
+            Request::ClusterDocuments {
+                document_urls,
+                max_clusters,
+            } => {
+                assert_eq!(document_urls.len(), 2);
+                assert_eq!(document_urls[0], "https://example.com/doc1");
+                assert_eq!(max_clusters, 5);
+            }
+            _ => panic!("Expected ClusterDocuments request"),
+        }
+    }
+
+    #[test]
+    fn test_cluster_response_roundtrip() {
+        use std::collections::HashMap;
+
+        let mut documents = HashMap::new();
+        documents.insert(
+            "https://example.com/doc1".to_string(),
+            DocumentInfo {
+                title: Some("Test Document".to_string()),
+                snippet: "First 200 chars...".to_string(),
+            },
+        );
+        documents.insert(
+            "https://example.com/doc2".to_string(),
+            DocumentInfo {
+                title: None,
+                snippet: "Another snippet".to_string(),
+            },
+        );
+
+        let resp = Response::ClusterResults {
+            clusters: vec![
+                ClusterInfo {
+                    cluster_id: "cluster_0".to_string(),
+                    label: "Machine Learning".to_string(),
+                    document_urls: vec!["https://example.com/doc1".to_string()],
+                },
+                ClusterInfo {
+                    cluster_id: "cluster_1".to_string(),
+                    label: "Systems Research".to_string(),
+                    document_urls: vec!["https://example.com/doc2".to_string()],
+                },
+            ],
+            documents,
+            unmatched_urls: vec!["https://not-indexed.com".to_string()],
+            cluster_time_ms: 42,
+        };
+
+        let encoded = encode_message(&resp).unwrap();
+        let decoded: Response = decode_message(&encoded[4..]).unwrap();
+
+        match decoded {
+            Response::ClusterResults {
+                clusters,
+                documents,
+                unmatched_urls,
+                cluster_time_ms,
+            } => {
+                assert_eq!(clusters.len(), 2);
+                assert_eq!(clusters[0].cluster_id, "cluster_0");
+                assert_eq!(clusters[0].label, "Machine Learning");
+                assert_eq!(clusters[0].document_urls.len(), 1);
+                assert_eq!(clusters[1].label, "Systems Research");
+                assert_eq!(documents.len(), 2);
+                assert_eq!(
+                    documents["https://example.com/doc1"]
+                        .title
+                        .as_ref()
+                        .unwrap(),
+                    "Test Document"
+                );
+                assert!(documents["https://example.com/doc2"].title.is_none());
+                assert_eq!(unmatched_urls, vec!["https://not-indexed.com"]);
+                assert_eq!(cluster_time_ms, 42);
+            }
+            _ => panic!("Expected ClusterResults response"),
+        }
+    }
+
+    #[test]
     fn test_search_result_with_score_breakdown_roundtrip() {
         use crate::retrieval::{RetrievalMethod, ScoreBreakdown, NormalizedScore};
         use crate::types::{Chunk, ChunkMetadata};
