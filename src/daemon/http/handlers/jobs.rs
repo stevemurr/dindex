@@ -15,7 +15,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 use tracing::{debug, error, info, warn};
 
-use super::AppState;
+use super::{bad_request, ipc_error, unexpected_response, AppState};
 use crate::daemon::http::types::*;
 use crate::daemon::protocol::{ProgressStage, Request, Response as IpcResponse};
 
@@ -39,14 +39,7 @@ pub async fn start_scrape(
     Json(request): Json<ScrapeRequest>,
 ) -> impl IntoResponse {
     if request.urls.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(
-                "INVALID_REQUEST".to_string(),
-                "At least one URL is required".to_string(),
-            )),
-        )
-            .into_response();
+        return bad_request("INVALID_REQUEST", "At least one URL is required");
     }
 
     debug!("HTTP scrape request: {} URLs, depth={}", request.urls.len(), request.options.max_depth);
@@ -67,17 +60,9 @@ pub async fn start_scrape(
             .into_response(),
         IpcResponse::Error { code, message } => {
             error!("Scrape start failed: {:?} - {}", code, message);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(format!("{:?}", code), message)),
-            )
-                .into_response()
+            ipc_error(code, message)
         }
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal_error("Unexpected response type")),
-        )
-            .into_response(),
+        _ => unexpected_response(),
     }
 }
 
@@ -130,23 +115,8 @@ pub async fn get_job_progress(
             }),
         )
             .into_response(),
-        IpcResponse::Error { code, message } => {
-            let status = if code == crate::daemon::protocol::ErrorCode::JobNotFound {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (
-                status,
-                Json(ErrorResponse::new(format!("{:?}", code), message)),
-            )
-                .into_response()
-        }
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal_error("Unexpected response type")),
-        )
-            .into_response(),
+        IpcResponse::Error { code, message } => ipc_error(code, message),
+        _ => unexpected_response(),
     }
 }
 
@@ -186,11 +156,7 @@ pub async fn cancel_job(
             )
                 .into_response()
         }
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal_error("Unexpected response type")),
-        )
-            .into_response(),
+        _ => unexpected_response(),
     }
 }
 

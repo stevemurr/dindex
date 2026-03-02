@@ -10,7 +10,7 @@ use std::time::Instant;
 use tracing::{debug, error};
 use uuid::Uuid;
 
-use super::{AppState, MAX_DOCUMENT_SIZE};
+use super::{bad_request, ipc_error, unexpected_response, AppState, MAX_DOCUMENT_SIZE};
 use crate::daemon::http::types::*;
 use crate::daemon::protocol::{self, Request, Response as IpcResponse};
 use crate::types::Document;
@@ -28,39 +28,23 @@ pub async fn index_documents(
     // Validate document content sizes
     for (i, doc) in request.documents.iter().enumerate() {
         if doc.content.len() > MAX_DOCUMENT_SIZE {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "DOCUMENT_TOO_LARGE".to_string(),
-                    format!(
-                        "Document {} content length {} exceeds maximum allowed size of {} bytes",
-                        i,
-                        doc.content.len(),
-                        MAX_DOCUMENT_SIZE
-                    ),
-                )),
-            )
-                .into_response();
+            return bad_request(
+                "DOCUMENT_TOO_LARGE",
+                format!(
+                    "Document {} content length {} exceeds maximum allowed size of {} bytes",
+                    i,
+                    doc.content.len(),
+                    MAX_DOCUMENT_SIZE
+                ),
+            );
         }
     }
 
     // Start the indexing stream
     match state.handler.handle(Request::IndexDocuments { stream_id }).await {
         IpcResponse::StreamReady { .. } => {}
-        IpcResponse::Error { code, message } => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(format!("{:?}", code), message)),
-            )
-                .into_response();
-        }
-        _ => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal_error("Failed to start indexing stream")),
-            )
-                .into_response();
-        }
+        IpcResponse::Error { code, message } => return ipc_error(code, message),
+        _ => return unexpected_response(),
     }
 
     // Send each document as chunks
@@ -105,13 +89,7 @@ pub async fn index_documents(
             .await
         {
             IpcResponse::ChunkAck { .. } => {}
-            IpcResponse::Error { code, message } => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new(format!("{:?}", code), message)),
-                )
-                    .into_response();
-            }
+            IpcResponse::Error { code, message } => return ipc_error(code, message),
             _ => {}
         }
     }
@@ -130,16 +108,8 @@ pub async fn index_documents(
             )
                 .into_response()
         }
-        IpcResponse::Error { code, message } => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new(format!("{:?}", code), message)),
-        )
-            .into_response(),
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal_error("Failed to complete indexing")),
-        )
-            .into_response(),
+        IpcResponse::Error { code, message } => ipc_error(code, message),
+        _ => unexpected_response(),
     }
 }
 
@@ -151,14 +121,7 @@ pub async fn delete_documents(
     let start = Instant::now();
 
     if request.document_ids.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(
-                "INVALID_REQUEST".to_string(),
-                "document_ids must not be empty".to_string(),
-            )),
-        )
-            .into_response();
+        return bad_request("INVALID_REQUEST", "document_ids must not be empty");
     }
 
     debug!("HTTP delete request: {} documents", request.document_ids.len());
@@ -185,17 +148,9 @@ pub async fn delete_documents(
         }
         IpcResponse::Error { code, message } => {
             error!("Delete failed: {:?} - {}", code, message);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(format!("{:?}", code), message)),
-            )
-                .into_response()
+            ipc_error(code, message)
         }
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal_error("Unexpected response type")),
-        )
-            .into_response(),
+        _ => unexpected_response(),
     }
 }
 
@@ -219,17 +174,9 @@ pub async fn clear_index(State(state): State<AppState>) -> impl IntoResponse {
         }
         IpcResponse::Error { code, message } => {
             error!("Clear failed: {:?} - {}", code, message);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(format!("{:?}", code), message)),
-            )
-                .into_response()
+            ipc_error(code, message)
         }
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal_error("Unexpected response type")),
-        )
-            .into_response(),
+        _ => unexpected_response(),
     }
 }
 
@@ -237,15 +184,7 @@ pub async fn clear_index(State(state): State<AppState>) -> impl IntoResponse {
 pub async fn commit(State(state): State<AppState>) -> impl IntoResponse {
     match state.handler.handle(Request::ForceCommit).await {
         IpcResponse::Ok => (StatusCode::OK, Json(CommitResponse { success: true })).into_response(),
-        IpcResponse::Error { code, message } => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new(format!("{:?}", code), message)),
-        )
-            .into_response(),
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal_error("Unexpected response type")),
-        )
-            .into_response(),
+        IpcResponse::Error { code, message } => ipc_error(code, message),
+        _ => unexpected_response(),
     }
 }

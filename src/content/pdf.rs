@@ -5,6 +5,59 @@
 use super::ExtractedDocument;
 use anyhow::{Context, Result};
 
+/// RAII guard that redirects stdout/stderr to /dev/null and restores on drop.
+///
+/// Ensures FD restoration even if the guarded code panics.
+#[cfg(unix)]
+struct SuppressOutput {
+    saved_stdout: i32,
+    saved_stderr: i32,
+}
+
+#[cfg(unix)]
+impl SuppressOutput {
+    fn new() -> Self {
+        use std::fs::File;
+        use std::os::unix::io::IntoRawFd;
+
+        // Safety: dup() on valid FDs (1, 2) returns a new FD or -1 on error.
+        let saved_stdout = unsafe { libc::dup(1) };
+        let saved_stderr = unsafe { libc::dup(2) };
+
+        if let Ok(dev_null) = File::open("/dev/null") {
+            let null_fd = dev_null.into_raw_fd();
+            // Safety: dup2() atomically redirects the target FD.
+            unsafe {
+                libc::dup2(null_fd, 1);
+                libc::dup2(null_fd, 2);
+                libc::close(null_fd);
+            }
+        }
+
+        Self {
+            saved_stdout,
+            saved_stderr,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SuppressOutput {
+    fn drop(&mut self) {
+        // Safety: restoring previously saved FDs and closing the duplicates.
+        unsafe {
+            if self.saved_stdout >= 0 {
+                libc::dup2(self.saved_stdout, 1);
+                libc::close(self.saved_stdout);
+            }
+            if self.saved_stderr >= 0 {
+                libc::dup2(self.saved_stderr, 2);
+                libc::close(self.saved_stderr);
+            }
+        }
+    }
+}
+
 /// PDF content extractor
 pub struct PdfExtractor;
 
@@ -33,58 +86,20 @@ impl PdfExtractor {
         Ok(doc)
     }
 
-    /// Extract text while suppressing stdout/stderr noise from pdf-extract
+    /// Extract text while suppressing stdout/stderr noise from pdf-extract.
     ///
-    /// NOTE: The FD redirection below is not thread-safe — it temporarily redirects
+    /// pdf-extract uses `println!` for warnings about Unicode mismatches,
+    /// unknown glyphs, missing chars, etc. We redirect stdout/stderr to /dev/null
+    /// during extraction. An RAII guard ensures FDs are restored even on panic.
+    ///
+    /// NOTE: The FD redirection is not thread-safe — it temporarily redirects
     /// process-wide stdout/stderr, so other threads may lose output during extraction.
-    /// This is acceptable because pdf-extract's println! noise is purely cosmetic
-    /// (Unicode mismatch warnings, unknown glyph names) and the window is brief.
+    /// This is acceptable because the noise is purely cosmetic and the window is brief.
     fn extract_with_suppressed_stderr(bytes: &[u8]) -> Result<String, pdf_extract::OutputError> {
-        // pdf-extract uses println! for warnings about Unicode mismatches,
-        // unknown glyphs, missing chars, etc. These are not actionable by users
-        // and clutter the output. We redirect both stdout and stderr to /dev/null.
-
         #[cfg(unix)]
-        {
-            use std::fs::File;
-            use std::os::unix::io::IntoRawFd;
+        let _guard = SuppressOutput::new();
 
-            const STDOUT_FD: i32 = 1;
-            const STDERR_FD: i32 = 2;
-
-            // Save original stdout and stderr
-            let saved_stdout = unsafe { libc::dup(STDOUT_FD) };
-            let saved_stderr = unsafe { libc::dup(STDERR_FD) };
-
-            // Open /dev/null and redirect both stdout and stderr to it
-            if let Ok(dev_null) = File::open("/dev/null") {
-                let null_fd = dev_null.into_raw_fd();
-                unsafe { libc::dup2(null_fd, STDOUT_FD) };
-                unsafe { libc::dup2(null_fd, STDERR_FD) };
-                unsafe { libc::close(null_fd) };
-            }
-
-            // Perform the extraction
-            let result = pdf_extract::extract_text_from_mem(bytes);
-
-            // Restore original stdout and stderr
-            if saved_stdout >= 0 {
-                unsafe { libc::dup2(saved_stdout, STDOUT_FD) };
-                unsafe { libc::close(saved_stdout) };
-            }
-            if saved_stderr >= 0 {
-                unsafe { libc::dup2(saved_stderr, STDERR_FD) };
-                unsafe { libc::close(saved_stderr) };
-            }
-
-            result
-        }
-
-        #[cfg(not(unix))]
-        {
-            // On non-Unix platforms, just run without suppression
-            pdf_extract::extract_text_from_mem(bytes)
-        }
+        pdf_extract::extract_text_from_mem(bytes)
     }
 
     /// Clean up common PDF extraction artifacts

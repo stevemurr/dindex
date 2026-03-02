@@ -113,3 +113,164 @@ fn compute_structure_score(document: &Html, text_content: &str) -> f32 {
 
     score.clamp(0.0, 1.0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scraper::Html;
+
+    fn parse(html: &str) -> Html {
+        Html::parse_document(html)
+    }
+
+    // ── detect_feed_links ──────────────────────────────────────
+
+    #[test]
+    fn feed_links_rss() {
+        let doc = parse(r#"<html><head><link type="application/rss+xml" href="/feed.xml"></head><body></body></html>"#);
+        assert_eq!(detect_feed_links(&doc), 1.0);
+    }
+
+    #[test]
+    fn feed_links_atom() {
+        let doc = parse(r#"<html><head><link type="application/atom+xml" href="/atom.xml"></head><body></body></html>"#);
+        assert_eq!(detect_feed_links(&doc), 1.0);
+    }
+
+    #[test]
+    fn feed_links_none() {
+        let doc = parse("<html><head></head><body></body></html>");
+        assert_eq!(detect_feed_links(&doc), 0.0);
+    }
+
+    // ── compute_external_link_density ──────────────────────────
+
+    #[test]
+    fn link_density_empty_text() {
+        let doc = parse("<html><body></body></html>");
+        assert_eq!(compute_external_link_density(&doc, ""), 0.0);
+    }
+
+    #[test]
+    fn link_density_no_external_links() {
+        let doc = parse(r#"<html><body><a href="/local">local</a></body></html>"#);
+        assert_eq!(compute_external_link_density(&doc, "some local content here"), 0.0);
+    }
+
+    #[test]
+    fn link_density_below_threshold() {
+        let text = "a ".repeat(50); // 100 chars
+        let doc = parse(r#"<html><body><a href="https://ext.com">abc</a></body></html>"#);
+        assert_eq!(compute_external_link_density(&doc, &text), 0.0);
+    }
+
+    #[test]
+    fn link_density_high() {
+        let doc = parse(r#"<html><body><a href="https://ext.com">external link text that is very long</a></body></html>"#);
+        let text = "external link text that is very long";
+        assert_eq!(compute_external_link_density(&doc, text), 1.0);
+    }
+
+    #[test]
+    fn link_density_mid_range() {
+        let long_text = "word ".repeat(80);
+        let link_text = "link text here long enough";
+        let total_text = format!("{} {}", long_text, link_text);
+        let doc = parse(&format!(
+            r#"<html><body><p>{}</p><a href="https://ext.com">{}</a></body></html>"#,
+            long_text, link_text
+        ));
+        let density = compute_external_link_density(&doc, &total_text);
+        assert!(density > 0.0 && density < 1.0, "density={density}");
+    }
+
+    // ── compute_structure_score ────────────────────────────────
+
+    #[test]
+    fn structure_score_article_reduces() {
+        let doc = parse("<html><body><article><p>Content</p></article></body></html>");
+        let text = "word ".repeat(250);
+        let score = compute_structure_score(&doc, &text);
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn structure_score_short_content() {
+        let doc = parse("<html><body><p>Short</p></body></html>");
+        let text = "word ".repeat(50);
+        let score = compute_structure_score(&doc, &text);
+        assert!((score - 0.3).abs() < 0.01, "score={score}");
+    }
+
+    #[test]
+    fn structure_score_medium_content() {
+        let doc = parse("<html><body><p>Medium</p></body></html>");
+        let text = "word ".repeat(300);
+        let score = compute_structure_score(&doc, &text);
+        assert!((score - 0.1).abs() < 0.01, "score={score}");
+    }
+
+    #[test]
+    fn structure_score_heavy_link_lists() {
+        let mut html = String::from("<html><body><ul>");
+        for i in 0..15 {
+            html.push_str(&format!(
+                r#"<li><a href="https://example.com/{i}">Link {i}</a></li>"#
+            ));
+        }
+        html.push_str("</ul></body></html>");
+        let doc = parse(&html);
+        let text = "word ".repeat(50);
+        let score = compute_structure_score(&doc, &text);
+        assert!(score >= 0.7, "score={score}");
+    }
+
+    #[test]
+    fn structure_score_long_content_no_lists() {
+        let doc = parse("<html><body><p>Content</p></body></html>");
+        let text = "word ".repeat(600);
+        let score = compute_structure_score(&doc, &text);
+        assert_eq!(score, 0.0);
+    }
+
+    // ── compute_aggregator_score (integration) ─────────────────
+
+    #[test]
+    fn aggregator_original_content() {
+        let doc = parse("<html><body><article><p>Long article</p></article></body></html>");
+        let text = "word ".repeat(300);
+        let score = compute_aggregator_score(&doc, &text);
+        assert!(score < 0.2, "score={score}");
+    }
+
+    #[test]
+    fn aggregator_page() {
+        let mut html = String::from(
+            r#"<html><head><link type="application/rss+xml" href="/feed"></head><body><ul>"#,
+        );
+        for i in 0..20 {
+            html.push_str(&format!(
+                r#"<li><a href="https://external.com/{i}">External Link {i}</a></li>"#
+            ));
+        }
+        html.push_str("</ul></body></html>");
+        let doc = parse(&html);
+        let text = "word ".repeat(50);
+        let score = compute_aggregator_score(&doc, &text);
+        assert!(score > 0.4, "score={score}");
+    }
+
+    #[test]
+    fn aggregator_empty_page() {
+        let doc = parse("<html><body></body></html>");
+        let score = compute_aggregator_score(&doc, "");
+        assert!(score >= 0.0 && score <= 1.0);
+    }
+
+    #[test]
+    fn aggregator_always_clamped() {
+        let doc = parse("<html><body></body></html>");
+        let score = compute_aggregator_score(&doc, "test");
+        assert!(score >= 0.0 && score <= 1.0);
+    }
+}

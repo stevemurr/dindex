@@ -188,15 +188,17 @@ impl Config {
 
         // HTTP config validation
         if self.http.enabled && !self.http.listen_addr.is_empty() {
-            // Extract port from listen_addr (format: "host:port")
-            if let Some(port_str) = self.http.listen_addr.rsplit(':').next() {
-                if let Ok(port) = port_str.parse::<u32>() {
-                    if port == 0 || port > 65535 {
-                        errors.push(format!(
-                            "HTTP listen port must be between 1 and 65535, got {}",
-                            port
-                        ));
+            match self.http.listen_addr.parse::<std::net::SocketAddr>() {
+                Ok(addr) => {
+                    if addr.port() == 0 {
+                        errors.push("HTTP listen port must not be 0".to_string());
                     }
+                }
+                Err(_) => {
+                    errors.push(format!(
+                        "Invalid HTTP listen address '{}': expected 'ip:port' or '[ipv6]:port'",
+                        self.http.listen_addr
+                    ));
                 }
             }
         }
@@ -383,7 +385,7 @@ mod tests {
         cfg.http.enabled = true;
         cfg.http.listen_addr = "0.0.0.0:0".to_string();
         let err = cfg.validate().unwrap_err();
-        assert!(err.to_string().contains("HTTP listen port must be between 1 and 65535"));
+        assert!(err.to_string().contains("HTTP listen port must not be 0"));
     }
 
     #[test]
@@ -392,7 +394,16 @@ mod tests {
         cfg.http.enabled = true;
         cfg.http.listen_addr = "0.0.0.0:70000".to_string();
         let err = cfg.validate().unwrap_err();
-        assert!(err.to_string().contains("HTTP listen port must be between 1 and 65535"));
+        assert!(err.to_string().contains("Invalid HTTP listen address"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_http_addr() {
+        let mut cfg = valid_config();
+        cfg.http.enabled = true;
+        cfg.http.listen_addr = "not-an-address".to_string();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("Invalid HTTP listen address"));
     }
 
     #[test]
@@ -401,6 +412,23 @@ mod tests {
         cfg.http.enabled = true;
         cfg.http.listen_addr = "127.0.0.1:8080".to_string();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_ipv6_http_addr() {
+        let mut cfg = valid_config();
+        cfg.http.enabled = true;
+        cfg.http.listen_addr = "[::1]:8080".to_string();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_ipv6_port_zero() {
+        let mut cfg = valid_config();
+        cfg.http.enabled = true;
+        cfg.http.listen_addr = "[::]:0".to_string();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("HTTP listen port must not be 0"));
     }
 
     #[test]

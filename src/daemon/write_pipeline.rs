@@ -98,6 +98,10 @@ struct WritePipelineWorker {
     batch_size: usize,
     commit_interval: Duration,
     metrics: Option<Arc<DaemonMetrics>>,
+    /// Consecutive flush failures for the current batch
+    consecutive_failures: u32,
+    /// Total chunks skipped due to embedding failures
+    skipped_chunks: u64,
 }
 
 impl WritePipelineWorker {
@@ -116,6 +120,8 @@ impl WritePipelineWorker {
             batch_size,
             commit_interval,
             metrics,
+            consecutive_failures: 0,
+            skipped_chunks: 0,
         }
     }
 
@@ -143,9 +149,10 @@ impl WritePipelineWorker {
                                 None => match self.generate_embedding(&chunk.content) {
                                     Ok(e) => e,
                                     Err(e) => {
+                                        self.skipped_chunks += 1;
                                         warn!(
-                                            "Skipping chunk {}: embedding failed: {}",
-                                            chunk.metadata.chunk_id, e
+                                            "Skipping chunk {} (total skipped: {}): embedding failed: {}",
+                                            chunk.metadata.chunk_id, self.skipped_chunks, e
                                         );
                                         continue;
                                     }
@@ -156,19 +163,26 @@ impl WritePipelineWorker {
 
                             // Flush if batch is full
                             if batch.len() >= self.batch_size {
-                                self.flush_batch(&mut batch).await;
+                                if let Err(e) = self.flush_batch(&mut batch).await {
+                                    warn!("Batch flush failed: {}", e);
+                                }
                             }
                         }
                         IngestItem::Commit { respond_to, stream_id } => {
                             debug!("Commit requested for stream {}", stream_id);
 
                             // Flush any pending chunks first
-                            if !batch.is_empty() {
-                                self.flush_batch(&mut batch).await;
-                            }
+                            let flush_result = if !batch.is_empty() {
+                                self.flush_batch(&mut batch).await
+                            } else {
+                                Ok(0)
+                            };
 
-                            // Commit to disk
-                            let result = self.index_manager.commit();
+                            // Propagate flush error to commit requester
+                            let result = match flush_result {
+                                Ok(_) => self.index_manager.commit(),
+                                Err(e) => Err(e),
+                            };
                             let _ = respond_to.send(result);
                         }
                     }
@@ -178,9 +192,15 @@ impl WritePipelineWorker {
                 _ = interval.tick() => {
                     if !batch.is_empty() {
                         debug!("Periodic flush of {} chunks", batch.len());
-                        self.flush_batch(&mut batch).await;
-                        if let Err(e) = self.index_manager.commit() {
-                            warn!("Periodic commit failed: {}", e);
+                        match self.flush_batch(&mut batch).await {
+                            Ok(_) => {
+                                if let Err(e) = self.index_manager.commit() {
+                                    warn!("Periodic commit failed: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Periodic flush failed: {}", e);
+                            }
                         }
                     }
                 }
@@ -191,7 +211,10 @@ impl WritePipelineWorker {
 
                     // Final flush
                     if !batch.is_empty() {
-                        self.flush_batch(&mut batch).await;
+                        if let Err(e) = self.flush_batch(&mut batch).await {
+                            error!("Final flush failed, {} chunks may be lost: {}", batch.len(), e);
+                            batch.clear();
+                        }
                     }
 
                     // Final commit
@@ -207,23 +230,46 @@ impl WritePipelineWorker {
         info!("Write pipeline stopped");
     }
 
-    async fn flush_batch(&self, batch: &mut Vec<(Chunk, Vec<f32>)>) {
+    /// Flush a batch of chunks to the index.
+    ///
+    /// On success, clears the batch and resets the failure counter.
+    /// On failure, keeps the batch for retry. After 3 consecutive failures,
+    /// drops the batch to prevent unbounded memory growth.
+    async fn flush_batch(&mut self, batch: &mut Vec<(Chunk, Vec<f32>)>) -> Result<usize> {
         if batch.is_empty() {
-            return;
+            return Ok(0);
         }
 
         debug!("Flushing batch of {} chunks", batch.len());
 
         match self.index_manager.index_batch(batch) {
             Ok(keys) => {
-                debug!("Indexed {} chunks with keys {:?}", keys.len(), &keys[..keys.len().min(3)]);
+                let count = keys.len();
+                debug!("Indexed {} chunks with keys {:?}", count, &keys[..count.min(3)]);
+                self.consecutive_failures = 0;
+                batch.clear();
+                Ok(count)
             }
             Err(e) => {
-                error!("Failed to index batch: {}", e);
+                self.consecutive_failures += 1;
+                if self.consecutive_failures >= 3 {
+                    error!(
+                        "Failed to index batch after {} attempts, dropping {} chunks: {}",
+                        self.consecutive_failures,
+                        batch.len(),
+                        e
+                    );
+                    batch.clear();
+                    self.consecutive_failures = 0;
+                } else {
+                    error!(
+                        "Failed to index batch (attempt {}), will retry: {}",
+                        self.consecutive_failures, e
+                    );
+                }
+                Err(anyhow::anyhow!("Failed to index batch: {}", e))
             }
         }
-
-        batch.clear();
     }
 
     /// Generate embedding for content using the real embedding engine.

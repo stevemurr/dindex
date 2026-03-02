@@ -105,47 +105,46 @@ fn split_sentences(text: &str) -> Vec<String> {
 /// Pre-split text on pipes, tabs, and multi-newlines.
 fn pre_split_on_delimiters(text: &str) -> Vec<String> {
     let mut fragments = Vec::new();
+    let mut start = 0;
 
-    // Split on pipes, tabs, and double+ newlines
-    let mut current = String::new();
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-
+    let bytes = text.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
-    while i < len {
-        let ch = chars[i];
 
-        if ch == '|' || ch == '\t' {
-            let trimmed = current.trim().to_string();
+    while i < len {
+        let b = bytes[i];
+
+        if b == b'|' || b == b'\t' {
+            let trimmed = text[start..i].trim();
             if !trimmed.is_empty() {
-                fragments.push(trimmed);
+                fragments.push(trimmed.to_string());
             }
-            current.clear();
+            start = i + 1;
             i += 1;
             continue;
         }
 
         // Check for multi-newline (two or more newlines in a row)
-        if ch == '\n' && i + 1 < len && chars[i + 1] == '\n' {
-            let trimmed = current.trim().to_string();
+        if b == b'\n' && i + 1 < len && bytes[i + 1] == b'\n' {
+            let trimmed = text[start..i].trim();
             if !trimmed.is_empty() {
-                fragments.push(trimmed);
+                fragments.push(trimmed.to_string());
             }
-            current.clear();
             // Skip all consecutive newlines
-            while i < len && chars[i] == '\n' {
+            i += 1;
+            while i < len && bytes[i] == b'\n' {
                 i += 1;
             }
+            start = i;
             continue;
         }
 
-        current.push(ch);
         i += 1;
     }
 
-    let trimmed = current.trim().to_string();
+    let trimmed = text[start..].trim();
     if !trimmed.is_empty() {
-        fragments.push(trimmed);
+        fragments.push(trimmed.to_string());
     }
 
     fragments
@@ -154,32 +153,51 @@ fn pre_split_on_delimiters(text: &str) -> Vec<String> {
 /// Split a text fragment into sentences based on `.!?` punctuation.
 fn split_on_punctuation(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
-    let mut current = String::new();
+    let mut start = 0;
 
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
+    let mut chars = text.char_indices().peekable();
 
-    for i in 0..len {
-        current.push(chars[i]);
+    while let Some((i, ch)) = chars.next() {
+        let is_terminal = ch == '.' || ch == '!' || ch == '?';
+        if !is_terminal {
+            continue;
+        }
 
-        let is_terminal = chars[i] == '.' || chars[i] == '!' || chars[i] == '?';
-        let followed_by_space = i + 1 < len && chars[i + 1].is_whitespace();
-        let followed_by_upper = i + 2 < len && chars[i + 2].is_uppercase();
-        let at_end = i + 1 == len;
+        let byte_after = i + ch.len_utf8();
+        let at_end = byte_after >= text.len();
 
-        if is_terminal && (at_end || (followed_by_space && (followed_by_upper || i + 2 >= len))) {
-            let trimmed = current.trim().to_string();
+        if at_end {
+            let trimmed = text[start..byte_after].trim();
             if !trimmed.is_empty() {
-                sentences.push(trimmed);
+                sentences.push(trimmed.to_string());
             }
-            current.clear();
+            start = byte_after;
+            continue;
+        }
+
+        // Peek at next characters without consuming
+        let rest = &text[byte_after..];
+        let mut rest_chars = rest.chars();
+        let next_ch = rest_chars.next();
+        let next_next_ch = rest_chars.next();
+
+        let followed_by_space = next_ch.is_some_and(|c| c.is_whitespace());
+        let followed_by_upper = next_next_ch.is_some_and(|c| c.is_uppercase());
+        let no_char_after_space = next_next_ch.is_none();
+
+        if followed_by_space && (followed_by_upper || no_char_after_space) {
+            let trimmed = text[start..byte_after].trim();
+            if !trimmed.is_empty() {
+                sentences.push(trimmed.to_string());
+            }
+            start = byte_after;
         }
     }
 
     // Add remaining text as a sentence
-    let trimmed = current.trim().to_string();
+    let trimmed = text[start..].trim();
     if !trimmed.is_empty() {
-        sentences.push(trimmed);
+        sentences.push(trimmed.to_string());
     }
 
     sentences
@@ -209,12 +227,16 @@ fn sentence_quality_score(sentence: &str, index: usize, total: usize) -> f32 {
     };
 
     // Word structure: prefer average word length 3-8
-    let words: Vec<&str> = sentence.split_whitespace().collect();
-    let word_score = if words.is_empty() {
+    let mut word_count = 0usize;
+    let mut total_word_chars = 0usize;
+    for w in sentence.split_whitespace() {
+        word_count += 1;
+        total_word_chars += w.chars().count();
+    }
+    let word_score = if word_count == 0 {
         0.0
     } else {
-        let avg_word_len =
-            words.iter().map(|w| w.chars().count() as f32).sum::<f32>() / words.len() as f32;
+        let avg_word_len = total_word_chars as f32 / word_count as f32;
         if avg_word_len < 3.0 {
             avg_word_len / 3.0
         } else if avg_word_len > 8.0 {

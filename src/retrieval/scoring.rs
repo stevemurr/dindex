@@ -194,7 +194,7 @@ pub struct OverlapReranker {
     /// Weight for the overlap boost (default: 0.3)
     pub overlap_weight: f32,
     /// Stop words to exclude from overlap matching
-    pub stop_words: std::collections::HashSet<String>,
+    pub stop_words: std::collections::HashSet<&'static str>,
 }
 
 impl OverlapReranker {
@@ -209,7 +209,7 @@ impl OverlapReranker {
 
     /// Create with default weights and English stop words.
     pub fn with_stop_words(score_weight: f32, overlap_weight: f32) -> Self {
-        let stop_words: std::collections::HashSet<String> = [
+        let stop_words: std::collections::HashSet<&'static str> = [
             "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
             "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
             "being", "have", "has", "had", "do", "does", "did", "will", "would",
@@ -219,8 +219,7 @@ impl OverlapReranker {
             "what", "which", "who", "whom", "how", "when", "where", "why",
             "not", "no", "so", "if", "then", "than", "as",
         ]
-        .iter()
-        .map(|s| s.to_string())
+        .into_iter()
         .collect();
         Self {
             score_weight,
@@ -248,11 +247,9 @@ impl ScoringStage for OverlapReranker {
 
         for result in results.iter_mut() {
             let content_lower = result.chunk.content.to_lowercase();
-            let content_words: std::collections::HashSet<&str> =
-                content_lower.split_whitespace().collect();
             let overlap: usize = query_terms
                 .iter()
-                .filter(|term| content_words.contains(**term))
+                .filter(|term| content_lower.split_whitespace().any(|w| w == **term))
                 .count();
 
             let overlap_boost = overlap as f32 / query_terms.len() as f32;

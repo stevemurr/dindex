@@ -119,26 +119,26 @@ impl HybridRetriever {
 
             if let Some(embedding) = embedding_ref {
                 let dense_results = self.vector_index.search(embedding, candidate_count)?;
-                let ranked: Vec<(ChunkId, f32)> = dense_results
-                    .iter()
-                    .map(|r| (r.chunk_id.clone(), r.similarity))
-                    .collect();
-                ranked_lists.push(to_ranked_results(&ranked, RetrievalMethod::Dense));
                 debug!("Dense search: {} results", dense_results.len());
+                let ranked: Vec<(ChunkId, f32)> = dense_results
+                    .into_iter()
+                    .map(|r| (r.chunk_id, r.similarity))
+                    .collect();
+                ranked_lists.push(to_ranked_results(ranked, RetrievalMethod::Dense));
             }
         }
 
         // BM25 search
         if self.config.enable_bm25 {
             let bm25_results = self.bm25_index.search(&query.text, candidate_count)?;
+            debug!("BM25 search: {} results", bm25_results.len());
             let mut ranked: Vec<(ChunkId, f32)> = bm25_results
-                .iter()
-                .map(|r| (r.chunk_id.clone(), r.score))
+                .into_iter()
+                .map(|r| (r.chunk_id, r.score))
                 .collect();
             // Normalize raw BM25 scores to [0, 1] for consistent scoring
             normalize_bm25_scores(&mut ranked);
-            ranked_lists.push(to_ranked_results(&ranked, RetrievalMethod::Bm25));
-            debug!("BM25 search: {} results", bm25_results.len());
+            ranked_lists.push(to_ranked_results(ranked, RetrievalMethod::Bm25));
         }
 
         // Fuse results
@@ -154,19 +154,10 @@ impl HybridRetriever {
         };
         let top_fused = &fused[..fetch_k];
 
-        let chunk_ids: Vec<String> = top_fused.iter().map(|f| f.chunk_id.clone()).collect();
-        let stored_chunks = self.chunk_storage.get_batch(&chunk_ids);
-
-        // Build HashMap for O(1) lookup instead of O(n) linear scan per result
-        let chunk_map: HashMap<&str, _> = stored_chunks
-            .iter()
-            .map(|s| (s.chunk.metadata.chunk_id.as_str(), s))
-            .collect();
-
-        // Build search results
+        // Build search results by looking up each fused result directly (avoids cloning all chunk IDs)
         let mut results: Vec<SearchResult> = Vec::with_capacity(fetch_k);
         for fused_result in top_fused {
-            if let Some(stored) = chunk_map.get(fused_result.chunk_id.as_str()) {
+            if let Some(stored) = self.chunk_storage.get(&fused_result.chunk_id) {
                 let mut result = SearchResult::new(stored.chunk.clone(), fused_result.rrf_score);
                 result.matched_by = fused_result.contributing_methods.clone();
                 results.push(result);

@@ -8,7 +8,7 @@ use axum::{
 };
 use tracing::{debug, error};
 
-use super::{AppState, MAX_QUERY_LENGTH};
+use super::{bad_request, ipc_error, unexpected_response, AppState, MAX_QUERY_LENGTH};
 use crate::daemon::http::types::*;
 use crate::daemon::protocol::{OutputFormat, Request, Response as IpcResponse};
 use crate::types::GroupedSearchResult;
@@ -20,18 +20,14 @@ pub async fn search(
 ) -> impl IntoResponse {
     // Validate query length
     if request.query.len() > MAX_QUERY_LENGTH {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(
-                "QUERY_TOO_LARGE".to_string(),
-                format!(
-                    "Query length {} exceeds maximum allowed length of {} bytes",
-                    request.query.len(),
-                    MAX_QUERY_LENGTH
-                ),
-            )),
-        )
-            .into_response();
+        return bad_request(
+            "QUERY_TOO_LARGE",
+            format!(
+                "Query length {} exceeds maximum allowed length of {} bytes",
+                request.query.len(),
+                MAX_QUERY_LENGTH
+            ),
+        );
     }
 
     debug!("HTTP search request: query={}, top_k={}", request.query, request.top_k);
@@ -110,16 +106,8 @@ pub async fn search(
         }
         IpcResponse::Error { code, message } => {
             error!("Search failed: {:?} - {}", code, message);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(format!("{:?}", code), message)),
-            )
-                .into_response()
+            ipc_error(code, message)
         }
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal_error("Unexpected response type")),
-        )
-            .into_response(),
+        _ => unexpected_response(),
     }
 }

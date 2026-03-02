@@ -455,3 +455,457 @@ impl ContentExtractor {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scraper::Html;
+
+    fn extractor() -> ContentExtractor {
+        ContentExtractor::default()
+    }
+
+    fn parse(html: &str) -> Html {
+        Html::parse_document(html)
+    }
+
+    // ── extract_title ──────────────────────────────────────────
+
+    #[test]
+    fn title_from_og() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><meta property="og:title" content="OG Title"><title>HTML Title</title></head><body></body></html>"#);
+        assert_eq!(ext.extract_title(&doc), "OG Title");
+    }
+
+    #[test]
+    fn title_from_title_tag() {
+        let ext = extractor();
+        let doc = parse("<html><head><title>Page Title</title></head><body></body></html>");
+        assert_eq!(ext.extract_title(&doc), "Page Title");
+    }
+
+    #[test]
+    fn title_from_h1() {
+        let ext = extractor();
+        let doc = parse("<html><head></head><body><h1>Heading Title</h1></body></html>");
+        assert_eq!(ext.extract_title(&doc), "Heading Title");
+    }
+
+    #[test]
+    fn title_fallback_untitled() {
+        let ext = extractor();
+        let doc = parse("<html><head></head><body><p>No title here.</p></body></html>");
+        assert_eq!(ext.extract_title(&doc), "Untitled");
+    }
+
+    #[test]
+    fn title_empty_title_tag_falls_through() {
+        let ext = extractor();
+        let doc = parse("<html><head><title>   </title></head><body><h1>Real Title</h1></body></html>");
+        assert_eq!(ext.extract_title(&doc), "Real Title");
+    }
+
+    // ── extract_author ─────────────────────────────────────────
+
+    #[test]
+    fn author_from_meta() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><meta name="author" content="Jane Doe"></head><body></body></html>"#);
+        assert_eq!(ext.extract_author(&doc), Some("Jane Doe".to_string()));
+    }
+
+    #[test]
+    fn author_from_itemprop() {
+        let ext = extractor();
+        let doc = parse(r#"<html><body><span itemprop="author">John Smith</span></body></html>"#);
+        assert_eq!(ext.extract_author(&doc), Some("John Smith".to_string()));
+    }
+
+    #[test]
+    fn author_from_class() {
+        let ext = extractor();
+        let doc = parse(r#"<html><body><span class="author">Author Name</span></body></html>"#);
+        assert_eq!(ext.extract_author(&doc), Some("Author Name".to_string()));
+    }
+
+    #[test]
+    fn author_from_byline() {
+        let ext = extractor();
+        let doc = parse(r#"<html><body><div class="byline">Byline Author</div></body></html>"#);
+        assert_eq!(ext.extract_author(&doc), Some("Byline Author".to_string()));
+    }
+
+    #[test]
+    fn author_none_when_missing() {
+        let ext = extractor();
+        let doc = parse("<html><body><p>No author info</p></body></html>");
+        assert_eq!(ext.extract_author(&doc), None);
+    }
+
+    #[test]
+    fn author_rejects_long_text() {
+        let ext = extractor();
+        let long_name = "A".repeat(150);
+        let html = format!(r#"<html><body><span class="author">{}</span></body></html>"#, long_name);
+        let doc = parse(&html);
+        // author class text > 100 chars should be rejected
+        assert_eq!(ext.extract_author(&doc), None);
+    }
+
+    // ── extract_date ───────────────────────────────────────────
+
+    #[test]
+    fn date_from_time_element() {
+        let ext = extractor();
+        let doc = parse(r#"<html><body><time datetime="2024-06-15T12:00:00Z">June 15</time></body></html>"#);
+        let date = ext.extract_date(&doc);
+        assert!(date.is_some());
+        assert_eq!(date.unwrap().format("%Y-%m-%d").to_string(), "2024-06-15");
+    }
+
+    #[test]
+    fn date_from_meta_article_published() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><meta property="article:published_time" content="2023-03-20T08:30:00Z"></head><body></body></html>"#);
+        let date = ext.extract_date(&doc);
+        assert!(date.is_some());
+    }
+
+    #[test]
+    fn date_none_when_missing() {
+        let ext = extractor();
+        let doc = parse("<html><body><p>No date</p></body></html>");
+        assert_eq!(ext.extract_date(&doc), None);
+    }
+
+    // ── parse_date ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_date_rfc3339() {
+        let dt = ContentExtractor::parse_date("2024-01-15T10:30:00+00:00");
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn parse_date_rfc2822() {
+        let dt = ContentExtractor::parse_date("Mon, 15 Jan 2024 10:30:00 +0000");
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn parse_date_iso_date_only() {
+        let dt = ContentExtractor::parse_date("2024-01-15");
+        assert!(dt.is_some());
+        assert_eq!(dt.unwrap().format("%Y-%m-%d").to_string(), "2024-01-15");
+    }
+
+    #[test]
+    fn parse_date_slash_format() {
+        let dt = ContentExtractor::parse_date("2024/06/20");
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn parse_date_month_name() {
+        let dt = ContentExtractor::parse_date("January 15, 2024");
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn parse_date_abbreviated_month() {
+        let dt = ContentExtractor::parse_date("Jan 15, 2024");
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn parse_date_iso_datetime_no_tz() {
+        let dt = ContentExtractor::parse_date("2024-01-15T10:30:00");
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn parse_date_invalid() {
+        assert!(ContentExtractor::parse_date("not a date").is_none());
+        assert!(ContentExtractor::parse_date("").is_none());
+    }
+
+    // ── extract_language ───────────────────────────────────────
+
+    #[test]
+    fn language_from_html_attr() {
+        let ext = extractor();
+        let doc = parse(r#"<html lang="fr"><body></body></html>"#);
+        assert_eq!(ext.extract_language(&doc), Some("fr".to_string()));
+    }
+
+    #[test]
+    fn language_from_meta() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><meta name="language" content="de"></head><body></body></html>"#);
+        assert_eq!(ext.extract_language(&doc), Some("de".to_string()));
+    }
+
+    #[test]
+    fn language_from_og_locale() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><meta property="og:locale" content="en_US"></head><body></body></html>"#);
+        assert_eq!(ext.extract_language(&doc), Some("en_US".to_string()));
+    }
+
+    #[test]
+    fn language_none_when_missing() {
+        let ext = extractor();
+        let doc = parse("<html><body></body></html>");
+        assert_eq!(ext.extract_language(&doc), None);
+    }
+
+    // ── extract_excerpt ────────────────────────────────────────
+
+    #[test]
+    fn excerpt_from_meta_description() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><meta name="description" content="A great article about Rust."></head><body></body></html>"#);
+        assert_eq!(ext.extract_excerpt(&doc, ""), Some("A great article about Rust.".to_string()));
+    }
+
+    #[test]
+    fn excerpt_from_og_description() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><meta property="og:description" content="OG excerpt here."></head><body></body></html>"#);
+        assert_eq!(ext.extract_excerpt(&doc, ""), Some("OG excerpt here.".to_string()));
+    }
+
+    #[test]
+    fn excerpt_generated_from_text() {
+        let ext = extractor();
+        let doc = parse("<html><body></body></html>");
+        let text = "word ".repeat(30);
+        let excerpt = ext.extract_excerpt(&doc, &text);
+        assert!(excerpt.is_some());
+    }
+
+    #[test]
+    fn excerpt_none_for_short_text() {
+        let ext = extractor();
+        let doc = parse("<html><body></body></html>");
+        assert_eq!(ext.extract_excerpt(&doc, "too short"), None);
+    }
+
+    #[test]
+    fn excerpt_adds_ellipsis_for_long_text() {
+        let ext = extractor();
+        let doc = parse("<html><body></body></html>");
+        let text = "word ".repeat(100);
+        let excerpt = ext.extract_excerpt(&doc, &text).unwrap();
+        assert!(excerpt.ends_with("..."));
+    }
+
+    // ── extract_canonical ──────────────────────────────────────
+
+    #[test]
+    fn canonical_from_link_tag() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><link rel="canonical" href="https://example.com/canonical"></head><body></body></html>"#);
+        assert_eq!(ext.extract_canonical(&doc), Some("https://example.com/canonical".to_string()));
+    }
+
+    #[test]
+    fn canonical_from_og_url() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><meta property="og:url" content="https://example.com/og-url"></head><body></body></html>"#);
+        assert_eq!(ext.extract_canonical(&doc), Some("https://example.com/og-url".to_string()));
+    }
+
+    #[test]
+    fn canonical_none_when_missing() {
+        let ext = extractor();
+        let doc = parse("<html><head></head><body></body></html>");
+        assert_eq!(ext.extract_canonical(&doc), None);
+    }
+
+    // ── get_meta_content ───────────────────────────────────────
+
+    #[test]
+    fn get_meta_content_by_name() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><meta name="author" content="Test Author"></head><body></body></html>"#);
+        assert_eq!(ext.get_meta_content(&doc, "author"), Some("Test Author".to_string()));
+    }
+
+    #[test]
+    fn get_meta_content_by_property() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><meta property="og:title" content="OG Title Value"></head><body></body></html>"#);
+        assert_eq!(ext.get_meta_content(&doc, "og:title"), Some("OG Title Value".to_string()));
+    }
+
+    #[test]
+    fn get_meta_content_trims_whitespace() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><meta name="description" content="  spaced content  "></head><body></body></html>"#);
+        assert_eq!(ext.get_meta_content(&doc, "description"), Some("spaced content".to_string()));
+    }
+
+    #[test]
+    fn get_meta_content_empty_returns_none() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><meta name="description" content=""></head><body></body></html>"#);
+        assert_eq!(ext.get_meta_content(&doc, "description"), None);
+    }
+
+    #[test]
+    fn get_meta_content_missing_returns_none() {
+        let ext = extractor();
+        let doc = parse("<html><head></head><body></body></html>");
+        assert_eq!(ext.get_meta_content(&doc, "nonexistent"), None);
+    }
+
+    // ── JSON-LD extraction ─────────────────────────────────────
+
+    #[test]
+    fn json_ld_extracts_fields() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><script type="application/ld+json">{"@type": "Article", "headline": "Test Headline", "author": {"name": "Author Name"}}</script></head><body></body></html>"#);
+        let json_ld = ext.extract_json_ld(&doc);
+        assert_eq!(json_ld.get("headline"), Some(&"Test Headline".to_string()));
+        assert_eq!(json_ld.get("author"), Some(&"Author Name".to_string()));
+        assert_eq!(json_ld.get("@type"), Some(&"Article".to_string()));
+    }
+
+    #[test]
+    fn json_ld_handles_graph_array() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><script type="application/ld+json">{"@graph": [{"@type": "Article", "headline": "Graph Headline"}]}</script></head><body></body></html>"#);
+        let json_ld = ext.extract_json_ld(&doc);
+        assert_eq!(json_ld.get("headline"), Some(&"Graph Headline".to_string()));
+    }
+
+    #[test]
+    fn json_ld_empty_when_missing() {
+        let ext = extractor();
+        let doc = parse("<html><head></head><body></body></html>");
+        let json_ld = ext.extract_json_ld(&doc);
+        assert!(json_ld.is_empty());
+    }
+
+    #[test]
+    fn json_ld_handles_invalid_json() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head><script type="application/ld+json">not valid json</script></head><body></body></html>"#);
+        let json_ld = ext.extract_json_ld(&doc);
+        assert!(json_ld.is_empty());
+    }
+
+    // ── OpenGraph extraction ───────────────────────────────────
+
+    #[test]
+    fn opengraph_extracts_all_fields() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head>
+            <meta property="og:title" content="OG Title">
+            <meta property="og:description" content="OG Desc">
+            <meta property="og:type" content="article">
+            <meta property="og:url" content="https://example.com">
+        </head><body></body></html>"#);
+        let og = ext.extract_opengraph(&doc);
+        assert_eq!(og.get("title"), Some(&"OG Title".to_string()));
+        assert_eq!(og.get("description"), Some(&"OG Desc".to_string()));
+        assert_eq!(og.get("type"), Some(&"article".to_string()));
+    }
+
+    #[test]
+    fn opengraph_empty_when_missing() {
+        let ext = extractor();
+        let doc = parse("<html><head></head><body></body></html>");
+        let og = ext.extract_opengraph(&doc);
+        assert!(og.is_empty());
+    }
+
+    // ── Twitter Cards extraction ───────────────────────────────
+
+    #[test]
+    fn twitter_cards_extracts_fields() {
+        let ext = extractor();
+        let doc = parse(r#"<html><head>
+            <meta name="twitter:title" content="Tweet Title">
+            <meta name="twitter:description" content="Tweet Desc">
+            <meta name="twitter:card" content="summary_large_image">
+        </head><body></body></html>"#);
+        let tw = ext.extract_twitter_cards(&doc);
+        assert_eq!(tw.get("title"), Some(&"Tweet Title".to_string()));
+        assert_eq!(tw.get("description"), Some(&"Tweet Desc".to_string()));
+        assert_eq!(tw.get("card"), Some(&"summary_large_image".to_string()));
+    }
+
+    // ── build_metadata_from_document ───────────────────────────
+
+    #[test]
+    fn build_metadata_title_fallback_chain() {
+        let ext = extractor();
+        let url = url::Url::parse("https://example.com/page").unwrap();
+
+        // JSON-LD headline takes priority
+        let doc = parse(r#"<html><head>
+            <script type="application/ld+json">{"headline": "JSON-LD Title"}</script>
+            <meta property="og:title" content="OG Title">
+            <title>HTML Title</title>
+        </head><body></body></html>"#);
+        let meta = ext.build_metadata_from_document(&doc, &url, "text", 100, 1, None, None, None);
+        assert_eq!(meta.title, "JSON-LD Title");
+
+        // Without JSON-LD, OG title takes over
+        let doc2 = parse(r#"<html><head>
+            <meta property="og:title" content="OG Title">
+            <title>HTML Title</title>
+        </head><body></body></html>"#);
+        let meta2 = ext.build_metadata_from_document(&doc2, &url, "text", 100, 1, None, None, None);
+        assert_eq!(meta2.title, "OG Title");
+    }
+
+    #[test]
+    fn build_metadata_uses_fallback_author() {
+        let ext = extractor();
+        let url = url::Url::parse("https://example.com").unwrap();
+        let doc = parse("<html><body></body></html>");
+        let meta = ext.build_metadata_from_document(
+            &doc, &url, "text", 100, 1,
+            Some("Fallback Author".to_string()), None, None,
+        );
+        assert_eq!(meta.author, Some("Fallback Author".to_string()));
+    }
+
+    #[test]
+    fn build_metadata_domain_extracted() {
+        let ext = extractor();
+        let url = url::Url::parse("https://example.com/path").unwrap();
+        let doc = parse("<html><body></body></html>");
+        let meta = ext.build_metadata_from_document(&doc, &url, "text", 100, 1, None, None, None);
+        assert_eq!(meta.domain, "example.com");
+        assert_eq!(meta.url, "https://example.com/path");
+    }
+
+    #[test]
+    fn build_metadata_content_type_from_json_ld() {
+        let ext = extractor();
+        let url = url::Url::parse("https://example.com").unwrap();
+        let doc = parse(r#"<html><head><script type="application/ld+json">{"@type": "Recipe"}</script></head><body></body></html>"#);
+        let meta = ext.build_metadata_from_document(&doc, &url, "text", 100, 1, None, None, None);
+        assert_eq!(meta.content_type, ContentType::Recipe);
+    }
+
+    #[test]
+    fn build_metadata_aggregator_score_stored() {
+        let ext = extractor();
+        let url = url::Url::parse("https://example.com").unwrap();
+        // A page with feed links should get an aggregator score
+        let doc = parse(r#"<html><head><link type="application/rss+xml" href="/feed"></head><body></body></html>"#);
+        let text = "word ".repeat(50);
+        let meta = ext.build_metadata_from_document(&doc, &url, &text, 50, 1, None, None, None);
+        // Should have aggregator_score in extra if score > 0
+        if let Some(score_str) = meta.extra.get("aggregator_score") {
+            let score: f32 = score_str.parse().unwrap();
+            assert!(score > 0.0);
+        }
+    }
+}

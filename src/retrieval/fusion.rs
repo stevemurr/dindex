@@ -143,18 +143,18 @@ pub fn normalize_bm25_scores(results: &mut [(ChunkId, f32)]) {
     }
 }
 
-/// Convert raw search results to ranked results
+/// Convert raw search results to ranked results, consuming the input to avoid cloning chunk IDs.
 pub fn to_ranked_results(
-    results: &[(ChunkId, f32)],
+    results: Vec<(ChunkId, f32)>,
     method: RetrievalMethod,
 ) -> Vec<RankedResult> {
     results
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(rank, (chunk_id, score))| RankedResult {
-            chunk_id: chunk_id.clone(),
+            chunk_id,
             rank: rank + 1, // 1-indexed ranks
-            original_score: *score,
+            original_score: score,
             method,
         })
         .collect()
@@ -316,7 +316,7 @@ mod tests {
             ("c3".to_string(), 0.5f32),
         ];
 
-        let ranked = to_ranked_results(&raw, RetrievalMethod::Dense);
+        let ranked = to_ranked_results(raw, RetrievalMethod::Dense);
 
         assert_eq!(ranked.len(), 3);
         // Ranks should be 1-indexed
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn test_to_ranked_results_empty() {
         let raw: Vec<(String, f32)> = vec![];
-        let ranked = to_ranked_results(&raw, RetrievalMethod::Bm25);
+        let ranked = to_ranked_results(raw, RetrievalMethod::Bm25);
         assert!(ranked.is_empty());
     }
 

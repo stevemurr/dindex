@@ -7,7 +7,7 @@ use axum::{
     Json,
 };
 
-use super::AppState;
+use super::{ipc_error, unexpected_response, AppState};
 use crate::daemon::http::types::*;
 use crate::daemon::protocol::{Request, Response as IpcResponse};
 
@@ -44,16 +44,8 @@ pub async fn status(State(state): State<AppState>) -> impl IntoResponse {
             }),
         )
             .into_response(),
-        IpcResponse::Error { code, message } => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new(format!("{:?}", code), message)),
-        )
-            .into_response(),
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal_error("Unexpected response type")),
-        )
-            .into_response(),
+        IpcResponse::Error { code, message } => ipc_error(code, message),
+        _ => unexpected_response(),
     }
 }
 
@@ -71,15 +63,7 @@ pub async fn stats(State(state): State<AppState>) -> impl IntoResponse {
             }),
         )
             .into_response(),
-        IpcResponse::Error { code, message } => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new(format!("{:?}", code), message)),
-        )
-            .into_response(),
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal_error("Unexpected response type")),
-        )
-            .into_response(),
+        IpcResponse::Error { code, message } => ipc_error(code, message),
+        _ => unexpected_response(),
     }
 }
