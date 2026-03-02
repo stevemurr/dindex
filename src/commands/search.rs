@@ -46,7 +46,7 @@ pub async fn search_index(
     let engine = init_embedding_engine(&config)
         .context("Failed to initialize embedding engine")?;
 
-    let stack = IndexStack::open(&config)?;
+    let stack = IndexStack::open_read_only(&config)?;
     let retriever = Arc::new(stack.retriever(None, config.retrieval.clone()));
 
     // Create query

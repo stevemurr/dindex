@@ -1,7 +1,7 @@
 //! IPC Protocol Types
 //!
 //! Defines the request/response types for daemon-client communication.
-//! Uses length-prefixed binary protocol with bincode serialization.
+//! Uses length-prefixed protocol with JSON serialization.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -328,7 +328,7 @@ pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024; // 64MB max message
 
 /// Encode a message to bytes with length prefix
 pub fn encode_message<T: Serialize>(msg: &T) -> anyhow::Result<Vec<u8>> {
-    let payload = bincode::serialize(msg)?;
+    let payload = serde_json::to_vec(msg)?;
     if payload.len() > MAX_MESSAGE_SIZE {
         anyhow::bail!("Message too large: {} bytes", payload.len());
     }
@@ -341,7 +341,7 @@ pub fn encode_message<T: Serialize>(msg: &T) -> anyhow::Result<Vec<u8>> {
 
 /// Decode a message from bytes (after length prefix is read)
 pub fn decode_message<T: for<'de> Deserialize<'de>>(data: &[u8]) -> anyhow::Result<T> {
-    Ok(bincode::deserialize(data)?)
+    Ok(serde_json::from_slice(data)?)
 }
 
 #[cfg(test)]
@@ -377,5 +377,67 @@ mod tests {
         let encoded = encode_message(&resp).unwrap();
         let decoded: Response = decode_message(&encoded[4..]).unwrap();
         assert!(matches!(decoded, Response::Ok));
+    }
+
+    #[test]
+    fn test_search_result_with_score_breakdown_roundtrip() {
+        use crate::retrieval::{RetrievalMethod, ScoreBreakdown, NormalizedScore};
+        use crate::types::{Chunk, ChunkMetadata};
+        use std::collections::HashMap;
+
+        // Build a SearchResult with a populated ScoreBreakdown — this is the
+        // exact scenario that broke with bincode + skip_serializing_if.
+        let chunk = Chunk {
+            metadata: ChunkMetadata::new("chunk-1".to_string(), "doc-1".to_string()),
+            content: "test content".to_string(),
+            token_count: 2,
+        };
+        let result = SearchResult {
+            chunk,
+            relevance_score: 0.85,
+            node_id: None,
+            matched_by: vec![RetrievalMethod::Dense, RetrievalMethod::Bm25],
+            score_breakdown: Some(ScoreBreakdown {
+                dense_similarity: Some(NormalizedScore::new(0.9)),
+                bm25_raw: Some(3.5),
+                bm25_normalized: Some(NormalizedScore::new(0.7)),
+                rrf_score: Some(NormalizedScore::new(0.85)),
+                aggregator_multiplier: None,
+                reranker_score: None,
+                methods: vec![RetrievalMethod::Dense, RetrievalMethod::Bm25],
+                rank_per_method: {
+                    let mut m = HashMap::new();
+                    m.insert("dense".to_string(), 1);
+                    m.insert("bm25".to_string(), 3);
+                    m
+                },
+            }),
+        };
+
+        let resp = Response::SearchResults {
+            results: vec![result],
+            query_time_ms: 42,
+        };
+
+        let encoded = encode_message(&resp).unwrap();
+        let decoded: Response = decode_message(&encoded[4..]).unwrap();
+
+        match decoded {
+            Response::SearchResults { results, query_time_ms } => {
+                assert_eq!(query_time_ms, 42);
+                assert_eq!(results.len(), 1);
+                let r = &results[0];
+                assert_eq!(r.relevance_score, 0.85);
+                assert_eq!(r.matched_by.len(), 2);
+                let bd = r.score_breakdown.as_ref().unwrap();
+                assert!(bd.dense_similarity.is_some());
+                assert!(bd.bm25_raw.is_some());
+                assert!(bd.aggregator_multiplier.is_none());
+                assert!(bd.reranker_score.is_none());
+                assert_eq!(bd.methods.len(), 2);
+                assert_eq!(bd.rank_per_method["dense"], 1);
+            }
+            _ => panic!("Wrong response type"),
+        }
     }
 }

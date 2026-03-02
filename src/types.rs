@@ -269,7 +269,11 @@ pub struct SearchResult {
     /// Which retrieval methods matched
     pub matched_by: Vec<crate::retrieval::RetrievalMethod>,
     /// Optional detailed breakdown of how the score was computed
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // NOTE: Do NOT add skip_serializing_if here — SearchResult is shared with
+    // P2P network messages (src/network/messages.rs) which use bincode
+    // (non-self-describing), where skipping fields corrupts the byte stream.
+    // IPC now uses JSON so ScoreBreakdown's own skip_serializing_if is safe.
+    #[serde(default)]
     pub score_breakdown: Option<crate::retrieval::ScoreBreakdown>,
 }
 

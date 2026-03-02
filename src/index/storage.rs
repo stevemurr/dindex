@@ -36,6 +36,19 @@ impl ChunkStorage {
         Self::open(data_dir)
     }
 
+    /// Create an empty in-memory chunk storage (no file lock acquired).
+    ///
+    /// Use this when the on-disk storage is locked by another process (e.g.,
+    /// the daemon) and only read access to vector/BM25 indexes is needed.
+    /// Search results will have empty chunk content.
+    pub fn new_in_memory() -> Result<Self> {
+        let config = sled::Config::new().temporary(true);
+        let db = config.open().context("Failed to create temporary sled database")?;
+        let doc_index = db.open_tree("doc_index").context("Failed to open doc_index tree")?;
+        let url_index = db.open_tree("url_index").context("Failed to open url_index tree")?;
+        Ok(Self { db, doc_index, url_index })
+    }
+
     /// Load storage from disk (automatically migrates from JSON if needed)
     pub fn load(data_dir: impl AsRef<Path>) -> Result<Self> {
         let data_dir = data_dir.as_ref();

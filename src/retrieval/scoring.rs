@@ -51,6 +51,9 @@ impl From<NormalizedScore> for f32 {
 ///
 /// Attached optionally to `SearchResult` for debugging and transparency.
 /// Each field records the contribution of one scoring stage.
+// NOTE: skip_serializing_if is safe here because IPC uses JSON (self-describing).
+// P2P bincode never encounters ScoreBreakdown because SearchResult.score_breakdown
+// is always None for network-transmitted results (and has #[serde(default)] there).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScoreBreakdown {

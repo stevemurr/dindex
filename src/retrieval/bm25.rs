@@ -19,7 +19,7 @@ use tracing::debug;
 pub struct Bm25Index {
     index: Index,
     reader: IndexReader,
-    writer: parking_lot::Mutex<IndexWriter>,
+    writer: Option<parking_lot::Mutex<IndexWriter>>,
     schema: Bm25Schema,
 }
 
@@ -54,7 +54,7 @@ impl Bm25Index {
         Ok(Self {
             index,
             reader,
-            writer: parking_lot::Mutex::new(writer),
+            writer: Some(parking_lot::Mutex::new(writer)),
             schema: fields,
         })
     }
@@ -77,7 +77,30 @@ impl Bm25Index {
         Ok(Self {
             index,
             reader,
-            writer: parking_lot::Mutex::new(writer),
+            writer: Some(parking_lot::Mutex::new(writer)),
+            schema: fields,
+        })
+    }
+
+    /// Open an existing BM25 index in read-only mode (no IndexWriter lock acquired).
+    ///
+    /// Use this when only search is needed (e.g., CLI search fallback while the
+    /// daemon holds the write lock). Write operations will return an error.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let (_schema, fields) = Self::build_schema();
+        let dir = MmapDirectory::open(path)?;
+        let index = Index::open(dir)?;
+
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()?;
+
+        Ok(Self {
+            index,
+            reader,
+            writer: None,
             schema: fields,
         })
     }
@@ -101,6 +124,13 @@ impl Bm25Index {
         (schema, fields)
     }
 
+    /// Get the writer, or error if in read-only mode.
+    fn writer(&self) -> Result<&parking_lot::Mutex<IndexWriter>> {
+        self.writer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("BM25 index is open in read-only mode"))
+    }
+
     /// Add a chunk to the index
     pub fn add(&self, chunk: &Chunk) -> Result<()> {
         let mut doc = TantivyDocument::new();
@@ -112,13 +142,13 @@ impl Bm25Index {
             doc.add_text(self.schema.title, title);
         }
 
-        self.writer.lock().add_document(doc)?;
+        self.writer()?.lock().add_document(doc)?;
         Ok(())
     }
 
     /// Commit pending changes
     pub fn commit(&self) -> Result<()> {
-        self.writer.lock().commit()?;
+        self.writer()?.lock().commit()?;
         // Force reader reload to see committed changes immediately
         self.reader.reload()?;
         Ok(())
@@ -163,13 +193,13 @@ impl Bm25Index {
     /// Delete a chunk by ID
     pub fn delete(&self, chunk_id: &str) -> Result<()> {
         let term = tantivy::Term::from_field_text(self.schema.chunk_id, chunk_id);
-        self.writer.lock().delete_term(term);
+        self.writer()?.lock().delete_term(term);
         Ok(())
     }
 
     /// Delete all documents and commit
     pub fn clear(&self) -> Result<()> {
-        self.writer.lock().delete_all_documents()?;
+        self.writer()?.lock().delete_all_documents()?;
         self.commit()?;
         Ok(())
     }
@@ -307,5 +337,46 @@ mod tests {
         assert!(index.search("c#", 10).is_ok());
         assert!(index.search("\"unclosed quote", 10).is_ok());
         assert!(index.search("field:value AND OR", 10).is_ok());
+    }
+
+    #[test]
+    fn test_bm25_read_only_search_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let bm25_path = dir.path().join("bm25");
+
+        // Write some data with a normal (writable) index
+        {
+            let index = Bm25Index::new(&bm25_path).unwrap();
+            let chunk = make_chunk("chunk1", "doc1", "rust programming language");
+            index.add(&chunk).unwrap();
+            index.commit().unwrap();
+        }
+        // Writer is dropped here, releasing the lock
+
+        // Open in read-only mode and search
+        let ro_index = Bm25Index::open_read_only(&bm25_path).unwrap();
+        let results = ro_index.search("rust programming", 10).unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].chunk_id, "chunk1");
+    }
+
+    #[test]
+    fn test_bm25_read_only_rejects_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let bm25_path = dir.path().join("bm25");
+
+        // Create the index first so open_read_only has something to open
+        {
+            let index = Bm25Index::new(&bm25_path).unwrap();
+            index.commit().unwrap();
+        }
+
+        let ro_index = Bm25Index::open_read_only(&bm25_path).unwrap();
+        let chunk = make_chunk("chunk1", "doc1", "test content");
+
+        assert!(ro_index.add(&chunk).is_err());
+        assert!(ro_index.delete("chunk1").is_err());
+        assert!(ro_index.clear().is_err());
+        assert!(ro_index.commit().is_err());
     }
 }
