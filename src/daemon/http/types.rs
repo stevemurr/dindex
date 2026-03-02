@@ -213,6 +213,62 @@ pub struct ErrorResponse {
     pub message: String,
 }
 
+// ============ Cluster Types ============
+
+/// Cluster request body
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterRequest {
+    /// Document URLs to cluster
+    pub document_urls: Vec<String>,
+    /// Maximum number of clusters to generate (default: 10)
+    #[serde(default = "default_max_clusters")]
+    pub max_clusters: usize,
+    /// Whether to include document summaries in the response (default: true)
+    #[serde(default = "default_include_summaries")]
+    pub include_summaries: bool,
+}
+
+fn default_max_clusters() -> usize {
+    10
+}
+
+fn default_include_summaries() -> bool {
+    true
+}
+
+/// A cluster in the response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterJson {
+    /// Cluster identifier
+    pub cluster_id: String,
+    /// Human-readable label
+    pub label: String,
+    /// URLs belonging to this cluster
+    pub document_urls: Vec<String>,
+}
+
+/// Document metadata in the cluster response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterDocumentJson {
+    /// Document title if available
+    pub title: Option<String>,
+    /// First ~200 chars of document content
+    pub snippet: String,
+}
+
+/// Cluster response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterResponse {
+    /// Clusters found
+    pub clusters: Vec<ClusterJson>,
+    /// Document metadata keyed by URL
+    pub documents: std::collections::HashMap<String, ClusterDocumentJson>,
+    /// URLs that were not found in the index
+    pub unmatched_urls: Vec<String>,
+    /// Time taken to cluster in milliseconds
+    pub cluster_time_ms: u64,
+}
+
 // ============ Scrape Types ============
 
 /// Scrape request body

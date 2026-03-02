@@ -2,6 +2,7 @@
 //!
 //! Dispatches incoming requests to the appropriate service and returns responses.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -122,6 +123,12 @@ impl RequestHandler {
                 self.handle_scrape_start(urls, options).await
             }
             Request::ScrapeCancel { job_id } => self.handle_job_cancel(job_id).await,
+
+            // Cluster operations
+            Request::ClusterDocuments {
+                document_urls,
+                max_clusters,
+            } => self.handle_cluster_documents(document_urls, max_clusters).await,
 
             // Delete operations
             Request::DeleteDocuments { document_ids } => {
@@ -400,6 +407,74 @@ impl RequestHandler {
         }
     }
 
+    // ============ Cluster Handlers ============
+
+    async fn handle_cluster_documents(
+        &self,
+        document_urls: Vec<String>,
+        max_clusters: usize,
+    ) -> Response {
+        let start = Instant::now();
+
+        match self.index_manager.cluster_documents(&document_urls, max_clusters) {
+            Ok(result) => {
+                // Group matched docs by cluster assignment
+                let num_clusters = result
+                    .assignments
+                    .iter()
+                    .copied()
+                    .max()
+                    .map(|m| m + 1)
+                    .unwrap_or(0)
+                    .max(if result.matched_docs.is_empty() { 0 } else { 1 });
+
+                let mut cluster_urls: Vec<Vec<String>> = vec![Vec::new(); num_clusters];
+                let mut documents = HashMap::new();
+
+                for (i, doc) in result.matched_docs.iter().enumerate() {
+                    let cluster_idx = result.assignments[i];
+                    if cluster_idx < num_clusters {
+                        cluster_urls[cluster_idx].push(doc.url.clone());
+                    }
+                    documents.insert(
+                        doc.url.clone(),
+                        DocumentInfo {
+                            title: doc.title.clone(),
+                            snippet: doc.snippet.clone(),
+                        },
+                    );
+                }
+
+                let clusters: Vec<ClusterInfo> = cluster_urls
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, urls)| !urls.is_empty())
+                    .map(|(i, urls)| {
+                        let label = generate_cluster_label(&urls, &documents);
+                        ClusterInfo {
+                            cluster_id: format!("cluster_{}", i),
+                            label,
+                            document_urls: urls,
+                        }
+                    })
+                    .collect();
+
+                let cluster_time_ms = start.elapsed().as_millis() as u64;
+
+                Response::ClusterResults {
+                    clusters,
+                    documents,
+                    unmatched_urls: result.unmatched_urls,
+                    cluster_time_ms,
+                }
+            }
+            Err(e) => {
+                error!("Cluster failed: {}", e);
+                Response::error(ErrorCode::ClusterFailed, e.to_string())
+            }
+        }
+    }
+
     // ============ Management Handlers ============
 
     async fn handle_status(&self) -> Response {
@@ -467,6 +542,74 @@ impl RequestHandler {
         super::metrics::get_memory_usage()
             .map(|bytes| bytes / (1024 * 1024))
             .unwrap_or(0)
+    }
+}
+
+/// Stop words to skip when extracting title keywords
+const LABEL_STOP_WORDS: &[&str] = &[
+    "the", "and", "for", "that", "this", "with", "from", "are", "was", "were",
+    "been", "being", "have", "has", "had", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "not", "but", "yet", "also", "just",
+    "than", "then", "into", "over", "such", "its", "our", "their", "your", "his",
+    "her", "about", "between", "through", "during", "before", "after",
+];
+
+/// Generate a heuristic label for a cluster from its document URLs and metadata
+fn generate_cluster_label(urls: &[String], documents: &HashMap<String, DocumentInfo>) -> String {
+    // Collect titles and domains
+    let mut domain_counts: HashMap<String, usize> = HashMap::new();
+    let mut title_words: HashMap<String, usize> = HashMap::new();
+
+    for url in urls {
+        // Extract domain
+        if let Ok(parsed) = url::Url::parse(url) {
+            if let Some(host) = parsed.host_str() {
+                *domain_counts.entry(host.to_string()).or_default() += 1;
+            }
+        }
+
+        // Extract title keywords
+        if let Some(doc) = documents.get(url) {
+            if let Some(title) = &doc.title {
+                for word in title.split_whitespace() {
+                    let clean: String = word.chars().filter(|c| c.is_alphanumeric()).collect();
+                    let lower = clean.to_lowercase();
+                    if lower.len() >= 4 && !LABEL_STOP_WORDS.contains(&lower.as_str()) {
+                        *title_words.entry(lower).or_default() += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Top 2 keywords from titles, sorted by frequency then alphabetically
+    let mut word_vec: Vec<_> = title_words.into_iter().collect();
+    word_vec.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let keywords: Vec<String> = word_vec
+        .into_iter()
+        .take(2)
+        .map(|(w, _)| title_case(&w))
+        .collect();
+
+    if !keywords.is_empty() {
+        return keywords.join(" ");
+    }
+
+    // Fall back to most common domain
+    if let Some((domain, _)) = domain_counts.into_iter().max_by_key(|(_, c)| *c) {
+        return domain;
+    }
+
+    "Uncategorized".to_string()
+}
+
+/// Title-case a word (first letter uppercase, rest lowercase)
+fn title_case(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + &chars.as_str().to_lowercase(),
     }
 }
 

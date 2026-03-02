@@ -25,6 +25,8 @@ pub fn create_router(app_state: AppState, auth_state: AuthState) -> Router {
         .route("/index/commit", post(handlers::commit))
         .route("/index/clear", post(handlers::clear_index))
         .route("/documents", delete(handlers::delete_documents))
+        // Cluster routes
+        .route("/cluster", post(handlers::cluster_documents))
         // Scrape routes
         .route("/scrape", post(handlers::start_scrape))
         .route("/jobs/:job_id", get(handlers::get_job_progress))

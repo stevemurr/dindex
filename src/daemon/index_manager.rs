@@ -15,7 +15,9 @@ use crate::config::Config;
 use crate::embedding::{generate_embedding, EmbeddingEngine};
 use crate::index::{ChunkStorage, IndexStack, VectorIndex};
 use crate::retrieval::{Bm25Index, HybridIndexer, HybridRetriever};
+use crate::routing::CentroidGenerator;
 use crate::types::{Chunk, Query, QueryFilters, SearchResult};
+use crate::util::{normalize_in_place, truncate_str};
 
 use super::protocol::IndexStats;
 
@@ -248,6 +250,79 @@ impl IndexManager {
         })
     }
 
+    /// Cluster documents by their stored embeddings
+    pub fn cluster_documents(
+        &self,
+        document_urls: &[String],
+        max_clusters: usize,
+    ) -> Result<ClusterDocumentsResult> {
+        let mut matched_docs = Vec::new();
+        let mut unmatched_urls = Vec::new();
+        let mut doc_embeddings = Vec::new();
+
+        for url in document_urls {
+            let doc_id = match self.chunk_storage.find_document_id_by_url(url) {
+                Some(id) => id,
+                None => {
+                    unmatched_urls.push(url.clone());
+                    continue;
+                }
+            };
+
+            let stored_chunks = self.chunk_storage.get_by_document(&doc_id);
+            if stored_chunks.is_empty() {
+                unmatched_urls.push(url.clone());
+                continue;
+            }
+
+            // Average chunk embeddings into a document-level embedding
+            let dim = stored_chunks[0].embedding.len();
+            let mut avg = vec![0.0f32; dim];
+            for sc in &stored_chunks {
+                for (j, &val) in sc.embedding.iter().enumerate() {
+                    if j < dim {
+                        avg[j] += val;
+                    }
+                }
+            }
+            let n = stored_chunks.len() as f32;
+            for val in avg.iter_mut() {
+                *val /= n;
+            }
+            normalize_in_place(&mut avg);
+
+            // Extract title from first chunk's metadata
+            let title = stored_chunks[0].chunk.metadata.source_title.clone();
+            let snippet = truncate_str(&stored_chunks[0].chunk.content, 200).into_owned();
+
+            doc_embeddings.push(avg);
+            matched_docs.push(MatchedDocument {
+                url: url.clone(),
+                doc_id,
+                title,
+                snippet,
+            });
+        }
+
+        // Run k-means clustering on document embeddings
+        let cluster_result = if matched_docs.len() <= 1 {
+            // Single or no documents — trivial assignment
+            crate::routing::ClusterResult {
+                centroids: Vec::new(),
+                assignments: vec![0; matched_docs.len()],
+            }
+        } else {
+            let generator = CentroidGenerator::new(max_clusters);
+            generator.generate_with_assignments(&doc_embeddings)
+        };
+
+        Ok(ClusterDocumentsResult {
+            matched_docs,
+            assignments: cluster_result.assignments,
+            unmatched_urls,
+        })
+    }
+
     /// Get the number of pending (uncommitted) chunks
     pub fn pending_count(&self) -> usize {
         *self.pending_count.read()
@@ -314,6 +389,21 @@ impl IndexManager {
             .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
             .sum()
     }
+}
+
+/// A document matched by URL in cluster_documents()
+pub struct MatchedDocument {
+    pub url: String,
+    pub doc_id: String,
+    pub title: Option<String>,
+    pub snippet: String,
+}
+
+/// Result of cluster_documents()
+pub struct ClusterDocumentsResult {
+    pub matched_docs: Vec<MatchedDocument>,
+    pub assignments: Vec<usize>,
+    pub unmatched_urls: Vec<String>,
 }
 
 #[cfg(test)]

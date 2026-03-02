@@ -8,6 +8,12 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use tracing::{debug, info};
 
+/// Result of k-means clustering including both centroids and per-point assignments
+pub struct ClusterResult {
+    pub centroids: Vec<NodeCentroid>,
+    pub assignments: Vec<usize>,
+}
+
 /// Centroid generator using k-means clustering
 pub struct CentroidGenerator {
     num_centroids: usize,
@@ -26,13 +32,24 @@ impl CentroidGenerator {
 
     /// Generate centroids from embeddings using k-means++
     pub fn generate(&self, embeddings: &[Embedding]) -> Vec<NodeCentroid> {
+        self.generate_with_assignments(embeddings).centroids
+    }
+
+    /// Generate centroids and return per-point cluster assignments
+    pub fn generate_with_assignments(&self, embeddings: &[Embedding]) -> ClusterResult {
         if embeddings.is_empty() {
-            return Vec::new();
+            return ClusterResult {
+                centroids: Vec::new(),
+                assignments: Vec::new(),
+            };
         }
 
         let k = self.num_centroids.min(embeddings.len());
         if k == 0 {
-            return Vec::new();
+            return ClusterResult {
+                centroids: Vec::new(),
+                assignments: vec![0; embeddings.len()],
+            };
         }
 
         info!("Generating {} centroids from {} embeddings", k, embeddings.len());
@@ -107,7 +124,7 @@ impl CentroidGenerator {
         }
 
         // Build NodeCentroid results
-        centroids
+        let node_centroids = centroids
             .into_iter()
             .enumerate()
             .filter(|(i, _)| centroid_counts[*i] > 0)
@@ -116,7 +133,12 @@ impl CentroidGenerator {
                 embedding: centroid,
                 chunk_count: centroid_counts[i],
             })
-            .collect()
+            .collect();
+
+        ClusterResult {
+            centroids: node_centroids,
+            assignments,
+        }
     }
 
     /// Initialize centroids using k-means++ algorithm
@@ -324,5 +346,45 @@ mod tests {
             centroids.is_empty(),
             "Empty embeddings should produce no centroids"
         );
+    }
+
+    #[test]
+    fn test_generate_with_assignments() {
+        let generator = CentroidGenerator::new(3);
+
+        // Create clustered embeddings
+        let mut embeddings = Vec::new();
+        for _ in 0..10 {
+            embeddings.push(vec![1.0, 0.0, 0.0]);
+        }
+        for _ in 0..10 {
+            embeddings.push(vec![0.0, 1.0, 0.0]);
+        }
+        for _ in 0..10 {
+            embeddings.push(vec![0.0, 0.0, 1.0]);
+        }
+
+        let result = generator.generate_with_assignments(&embeddings);
+
+        // Assignment vector length matches input
+        assert_eq!(result.assignments.len(), embeddings.len());
+
+        // All assignment indices are valid (< number of requested centroids)
+        let k = 3;
+        for &a in &result.assignments {
+            assert!(a < k, "Assignment index {} out of range for k={}", a, k);
+        }
+
+        // Should produce 3 centroids
+        assert_eq!(result.centroids.len(), 3);
+    }
+
+    #[test]
+    fn test_generate_with_assignments_empty() {
+        let generator = CentroidGenerator::new(3);
+        let embeddings: Vec<Vec<f32>> = Vec::new();
+        let result = generator.generate_with_assignments(&embeddings);
+        assert!(result.centroids.is_empty());
+        assert!(result.assignments.is_empty());
     }
 }

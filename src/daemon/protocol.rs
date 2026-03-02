@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use std::collections::HashMap;
+
 use crate::types::{Chunk, ChunkMetadata, QueryFilters, SearchResult};
 use super::metrics::MetricsSnapshot;
 
@@ -137,6 +139,13 @@ pub enum Request {
     /// Cancel a running scrape job
     ScrapeCancel { job_id: Uuid },
 
+    // ============ Cluster Operations ============
+    /// Cluster documents by their stored embeddings
+    ClusterDocuments {
+        document_urls: Vec<String>,
+        max_clusters: usize,
+    },
+
     // ============ Management Operations ============
     /// Check if daemon is running (ping)
     Ping,
@@ -232,6 +241,21 @@ pub struct IndexStats {
     pub storage_size_bytes: u64,
 }
 
+/// Info about a single cluster
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterInfo {
+    pub cluster_id: String,
+    pub label: String,
+    pub document_urls: Vec<String>,
+}
+
+/// Metadata for a matched document
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentInfo {
+    pub title: Option<String>,
+    pub snippet: String,
+}
+
 /// Error codes for response errors
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ErrorCode {
@@ -245,6 +269,7 @@ pub enum ErrorCode {
     InvalidRequest,
     ShuttingDown,
     StreamNotFound,
+    ClusterFailed,
 }
 
 /// Response types sent from daemon to client
@@ -289,6 +314,15 @@ pub enum Response {
 
     /// Daemon metrics snapshot
     Metrics { snapshot: MetricsSnapshot },
+
+    // ============ Cluster Responses ============
+    /// Cluster results
+    ClusterResults {
+        clusters: Vec<ClusterInfo>,
+        documents: HashMap<String, DocumentInfo>,
+        unmatched_urls: Vec<String>,
+        cluster_time_ms: u64,
+    },
 
     // ============ Delete Responses ============
     /// Delete operation completed

@@ -2,6 +2,7 @@
 //!
 //! Handlers that map HTTP requests to RequestHandler operations.
 
+mod cluster;
 mod index;
 mod jobs;
 mod search;
@@ -24,6 +25,7 @@ pub struct AppState {
 }
 
 // Re-export all handlers
+pub use cluster::cluster_documents;
 pub use index::{clear_index, commit, delete_documents, index_documents};
 pub use jobs::{cancel_job, get_job_progress, job_events_sse, start_scrape};
 pub use search::search;
